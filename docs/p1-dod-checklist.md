@@ -68,7 +68,8 @@
 ## E. 工程门禁（质量基线不降）
 
 - [x] **E1** `ruff check` / `ruff format --check` 0 issue；`mypy` 通过（strict 留 P6，逐阶段爬坡）。
-- [ ] **E2** CI（3.10/3.12 矩阵）全绿。（状态：四道门禁本地全绿，推送后在远端 CI 验证）
+- [x] **E2** CI（3.10/3.12 矩阵）全绿。（已验证 2026-10-30：run 41020553003 success，24s；
+      覆盖率以 pytest-cov 报告为准，本地 99%）
 - [x] **E3** 真实 OpenAI 集成测试用 `VCR`/mocked transport 进 CI（离线、确定性）；
       真实调用只跑在 examples，凭据走环境变量，不落库。
 - [x] **E4** CHANGELOG 更新：F 节所有语义决定 + 契约修订/扩展逐条标注破坏性/非破坏性。
