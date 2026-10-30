@@ -1,4 +1,4 @@
-"""Provider 抽象契约 v1.0.0：统一 sync / async / stream 三种调用形态。"""
+"""Provider 抽象契约 v1.1.0：统一 sync / async / stream 三种调用形态。"""
 
 from __future__ import annotations
 
@@ -8,15 +8,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from stableagent.core.state import Message
+from stableagent.core.state import Message, ToolCall
 
-
-class ToolCall(BaseModel):
-    """模型发起的一次工具调用请求。"""
-
-    id: str
-    name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
+__all__ = ["Message", "ToolCall", "ProviderResponse", "ProviderChunk", "Provider"]
 
 
 class ProviderResponse(BaseModel):

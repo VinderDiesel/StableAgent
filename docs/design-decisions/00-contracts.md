@@ -1,8 +1,8 @@
 # ADR-00：公共契约基线（Contract v1.0.0）
 
-- 状态：Accepted（P0 基线）
+- 状态：Accepted（P0 基线；P1 修订见文末记录，当前 CONTRACT_VERSION = 1.1.0）
 - 日期：2026-10-30
-- 代码入口：`stableagent/core/state.py`（`CONTRACT_VERSION = "1.0.0"`）
+- 代码入口：`stableagent/core/state.py`（`CONTRACT_VERSION = "1.1.0"`）
 
 ## 版本化与冻结规则（全局）
 
@@ -90,3 +90,23 @@
 - P1 `core/loop.py` 必须实现"状态外置 + 纯函数转移 + `pause()` 接入点"，否则违反契约三 → P2 无法只做持久化层。
 - P3 上下文组装经 loop 预留位点（默认 pass-through，`ContextConfig.assembly="passthrough"`）注入，不得修改 `core/loop.py`。
 - 二者均为 Phase 1 DoD 的硬性验收条目。
+
+## P1 修订记录（v1.0.0 -> v1.1.0，全部非破坏性）
+
+| 变更 | 类型 | 说明 |
+|------|------|------|
+| `EventType.PAUSED` 新成员 | 兼容扩展 | 暂停事件表达（决策 F5） |
+| `Message.tool_calls` | 新增字段（默认 `[]`） | assistant 消息携带工具调用，重放/恢复的前提 |
+| `AgentState.usage` | 新增字段（默认 `{}`） | 跨步 token 累计（P3 预算数据源，验收 D4） |
+| `ControlConfig.max_steps` | 新增字段（默认 10） | 超限 -> `error` + FAILED（决策 F2） |
+| `ToolCall` 移至 `core/state.py` | 位置调整 | `providers/base.py` 重导出，导入路径不变 |
+
+### P1 锁定的 loop 契约（P2 起冻结范围的组成部分）
+
+- F1：步转移接口 `AgentLoop.advance(state) -> (AgentState, list[Event])`；
+  事件引擎 `drive(state) -> AsyncIterator[(Event, AgentState)]`。
+- F3：`pause()` 步边界生效；非法态返回 False（no-op）；`resume()/aresume()` 无
+  PAUSED 态时抛 ValueError；暂停期间拒绝新任务（RuntimeError）。
+- F4：`done | error` 每次运行恰好一个且为流末尾（不变式）。
+- 组装位点：`ContextAssembler`（`context/assembly.py`，ASSEMBLERS 注册表）与
+  `ToolSelector`（loop 注入参数）——P3 经此接入，零修改 `core/loop.py`。

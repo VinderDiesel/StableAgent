@@ -1,4 +1,4 @@
-"""核心契约：Event / Message / AgentState / Config（契约 v1.0.0）。
+"""核心契约：Event / Message / AgentState / Config（契约 v1.1.0，P1 修订见 CHANGELOG）。
 
 版本与不变式规范见 docs/design-decisions/00-contracts.md。
 P2 起本模块字段只扩展不推翻；扩展形态 = 新增带默认值的可选字段 / 新增枚举成员。
@@ -11,18 +11,22 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
 
 
 class EventType(str, Enum):
-    """统一事件流类型。新增成员属于兼容性扩展。"""
+    """统一事件流类型。新增成员属于兼容性扩展（P1 新增 paused）。"""
 
     THINKING = "thinking"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     CHECKPOINT = "checkpoint"
+    PAUSED = "paused"
     ERROR = "error"
     DONE = "done"
+
+
+TERMINAL_EVENTS = frozenset({EventType.DONE, EventType.ERROR})
 
 
 class Event(BaseModel):
@@ -35,6 +39,18 @@ class Event(BaseModel):
     step: int = 0
 
 
+class ToolCall(BaseModel):
+    """模型发起的一次工具调用请求。
+
+    v1.1.0 起定义于本模块（Message.tool_calls 需要引用），
+    `stableagent.providers.base` 保留重导出，旧导入路径不变。
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
 class Message(BaseModel):
     """对话消息。工具结果通过 role='tool' + tool_call_id 关联回 ToolCall。"""
 
@@ -42,6 +58,7 @@ class Message(BaseModel):
     content: str
     name: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[ToolCall] = Field(default_factory=list)
 
 
 class AgentStatus(str, Enum):
@@ -67,6 +84,7 @@ class AgentState(BaseModel):
     status: AgentStatus = AgentStatus.PENDING
     step: int = 0
     messages: list[Message] = Field(default_factory=list)
+    usage: dict[str, int] = Field(default_factory=dict)
     error: str | None = None
 
     def snapshot(self) -> str:
@@ -112,6 +130,7 @@ class ControlConfig(BaseModel):
     max_total_tokens: int | None = None
     permission_hook: str = "allow_all"
     require_approval_tools: list[str] = Field(default_factory=list)
+    max_steps: int = 10
 
 
 class Config(BaseModel):

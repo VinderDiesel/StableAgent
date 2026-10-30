@@ -5,6 +5,7 @@ Phase 0 仅交付公共契约与可构造的 Agent 骨架；执行引擎在 Phas
 """
 
 from stableagent.core.agent import Agent
+from stableagent.core.loop import AgentLoop
 from stableagent.core.state import (
     CONTRACT_VERSION,
     AgentState,
@@ -13,8 +14,10 @@ from stableagent.core.state import (
     Event,
     EventType,
     Message,
+    ToolCall,
 )
 from stableagent.providers.base import Provider, ProviderChunk, ProviderResponse
+from stableagent.providers.openai import OpenAIProvider
 from stableagent.tools.registry import Evidence, Tool, ToolRegistry, ToolResult
 
 __version__ = "0.1.0"
@@ -22,6 +25,7 @@ __version__ = "0.1.0"
 __all__ = [
     "CONTRACT_VERSION",
     "Agent",
+    "AgentLoop",
     "AgentState",
     "AgentStatus",
     "Config",
@@ -31,8 +35,10 @@ __all__ = [
     "Provider",
     "ProviderChunk",
     "ProviderResponse",
+    "OpenAIProvider",
     "Evidence",
     "Tool",
+    "ToolCall",
     "ToolRegistry",
     "ToolResult",
     "__version__",
