@@ -155,3 +155,20 @@ async def test_http_error_propagates_for_loop_normalization() -> None:
     provider = _provider(lambda request: httpx.Response(429, json={"error": "rate"}))
     with pytest.raises(httpx.HTTPStatusError):
         await provider.acomplete([Message(role="user", content="q")])
+
+
+async def test_usage_with_nested_detail_objects_is_tolerated() -> None:
+    """网关常在 usage 里附带 *_details 嵌套对象，只累计数值字段。"""
+    payload = {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 5,
+            "total_tokens": 16,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
+    provider = _provider(lambda request: httpx.Response(200, json=payload))
+    response = await provider.acomplete([Message(role="user", content="q")])
+    assert response.usage == {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}

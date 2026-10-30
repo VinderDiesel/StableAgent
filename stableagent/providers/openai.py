@@ -184,5 +184,9 @@ def _parse_response(data: dict[str, Any]) -> ProviderResponse:
         )
         for tc in message.get("tool_calls") or []
     ]
-    usage = {str(key): int(value or 0) for key, value in (data.get("usage") or {}).items()}
+    usage = {
+        str(key): int(value)
+        for key, value in (data.get("usage") or {}).items()
+        if isinstance(value, (int, float))
+    }
     return ProviderResponse(content=message.get("content"), tool_calls=calls, usage=usage)
