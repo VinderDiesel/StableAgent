@@ -79,7 +79,7 @@
 **完成定义（DoD）**
 - 演示：运行中 kill 进程 → 重启 → 从最近 checkpoint 恢复并跑完。
 - 三种存储后端各有集成测试；恢复策略各有单测。
-- 产出 `docs/design-decisions/01-checkpoint.md`（一致性、并发、版本迁移策略）——这是"生产级"的硬证据。
+- 产出 `docs/design-decisions/02-checkpoint.md`（一致性、并发、版本迁移策略）——这是"生产级"的硬证据。
 
 ---
 

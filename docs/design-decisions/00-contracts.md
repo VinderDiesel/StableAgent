@@ -103,6 +103,8 @@
 
 ### P1 锁定的 loop 契约（P2 起冻结范围的组成部分）
 
+决策正文（理由、备选、后果）见 **ADR-01 `01-loop-runtime.md`**，此处仅存摘要索引：
+
 - F1：步转移接口 `AgentLoop.advance(state) -> (AgentState, list[Event])`；
   事件引擎 `drive(state) -> AsyncIterator[(Event, AgentState)]`。
 - F3：`pause()` 步边界生效；非法态返回 False（no-op）；`resume()/aresume()` 无
@@ -110,3 +112,9 @@
 - F4：`done | error` 每次运行恰好一个且为流末尾（不变式）。
 - 组装位点：`ContextAssembler`（`context/assembly.py`，ASSEMBLERS 注册表）与
   `ToolSelector`（loop 注入参数）——P3 经此接入，零修改 `core/loop.py`。
+
+## 关联 ADR
+
+- ADR-01：Loop 执行模型（P1）——`01-loop-runtime.md`
+- ADR-02：Checkpoint 机制（P2 交付时撰写）——`02-checkpoint.md`（预留编号）
+
