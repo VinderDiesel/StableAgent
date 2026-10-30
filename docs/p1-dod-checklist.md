@@ -20,9 +20,9 @@
 
 ## A. 功能验收（真实端到端）
 
-- [ ] **A1** `python examples/01_basic_research_agent.py` 用真实 OpenAI Provider 跑完一个 **≥3 步**
-      含工具调用的研究任务，退出码 0。（状态：脚本与语料已就绪，待 OPENAI_API_KEY 实跑；
-      离线等价验证见 02_loop_offline_demo.py，已跑通）
+- [x] **A1** `python examples/01_basic_research_agent.py` 用真实 OpenAI Provider 跑完一个 **≥3 步**
+      含工具调用的研究任务，退出码 0。（已验证 2026-10-30：3 步、2 文件读取、
+      usage 2038 tokens、status=succeeded；离线等价：02_loop_offline_demo.py）
 - [x] **A2** 事件流完整可打印：`tool_call` 与 `tool_result` 一一对应、`step` 单调不减、满足 F4。
 - [x] **A3** 三形态等价：同一 FakeProvider 任务下，`run` 与 `arun` 结果一致；`stream` 事件序列
       与 `run` 内部产生序列逐条一致（golden 对比测试）。

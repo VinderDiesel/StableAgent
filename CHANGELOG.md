@@ -37,6 +37,10 @@
 - CI（GitHub Actions）：ruff + mypy + pytest + coverage
 - 示例 `examples/00_agent_skeleton.py`：可导入、可构造、不执行
 
+### Fixed
+- `OpenAIProvider._parse_response`：网关 `usage` 含嵌套 `*_details` 对象时 `int()` 崩溃，
+  改为只累计数值字段（真实网关端到端 A1 验证时发现）
+
 ### 修订窗口约定
 - P0~P1：契约允许修订，必须在本文件记录并标注破坏性/非破坏性。
 - P2 起：契约冻结，只允许向后兼容扩展（新增带默认值的可选字段 / 新增枚举成员 / 新增配置节）。
