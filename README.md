@@ -299,7 +299,7 @@ enum members, new config sections).
 |---|---|---|
 | P0 | Contracts, package skeleton, CI | ✅ done |
 | P1 | Executable core: loop, OpenAI provider, tool loop, pause/resume | ✅ done |
-| P2 | Checkpoint & recovery: 3 backends, self-healing, snapshot versioning | ✅ done (33/34 — the CI-matrix re-run on push is the open item) |
+| P2 | Checkpoint & recovery: 3 backends, self-healing, snapshot versioning | ✅ done — 34/34, CI matrix green on 3.10 & 3.12 |
 | P3 | Context engineering: compression, dynamic capability view, token budget | 🔜 next |
 | P4 | Planning & SubAgent: decomposition, DAG, concurrent scheduling | ⏳ |
 | P5 | Capability substrate: MCP, sandbox, memory | ⏳ |

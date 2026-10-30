@@ -3,6 +3,7 @@
 > 依据：`docs/Roadmap.md` Phase 2 + `docs/design-decisions/00-contracts.md`（P2 起冻结规则）
 > + `docs/design-decisions/01-loop-runtime.md`（ADR-01 已冻结的 loop 契约）。
 > 使用方式：每条都有"怎么验"，全部勾选即 P2 收口；未达 DoD 不进 P3。
+> **状态：34/34 已勾选，P2 收口（2026-10-30，CI run 41032998523 全绿）。**
 
 ---
 
@@ -83,8 +84,13 @@
       全库覆盖率 ≥70%，`core/checkpoint/` 单独 ≥90%（心脏代码从严）。
 - [x] **F4 ADR-02** `docs/design-decisions/02-checkpoint.md`：一致性（步边界写、崩溃窗口）、
       并发（同 run 写锁）、版本迁移策略、三后端取舍、错误分类与重试的边界。
-- [ ] **F5 CI**：3.10/3.12 矩阵全绿；SQLite 用例走 `tmp_path` 无残留；
+- [x] **F5 CI**：3.10/3.12 矩阵全绿；SQLite 用例走 `tmp_path` 无残留；
       Redis 用例离线 skip 不 fail；崩溃恢复用例在 CI 里确定性通过。
+      （已验证 2026-10-30：run 41032998523 success——`quality (3.10)` 28s、`quality (3.12)` 24s，
+      两个 job 各自 `126 passed, 1 skipped`、总覆盖率 98.20%、ruff/mypy 通过、心脏闸门
+      loop 96.8% / errors 98.3% / manager 100% / recovery 99.0% / storage 99.3%，与本地数值一致；
+      两个 job 的收集清单都含 `tests/integration/test_crash_recovery.py`。
+      本地复跑一次全量 pytest 后 `git status --porcelain -u` 为空、仓库内无 `*.sqlite` 残留。）
 
 ## G. 配套二并行轨道（Roadmap：P2 期间启动）
 
@@ -233,4 +239,8 @@ AssertionError: 被 SIGKILL 的进程不该正常退出
   49 files already formatted、`mypy stableagent examples` 26 文件无错
 - `git diff -- stableagent/core/loop.py` 仍为空，L1 不变式未被这次修改破坏。
 
-**F5 仍未关闭**：3.10/3.12 只在本地预跑过，CI 上的绿色需要真推送。
+**F5 已关闭**（2026-10-30 推送后）：CI run 41032998523 两个 job 全绿，数值与上面的本地预跑逐条一致。
+本地预跑之所以有价值，正是它在推送之前就把崩溃恢复用例的时序竞态暴露了出来（见上一节）。
+
+**P2 收口：34/34。** 下一阶段的进入条件（`auto_save_every` 与恢复策略在真实模型上的表现）
+属 P3 的验收范围，不在本清单内。

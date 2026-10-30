@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### P2 收口
+- DoD **34/34**：最后一项 F5（CI 3.10/3.12 矩阵全绿）由 run 41032998523 关闭，
+  两个 job 均为 `126 passed, 1 skipped` / 覆盖率 98.20% / 心脏模块 96.8–100%，
+  与本地预跑数值逐条一致；证据记在 `docs/p2-dod-checklist.md` 的 F5 条目与复核记录
+- 崩溃恢复用例的击杀时序竞态修复（详见 `02-checkpoint.md` 后果 5）：只在编排侧改步数，
+  运行时代码零改动
+
 ### 许可与打包
 - 采用 **Apache License 2.0**：新增 `LICENSE`（apache.org 原文，未修改），README 增补 License 段
   与 badge；此前仓库无许可证文件
