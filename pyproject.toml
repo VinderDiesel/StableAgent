@@ -43,4 +43,9 @@ warn_unused_ignores = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "--cov=stableagent --cov-report=term-missing"
+addopts = "--cov=stableagent --cov-report=term-missing --cov-report=xml"
+
+[tool.coverage.report]
+# P2 验收 F3：全库门槛 70%；心脏模块（core/loop.py、core/checkpoint/*）由 CI 单独按 90% 把关
+fail_under = 70
+show_missing = true

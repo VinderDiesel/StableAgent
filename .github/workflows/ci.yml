@@ -19,10 +19,28 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint (ruff 0 error)
-        run: ruff check stableagent tests examples
+        run: ruff check stableagent tests examples benchmarks
       - name: Format check
-        run: ruff format --check stableagent tests examples
+        run: ruff format --check stableagent tests examples benchmarks
       - name: Types (mypy)
         run: mypy
-      - name: Tests + coverage
+      - name: Tests + coverage (全库门槛 70%，见 pyproject fail_under)
         run: pytest --cov=stableagent --cov-report=xml --cov-report=term-missing
+      - name: 心脏模块覆盖率闸门（loop / checkpoint / errors 单独 ≥90%）
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          FOCUS = ("core/loop.py", "core/checkpoint/manager.py", "core/checkpoint/recovery.py",
+                   "core/checkpoint/storage.py", "core/errors.py")
+          rows = [
+              (k.get("filename", ""), 100 * float(k.get("line-rate")))
+              for k in ET.parse("coverage.xml").getroot().iter("class")
+              if any((k.get("filename") or "").endswith(f) for f in FOCUS)
+          ]
+          for name, rate in rows:
+              print(f"{name}: {rate:.1f}%")
+          missing = [f for f in FOCUS if not any(n.endswith(f) for n, _ in rows)]
+          bad = [n for n, r in rows if r < 90]
+          if missing or bad:
+              sys.exit(f"心脏模块覆盖率闸门未通过：低于 90%={bad} 未统计={missing}")
+          PY

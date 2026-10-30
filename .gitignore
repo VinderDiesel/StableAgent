@@ -11,3 +11,7 @@ coverage.xml
 .coverage
 .DS_Store
 .qoder/
+
+# 本地演示/基准产物（examples/03、benchmarks 生成）
+.demo-checkpoint/
+.bench-checkpoint/
