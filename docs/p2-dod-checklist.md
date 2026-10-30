@@ -128,16 +128,16 @@ RedisCheckpointStore        # venv 内没有 redis 包；客户端是注入项�
 ### A1/A2/A3：崩溃恢复
 
 ```
-$ python examples/03_checkpoint_resume.py --phase selftest --dir .demo-checkpoint
-[run] ... {"type": "checkpoint", "data": {"run_id": "0390...", "step": 2, "contract_version": "1.1.0"}}
+$ python examples/03_checkpoint_resume.py --phase selftest --dir .demo-checkpoint --delay 0.2
+[run] ... {"type": "checkpoint", "data": {"run_id": "eccdf...", "step": 2, "contract_version": "1.1.0"}}
 （外部 SIGKILL，第 3 步未完成）
-{"type": "done", "data": {"result": "研究完成：共 2 条发现", "steps": 3}, "step": 3}
-RESUME_RESULT status=succeeded steps=3 provider_calls=1
+{"type": "done", "data": {"result": "研究完成：共 3 条发现", "steps": 4}, "step": 4}
+RESUME_RESULT status=succeeded steps=4 provider_calls=2
 SELFTEST ok=True killed=True final=succeeded
 ```
 
-`provider_calls=1` = 恢复后只跑了断点之后的第 3 步，已完成步零重跑（A2/C1 的直接证据）。
-自动化用例 `tests/integration/test_crash_recovery.py`：2 passed。
+任务共 4 步、崩溃在第 2 步之后：`provider_calls=2` = 恢复后只跑了第 3、4 步，已完成步零重跑
+（A2/C1 的直接证据）。自动化用例 `tests/integration/test_crash_recovery.py`：2 passed。
 
 ### F3：门禁
 
@@ -164,3 +164,54 @@ fail_under`）；`checkpoint/manager.py` 100%、`checkpoint/storage.py` 99.3%、
 
 单次写入 mean 0.56 ms / p95 0.77 ms；纯序列化 0.003 ms（**开销在落盘 fsync，不在序列化**）；
 恢复（读最近快照 + 版本迁移 + 反序列化）mean 0.114 ms / max 0.348 ms，且与历史长度无关。
+
+---
+
+## 复核记录（2026-10-30，本机预跑 CI 矩阵）
+
+先把 `docs/Roadmap.md` 的 3.10/3.12 矩阵在本地补齐（uv 托管 cpython 3.10.20 / 3.11.15 /
+3.12.13，各自建独立 venv 装依赖后跑同一套门禁）。三个解释器首轮都是 126 passed / 1 skipped、
+覆盖率 98.20%，**但 3.10 上一次崩在招牌用例**：
+
+```
+FAILED tests/integration/test_crash_recovery.py::test_a1_a2_kill_then_resume_completes_without_replaying_steps
+AssertionError: 被 SIGKILL 的进程不该正常退出
+```
+
+排查结论：不是 3.10 兼容性问题（单跑通过、后续 19 轮全量通过），是**测试与框架时序的竞态**。
+回看式落盘把第 2 步的 checkpoint 和第 3 步的首个事件推到同一瞬间，而第 3 步就是终止步——
+父进程读到第 2 步快照、发出 `SIGKILL` 的那一两毫秒里，子进程往往已经正常退出，
+于是"杀掉一个已经死了的进程"。这是 ADR-02 决定的直接后果，属于框架行为正确、演示脚本设计不足。
+
+修法是把击杀点从终止事件旁挪开，而不是给测试加重试（后者会掩盖真问题）：
+
+1. `examples/03_checkpoint_resume.py`：`TOTAL_STEPS` 3 → 4，`KILL_AFTER_STEP` 保持 2，
+   击杀点之后仍剩一整轮 provider 往返；provider 在 `acomplete` 入口 `await asyncio.sleep(delay)`
+   放大窗口。
+2. `tests/integration/test_crash_recovery.py`：断言改为按 `TOTAL_STEPS` 推导
+   （`provider_calls == TOTAL_STEPS - KILL_AFTER_STEP`、快照步数 `1..TOTAL_STEPS`），
+   不再写死数字。
+
+实测可击杀窗口——指标 = 父进程读到第 2 步 checkpoint 那一刻起，子进程自己跑完退出还需要多久
+（每档 12 轮取中位；provider 在每次往返入口 `sleep(delay)`）：
+
+| `delay` | 3 步（旧设计） | 4 步（现设计） |
+|---|---|---|
+| 0.05 | 13.2 ms | 64.7 ms |
+| 0.2 | 16.3 ms | 220.0 ms |
+
+旧设计的窗口不随 `delay` 放大（12~31 ms，十几毫秒量级）：第 2 步快照与 `done` 在同一次注入里
+冒出来，读线程再快也追不上进程调度；多留一整轮往返后，窗口变成 `delay` 的线性函数。
+
+复跑验证（本次复核全部重跑，非沿用上一轮结论）：
+
+- `test_crash_recovery.py` 在 3.10 / 3.11 / 3.12 各连跑 8 轮 = **24/24 通过**
+- 3.10 全量带覆盖率连跑 3 轮 = **3/3 通过**（126 passed / 1 skipped / 98.20%）
+- 3.11（主 venv）与 3.12 各全量 1 轮通过；心脏模块闸门逐文件复算：
+  `loop.py` 96.8% / `errors.py` 98.3% / `manager.py` 100% / `recovery.py` 99.0% /
+  `storage.py` 99.3%（门槛 90%）
+- 门禁：`ruff check` 通过、`ruff format --check stableagent tests examples benchmarks`
+  49 files already formatted、`mypy stableagent examples` 26 文件无错
+- `git diff -- stableagent/core/loop.py` 仍为空，L1 不变式未被这次修改破坏。
+
+**F5 仍未关闭**：3.10/3.12 只在本地预跑过，CI 上的绿色需要真推送。

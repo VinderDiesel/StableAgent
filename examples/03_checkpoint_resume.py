@@ -14,8 +14,9 @@ Provider 是脚本化的（按快照里已有的 assistant 消息数决定下一
    python examples/03_checkpoint_resume.py --phase selftest --dir .demo-checkpoint
 
 事件按行输出 JSON；`checkpoint` 行里的 run_id/step 就是恢复坐标。
-恢复阶段末行输出 `RESUME_RESULT status=... steps=... provider_calls=...`，
-其中 provider_calls=1 就是"已完成步不重跑"的直接证据。
+恢复阶段末行输出 `RESUME_RESULT status=... steps=... provider_calls=...`。
+`provider_calls` 恰等于崩溃后剩余的步数（本设计 TOTAL_STEPS - KILL_AFTER_STEP = 2），
+这就是"已完成步不重跑"的直接证据。
 """
 
 from __future__ import annotations
@@ -37,7 +38,9 @@ from stableagent.core.state import Config, EventType, Message, ToolCall
 from stableagent.providers.base import Provider, ProviderChunk, ProviderResponse
 from stableagent.tools.registry import Tool, ToolRegistry, ToolResult
 
-TOTAL_STEPS = 3  # 第 1、2 步调工具，第 3 步收敛
+TOTAL_STEPS = 4  # 第 1~3 步调工具，第 4 步收敛
+# 击杀点之后必须还剩至少一次 provider 往返：回看式落盘让第 k 步的 checkpoint 与第 k+1 步
+# 的首个事件同时出现，若 k+1 就是终止步，父进程的 SIGKILL 会和子进程正常退出赛跑。
 KILL_AFTER_STEP = 2  # selftest 在第 2 步快照落盘后击杀
 
 

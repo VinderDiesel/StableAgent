@@ -39,6 +39,11 @@
 ### Fixed（P2）
 - `build_store`：`backend="redis"` 时 `CheckpointConfig.redis_key_prefix` 此前是死配置
   （只有直接构造 `RedisCheckpointStore` 才生效）；改经 `redis_client` 注入路径统一读取
+- `examples/03_checkpoint_resume.py` + `test_crash_recovery.py`：3 步设计的击杀点与终止事件
+  在同一次注入里到达，外部 `SIGKILL` 与子进程自然退出竞速，Python 3.10 预跑 CI 矩阵时偶发
+  "kill 没杀死"。演示改为 4 步（击杀点之后保留一整轮 provider 往返），断言按 `TOTAL_STEPS`
+  推导；可击杀窗口从十几毫秒放大到 `delay` 的线性量级（ADR-02 后果 5）。**框架代码零改动**，
+  这是编排侧的时序设计问题，不是恢复语义问题
 
 ### 契约修订 v1.0.0 -> v1.1.0（P1，全部非破坏性）
 - `EventType` 新增成员 `paused`（兼容性扩展，消费方按字符串解析）

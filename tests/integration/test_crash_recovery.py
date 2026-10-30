@@ -19,7 +19,7 @@ from stableagent.core.state import AgentState, AgentStatus, EventType
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "03_checkpoint_resume.py"
 KILL_AFTER_STEP = 2
-TOTAL_STEPS = 3
+TOTAL_STEPS = 4  # 击杀点之后还剩两步：SIGKILL 才不会与子进程正常退出抢那一两毫秒
 
 
 async def _spawn(*args: str) -> asyncio.subprocess.Process:
@@ -88,10 +88,10 @@ async def test_a1_a2_kill_then_resume_completes_without_replaying_steps(tmp_path
     fields = dict(pair.split("=") for pair in summary.split()[1:])
     assert fields["status"] == AgentStatus.SUCCEEDED.value
     assert int(fields["steps"]) == TOTAL_STEPS
-    assert int(fields["provider_calls"]) == 1, "已完成步不重跑：恢复后只调了最后一步"
+    assert int(fields["provider_calls"]) == TOTAL_STEPS - KILL_AFTER_STEP, "已完成步不重跑"
 
     final_rows = _steps_and_payloads(db_path)
-    assert [step for step, _ in final_rows] == [1, 2, 3]
+    assert [step for step, _ in final_rows] == list(range(1, TOTAL_STEPS + 1))
     assert AgentState.loads(final_rows[-1][1]).status is AgentStatus.SUCCEEDED
 
 

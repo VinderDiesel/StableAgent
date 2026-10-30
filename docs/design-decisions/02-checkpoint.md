@@ -131,9 +131,9 @@ Roadmap 的差异化卖点是"执行可靠性"，P2 的硬指标是招牌动作�
 ## 后果
 
 - 正面：招牌动作有自动化证据——`tests/integration/test_crash_recovery.py`（subprocess +
-  `SIGKILL` + 二次 subprocess）离线确定性通过，恢复阶段 `provider_calls=1` 直接证明
-  "已完成步不重跑"；三种后端共享同一组一致性断言（DoD B4 参数化）；`core/checkpoint/`
-  三模块覆盖率 99–100%，全库 98%。
+  `SIGKILL` + 二次 subprocess）离线确定性通过，恢复阶段 `provider_calls=2`（4 步任务、
+  崩溃在第 2 步之后）直接证明 "已完成步不重跑"；三种后端共享同一组一致性断言（DoD B4
+  参数化）；`core/checkpoint/` 三模块覆盖率 99–100%，全库 98%。
 - 代价与遗留：
   1. 一步的崩溃窗口意味着**工具调用必须可重入**。框架只能约定，不能强制——
      幂等性检查留给 P4（审计/追溯）与 `Evidence` 增强。
@@ -143,6 +143,13 @@ Roadmap 的差异化卖点是"执行可靠性"，P2 的硬指标是招牌动作�
   4. 超时控制的"贯通"目前只到 `ProviderConfig.request_timeout_seconds → httpx 超时`
      这一层；Provider 调用整体的硬超时（`asyncio.timeout` 包裹）留待 P4 的预算治理
      一并设计，因为二者共享同一个 deadline 模型。
+  5. 回看式落盘的时序对**外部观察者**有一个反直觉后果：第 k 步快照与第 k+1 步首个事件
+     同时出现，若 k+1 就是终止步，快照到达和进程退出只差调度级几毫秒。演示脚本
+     `examples/03_checkpoint_resume.py` 首轮在 CI 矩阵 3.10 上因此偶发失败（父进程
+     `SIGKILL` 时子进程已正常退出）。框架行为正确，改法是让击杀点之后仍留一整轮
+     provider 往返（`TOTAL_STEPS` 3 → 4），把可击杀窗口从十几毫秒拉到 `delay` 的线性
+     量级——见 `docs/p2-dod-checklist.md` 的复核记录。**任何外部编排（P6 的超时看门狗、
+     运维脚本）想用 checkpoint 事件判断"现在杀是安全的"，都必须按这条时序设计。**
 - 契约影响：全部为兼容扩展（新枚举成员 `retry`、`CheckpointConfig` 新增 7 个带默认值
   字段），逐条记录见 `CHANGELOG.md` 与 `00-contracts.md` 的"P2 扩展记录"。
   `CONTRACT_VERSION` 保持 `1.1.0`：扩展未触及任何既有字段语义与不变式，不抬版本。
