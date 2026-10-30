@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 许可与打包
+- 采用 **Apache License 2.0**：新增 `LICENSE`（apache.org 原文，未修改），README 增补 License 段
+  与 badge；此前仓库无许可证文件
+- `pyproject.toml` 按 PEP 639 声明 `license = "Apache-2.0"` + `license-files = ["LICENSE"]`，
+  并补齐 Python 3.10/3.11/3.12 等分类符；已验证 wheel 内含
+  `stableagent-0.1.0.dist-info/licenses/LICENSE` 且 `License-Expression: Apache-2.0`
+- 未加 `py.typed`（`Typing :: Typed` 分类符同样未声明）：留待 P6 mypy strict 收口时一并处理
+
 ### 契约扩展 v1.1.0（P2，全部非破坏性，`CONTRACT_VERSION` 不抬版本）
 - `EventType.RETRY` 新增成员（兼容扩展）：失败自愈的重试通知；消费方按字符串解析
 - `CheckpointConfig` 新增 7 个带默认值字段（旧 `Config()` 构造行为完全不变）：

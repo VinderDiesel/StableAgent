@@ -7,6 +7,7 @@ survives a crash) and *context engineering* (token efficiency you can measure, n
 [![CI](https://github.com/VinderDiesel/StableAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/VinderDiesel/StableAgent/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![Contract](https://img.shields.io/badge/public_contract-v1.1.0-orange)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Dependencies](https://img.shields.io/badge/runtime%20deps-3-green)
 ![Coverage](https://img.shields.io/badge/coverage-98.2%25-brightgreen)
 
@@ -318,6 +319,23 @@ Design docs are Chinese; code and this README are English.
 
 ## License
 
-No `LICENSE` file is in the repository yet, so all rights are reserved. The distribution licence
-will be chosen and committed before the first tagged release; until then, read, run and evaluate the
-code freely, but don't redistribute it.
+Apache License 2.0 — full text in [`LICENSE`](LICENSE).
+
+```
+Copyright 2026 yangxinlong
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+Attribution and the patent grant work as in any Apache-2.0 project; keep this notice when you
+redistribute.
