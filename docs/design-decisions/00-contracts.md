@@ -1,6 +1,6 @@
 # ADR-00：公共契约基线（Contract v1.0.0）
 
-- 状态：Accepted（P0 基线；P1 修订见文末记录，当前 CONTRACT_VERSION = 1.1.0）
+- 状态：Accepted（P0 基线；P1 修订与 P2 兼容扩展见文末记录，当前 CONTRACT_VERSION = 1.1.0）
 - 日期：2026-10-30
 - 代码入口：`stableagent/core/state.py`（`CONTRACT_VERSION = "1.1.0"`）
 
@@ -113,8 +113,51 @@
 - 组装位点：`ContextAssembler`（`context/assembly.py`，ASSEMBLERS 注册表）与
   `ToolSelector`（loop 注入参数）——P3 经此接入，零修改 `core/loop.py`。
 
+## P2 扩展记录（v1.1.0 之上的兼容扩展，冻结规则首次生效）
+
+冻结规则（第 3 条）自 P2 起适用：**只允许**新增带默认值的可选字段 / 新增枚举成员 /
+新增配置节。P2 交付内容逐条对照如下，**全部为非破坏性**，故 `CONTRACT_VERSION` 保持
+`1.1.0`（扩展未改变任何既有字段语义与不变式，不抬版本；抬版本的判据是语义变化，
+不是新增面积）。
+
+| 变更 | 类型 | 冻结规则条目 | 说明 |
+|------|------|--------------|------|
+| `EventType.RETRY` | 新枚举成员 | 枚举成员 | 重试通知；旧消费方按字符串解析，忽略未知成员即安全 |
+| `CheckpointConfig.sqlite_path` | 新可选字段（默认 `None`） | 带默认值字段 | 仅 `backend="sqlite"` 时必需 |
+| `CheckpointConfig.redis_key_prefix` | 新可选字段（默认 `"stableagent:ckpt"`） | 带默认值字段 | 经 `redis_client` 注入时生效 |
+| `CheckpointConfig.history_limit` | 新可选字段（默认 20） | 带默认值字段 | 三后端语义一致的历史裁剪 |
+| `CheckpointConfig.retry_*`（4 个） | 新可选字段 | 带默认值字段 | 指数退避预算；`recovery_strategy="none"` 时不参与决策 |
+| `Agent(..., checkpoint_store=/redis_client=/fallback=/sleep=)` | 新关键字参数 | —— （非契约面） | 缺省值保持 P1 行为：不配 checkpoint 即零 I/O |
+| `OpenAIProvider.from_config` | 新构造入口 | —— （非契约面） | 契约四的三调用形态未增加第四种公开调用面 |
+
+### 契约不变式在 P2 之后的成立情况
+
+- 契约一（Event）：新增成员后终止语义不变——注入 `checkpoint`/`retry` 之后
+  `done|error` 依然恰好一个且位于流末尾（DoD L4，测试
+  `test_checkpoint_events_land_at_step_boundaries_and_never_after_done`）。
+- 契约二/三（Message / AgentState）：`AgentState.loads(s.snapshot()) == s` 往返无损
+  仍成立；旧快照（v1.0.0 fixture）经 checkpoint **读取侧** `migrate_state` 升级，
+  `AgentState.loads` 语义保持严格（DoD E3/E4）。
+- 契约四（Provider）：三形态未变；超时经构造入口进入 httpx，不是新的调用面。
+- 契约五（Tool / Evidence）：未变。工具幂等性是恢复正确性的**使用前提**，框架只能约定
+  不能强制——见 ADR-02 后果节第 1 条。
+- 契约六（Config）：新增字段全部落在 `CheckpointConfig` 子节内，`Config()` 缺省构造
+  即可运行（P1 的示例与测试未改动即通过）。
+
+### P2 锁定的恢复契约（后续阶段的冻结范围组成部分）
+
+决策正文（理由、备选、后果）见 **ADR-02 `02-checkpoint.md`**，此处仅存摘要索引：
+
+- 保存点 = 步边界，与 F3 的暂停点同构；崩溃窗口上界为一步（工具须可重入）。
+- 回看式落盘：第 k 步的快照在第 k+1 步第一个事件到达时写入；终止态快照**静默落盘**
+  （不发事件）以保 F4。
+- 存储协议面固定为 `save/load/records/delete` 四方法；Redis 客户端为注入项。
+- 版本迁移只在读取侧；高于当前版本 / 未知版本 → `SnapshotVersionError`（不静默猜测）。
+- 失败自愈三分类与重试边界（`max_attempts` 含首次调用）；需人工停在 `PAUSED`，
+  不新增状态机成员。
+
 ## 关联 ADR
 
 - ADR-01：Loop 执行模型（P1）——`01-loop-runtime.md`
-- ADR-02：Checkpoint 机制（P2 交付时撰写）——`02-checkpoint.md`（预留编号）
+- ADR-02：Checkpoint 与失败自愈（P2）——`02-checkpoint.md`
 

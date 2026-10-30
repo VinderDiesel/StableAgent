@@ -4,6 +4,42 @@
 
 ## [Unreleased]
 
+### 契约扩展 v1.1.0（P2，全部非破坏性，`CONTRACT_VERSION` 不抬版本）
+- `EventType.RETRY` 新增成员（兼容扩展）：失败自愈的重试通知；消费方按字符串解析
+- `CheckpointConfig` 新增 7 个带默认值字段（旧 `Config()` 构造行为完全不变）：
+  - `sqlite_path` / `redis_key_prefix` / `history_limit`：后端参数
+  - `retry_max_attempts` / `retry_base_delay_seconds` / `retry_backoff_factor` /
+    `retry_max_delay_seconds`：指数退避预算
+- `Agent.__init__` 新增关键字参数 `redis_client`（注入项，缺省 `None`）；
+  `checkpoint_store` / `fallback` / `sleep` 亦为 P2 新增的关键字注入项
+- `OpenAIProvider.from_config(ProviderConfig, ...)`：新增构造入口，把
+  `request_timeout_seconds` / `api_base` / `model` 贯通到 httpx 客户端（验收 C5）
+- **未动**：`Event` / `Message` / `AgentState` / `Provider` / `Tool` / `Evidence`
+  的既有字段与不变式；`core/loop.py` 零修改（见 `docs/p2-dod-checklist.md` F1 的 diff 证明）
+
+### Added（P2）
+- `core/checkpoint/storage.py`：`CheckpointStore` 统一异步协议（`save/load/records/delete`）
+  + `MemoryCheckpointStore` / `SqliteCheckpointStore` / `RedisCheckpointStore`
+  （Redis 客户端为注入项，本包不硬依赖 redis 库）+ `build_store` 按配置选后端
+- `core/checkpoint/manager.py`：`CheckpointManager`——步边界触发判据、同 run 写锁、
+  `(run_id, step)` 幂等覆盖写、历史裁剪；存储故障降级为计数不打断运行（验收 B5）
+- `core/checkpoint/recovery.py`：`MIGRATIONS` 版本迁移链 + `SnapshotVersionError`
+  （高于/未知版本显式报错）+ `RetryPolicy` 指数退避（`sleep` 可注入）+
+  `RecoveryDirector` 重试/转人工/认失败决策 + `repair_for_retry` / `pause_for_human`
+- `core/errors.py`：`ErrorClass` 三分类与 `classify_error` / `classify_error_detail`
+  （判据优先级：状态码 > 类型名 > 消息特征 > 默认不可重试）
+- `Agent` 可靠性外层：`checkpoint`/`retry` 事件注入（终止态静默落盘以保 F4）、
+  `recover/arecover/stream_recover`、`checkpoint_history`、`last_state`/`last_checkpoint`
+- `examples/03_checkpoint_resume.py`：kill → 重启 → 续跑 的离线确定性演示（含 `--phase selftest`）
+- `docs/design-decisions/02-checkpoint.md`：ADR-02（一致性/并发/迁移/后端取舍/重试边界）
+- 测试 +77（合计 126 passed, 1 skipped）：`test_crash_recovery.py`（subprocess + SIGKILL
+  的进程级崩溃恢复）、三种后端共享一致性断言、版本迁移、退避序列、失败自愈各分类路径、
+  D4 恢复流与不中断流逐条等价；全库覆盖率 98%，`core/checkpoint/` 99–100%
+
+### Fixed（P2）
+- `build_store`：`backend="redis"` 时 `CheckpointConfig.redis_key_prefix` 此前是死配置
+  （只有直接构造 `RedisCheckpointStore` 才生效）；改经 `redis_client` 注入路径统一读取
+
 ### 契约修订 v1.0.0 -> v1.1.0（P1，全部非破坏性）
 - `EventType` 新增成员 `paused`（兼容性扩展，消费方按字符串解析）
 - `Message` 新增字段 `tool_calls: list[ToolCall] = []`
