@@ -1,6 +1,7 @@
 """P1 真实端到端示例（DoD A1）：多步研究任务，事件流完整打印。
 
-需要 OPENAI_API_KEY 环境变量；离线演示请用 02_loop_offline_demo.py。
+需要 OPENAI_API_KEY 环境变量；可选 OPENAI_BASE_URL（代理/兼容网关，缺省官方端点）。
+离线演示请用 02_loop_offline_demo.py。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any
 
 from stableagent import Agent, Event, EventType, OpenAIProvider
 from stableagent.core.state import Config
+from stableagent.providers.openai import DEFAULT_BASE_URL
 from stableagent.tools.registry import Tool, ToolRegistry, ToolResult
 
 CORPUS_DIR = Path(__file__).parent / "data"
@@ -50,6 +52,7 @@ async def main() -> None:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         sys.exit("请先设置 OPENAI_API_KEY（离线演示请运行 02_loop_offline_demo.py）")
+    base_url = os.environ.get("OPENAI_BASE_URL", DEFAULT_BASE_URL)
 
     registry = ToolRegistry()
     registry.register(ListCorpusFiles())
@@ -57,7 +60,7 @@ async def main() -> None:
 
     agent = Agent(
         name="research-analyst",
-        provider=OpenAIProvider(api_key=api_key, model="gpt-4o"),
+        provider=OpenAIProvider(api_key=api_key, model="gpt-4o", base_url=base_url),
         config=Config(),
         registry=registry,
     )
