@@ -72,6 +72,32 @@ class BoomTool(Tool):
         raise RuntimeError("boom")
 
 
+class FlakyProvider(FakeProvider):
+    """前 fail_times 次调用抛指定异常，之后按脚本返回（P2 失败自愈测试资产）。"""
+
+    def __init__(
+        self,
+        responses: list[ProviderResponse],
+        *,
+        fail_times: int = 1,
+        exc: Exception | None = None,
+    ) -> None:
+        super().__init__(responses)
+        self._fail_times = fail_times
+        self._exc = exc or TimeoutError("gateway timeout")
+
+    def complete(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        **options: Any,
+    ) -> ProviderResponse:
+        if len(self.calls) < self._fail_times:
+            self.calls.append((list(messages), tools))
+            raise self._exc
+        return super().complete(messages, tools, **options)
+
+
 def tool_response(call_id: str, text: str, usage: dict[str, int] | None = None) -> ProviderResponse:
     return ProviderResponse(
         content=f"thinking{call_id}",
@@ -84,3 +110,20 @@ def final_response(
     text: str = "final answer", usage: dict[str, int] | None = None
 ) -> ProviderResponse:
     return ProviderResponse(content=text, usage=usage or {})
+
+
+class FakeRedisClient:
+    """够用的 redis.asyncio 替身：值为 bytes，正好覆盖后端的解码分支。"""
+
+    def __init__(self) -> None:
+        self.data: dict[str, bytes] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        return self.data.get(key)
+
+    async def set(self, key: str, value: str) -> bool:
+        self.data[key] = value.encode()
+        return True
+
+    async def delete(self, key: str) -> int:
+        return 1 if self.data.pop(key, None) is not None else 0

@@ -1,0 +1,13 @@
+{
+  "contract_version": "1.0.0",
+  "run_id": "legacy-run",
+  "agent_name": "v1-agent",
+  "status": "running",
+  "step": 2,
+  "messages": [
+    {"role": "user", "content": "旧版本任务"},
+    {"role": "assistant", "content": "调用工具", "name": null, "tool_call_id": null},
+    {"role": "tool", "content": "结果", "name": "echo", "tool_call_id": "c1"}
+  ],
+  "error": null
+}

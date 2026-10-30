@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
-from stableagent.core.state import Message, ToolCall
+from stableagent.core.state import Message, ProviderConfig, ToolCall
 from stableagent.providers.base import Provider, ProviderChunk, ProviderResponse
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -72,6 +73,27 @@ class OpenAIProvider(Provider):
 
     async def aclose(self) -> None:
         await self._aclient.aclose()
+
+    @classmethod
+    def from_config(
+        cls,
+        config: ProviderConfig,
+        *,
+        api_key: str | None = None,
+        transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
+    ) -> OpenAIProvider:
+        """把 `ProviderConfig` 贯通到 httpx 客户端（P2 验收 C5：超时的唯一来源）。
+
+        没有这条路径时，`request_timeout_seconds` 只是配置表上的装饰——请求仍按
+        构造参数的默认 60s 走，超时错误也就永远进不了失败自愈的分类。
+        """
+        return cls(
+            api_key=api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", ""),
+            model=config.model,
+            base_url=config.api_base or DEFAULT_BASE_URL,
+            timeout=config.request_timeout_seconds,
+            transport=transport,
+        )
 
     def _payload(
         self,

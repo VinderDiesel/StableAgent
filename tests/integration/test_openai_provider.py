@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from stableagent.core.state import Message, ToolCall
+from stableagent.core.state import Message, ProviderConfig, ToolCall
 from stableagent.providers.openai import OpenAIProvider
 
 COMPLETION = {
@@ -172,3 +172,23 @@ async def test_usage_with_nested_detail_objects_is_tolerated() -> None:
     provider = _provider(lambda request: httpx.Response(200, json=payload))
     response = await provider.acomplete([Message(role="user", content="q")])
     assert response.usage == {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}
+
+
+def test_c5_provider_config_threads_timeout_into_httpx() -> None:
+    """C5：request_timeout_seconds 必须是 httpx 客户端的实际超时，不是配置装饰。"""
+    config = ProviderConfig(
+        model="gpt-4o-mini", api_base="https://gw.local/v1", request_timeout_seconds=7.5
+    )
+    provider = OpenAIProvider.from_config(
+        config,
+        api_key="test-key",
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=COMPLETION)),
+    )
+    assert provider._client.timeout == httpx.Timeout(7.5)
+    assert provider._aclient.timeout == httpx.Timeout(7.5)
+    assert provider.model == "gpt-4o-mini"
+    assert str(provider._client.base_url).rstrip("/") == "https://gw.local/v1"
+    provider.close()
+    assert OpenAIProvider.from_config(ProviderConfig(), api_key="k")._client.timeout == (
+        httpx.Timeout(60.0)
+    )

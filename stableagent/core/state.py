@@ -15,13 +15,14 @@ CONTRACT_VERSION = "1.1.0"
 
 
 class EventType(str, Enum):
-    """统一事件流类型。新增成员属于兼容性扩展（P1 新增 paused）。"""
+    """统一事件流类型。新增成员属于兼容性扩展（P1 新增 paused，P2 新增 retry）。"""
 
     THINKING = "thinking"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     CHECKPOINT = "checkpoint"
     PAUSED = "paused"
+    RETRY = "retry"
     ERROR = "error"
     DONE = "done"
 
@@ -110,9 +111,20 @@ class ContextConfig(BaseModel):
 
 
 class CheckpointConfig(BaseModel):
+    """P2 消费的配置节。P2 新增字段全部带默认值（兼容性扩展）。"""
+
     backend: Literal["memory", "sqlite", "redis"] = "memory"
     auto_save_every: int = 0
     recovery_strategy: Literal["none", "resume", "retry_with_fallback"] = "none"
+    # 存储后端参数：sqlite 需要路径；redis 客户端由外部注入，本框架不硬依赖
+    sqlite_path: str | None = None
+    redis_key_prefix: str = "stableagent:ckpt"
+    history_limit: int = 20
+    # 失败自愈：指数退避（recovery_strategy=retry_with_fallback 时生效）
+    retry_max_attempts: int = 3
+    retry_base_delay_seconds: float = 1.0
+    retry_backoff_factor: float = 2.0
+    retry_max_delay_seconds: float = 30.0
 
 
 class SandboxConfig(BaseModel):
