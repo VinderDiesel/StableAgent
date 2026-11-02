@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import pytest
 
+from stableagent.orchestration.errors import IllegalTransitionError
 from stableagent.orchestration.model import (
+    TERMINAL_TICKET_STATUSES,
     Assignment,
+    AssignmentAction,
+    AssignmentStatus,
     Dependency,
+    EffectAction,
+    EffectState,
     Mandate,
     Ticket,
+    TicketAction,
+    TicketStatus,
+    assert_assignment_belongs_to,
+    next_assignment_status,
+    next_effect_status,
+    next_ticket_status,
 )
 from tests.support import FixedClock, SequenceIds
 
@@ -59,3 +71,72 @@ def test_assignment_belongs_to_a_ticket_by_construction() -> None:
     # ticket_id 无默认值：缺了就构造不出来，A4 的"必属某 Ticket"是结构保证而非运行时检查。
     with pytest.raises(ValueError):
         Assignment(id="as-1", attempt=1)
+
+
+@pytest.mark.parametrize(
+    ("current", "action", "expected"),
+    [
+        (TicketStatus.OPEN, TicketAction.QUEUE, TicketStatus.QUEUED),
+        (TicketStatus.QUEUED, TicketAction.START, TicketStatus.RUNNING),
+        (TicketStatus.RUNNING, TicketAction.WAIT, TicketStatus.WAITING),
+        (TicketStatus.WAITING, TicketAction.START, TicketStatus.RUNNING),
+        (TicketStatus.RUNNING, TicketAction.DELIVER, TicketStatus.READY),
+        (TicketStatus.RUNNING, TicketAction.BLOCK, TicketStatus.BLOCKED),
+        (TicketStatus.RUNNING, TicketAction.FAIL, TicketStatus.FAILED),
+        (TicketStatus.READY, TicketAction.COMPLETE, TicketStatus.COMPLETED),
+        (TicketStatus.OPEN, TicketAction.CANCEL, TicketStatus.CANCELLED),
+    ],
+)
+def test_legal_ticket_transitions(current, action, expected) -> None:
+    assert next_ticket_status(current, action) is expected
+
+
+def test_ready_is_not_completed_and_completed_is_terminal() -> None:
+    # A6：ready 只是"可收口"，必须显式 complete_ticket 才进 completed。
+    assert TicketStatus.READY is not TicketStatus.COMPLETED
+    assert next_ticket_status(TicketStatus.READY, TicketAction.COMPLETE) is TicketStatus.COMPLETED
+    assert TicketStatus.READY not in TERMINAL_TICKET_STATUSES
+    assert {TicketStatus.COMPLETED, TicketStatus.CANCELLED, TicketStatus.FAILED} == (
+        TERMINAL_TICKET_STATUSES
+    )
+    with pytest.raises(IllegalTransitionError):
+        next_ticket_status(TicketStatus.COMPLETED, TicketAction.CANCEL)
+
+
+def test_terminal_assignment_may_have_no_run_id() -> None:
+    # 注册发生在第一个 step 边界（ADR-04 决策 4.1），崩在注册之前的 Assignment 终态也没有 run_id。
+    # 因此"启动后必填"不是模型不变量（RUNNING 早于注册就会误伤），而是 Task 7 的行为断言：
+    # launch 路径必须把首个 CHECKPOINT 的 run_id 注册回来。
+    ended = Assignment(
+        id="as-1", ticket_id="tk-1", attempt=1, status=AssignmentStatus.ENDED, worker_run_id=None
+    )
+    assert ended.worker_run_id is None
+
+
+def test_terminal_assignment_cannot_be_relaunched() -> None:
+    assert next_assignment_status(AssignmentStatus.INTERRUPTED, AssignmentAction.RELAUNCH) is (
+        AssignmentStatus.RUNNING
+    )
+    with pytest.raises(IllegalTransitionError):
+        next_assignment_status(AssignmentStatus.ENDED, AssignmentAction.RELAUNCH)
+
+
+def test_effect_claim_and_retry_paths() -> None:
+    assert next_effect_status(EffectState.PENDING, EffectAction.CLAIM) is EffectState.RUNNING
+    assert next_effect_status(EffectState.RUNNING, EffectAction.RETRY) is EffectState.RETRY_WAIT
+    assert next_effect_status(EffectState.RETRY_WAIT, EffectAction.CLAIM) is EffectState.RUNNING
+    with pytest.raises(IllegalTransitionError):
+        next_effect_status(EffectState.SUCCEEDED, EffectAction.CLAIM)
+
+
+def test_assignment_cross_record_check_rejects_foreign_ticket() -> None:
+    ticket = Ticket(
+        id="tk-1",
+        title="t",
+        task="u",
+        created_at=0,
+        mandate_id="md-1",
+    )
+    assert_assignment_belongs_to(ticket, Assignment(id="as-1", ticket_id="tk-1", attempt=1))
+    with pytest.raises(IllegalTransitionError):
+        assert_assignment_belongs_to(ticket, Assignment(id="as-2", ticket_id="tk-other", attempt=1))

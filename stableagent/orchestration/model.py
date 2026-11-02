@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import uuid
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, Field, model_validator
+
+from stableagent.orchestration.errors import IllegalTransitionError
 
 
 class IdFactory(Protocol):
@@ -150,3 +152,114 @@ class Effect(BaseModel):
     attempts: int = 0
     due_at: int
     last_error: str | None = None
+
+
+class TicketAction(str, Enum):
+    QUEUE = "queue"
+    START = "start"
+    WAIT = "wait"
+    DELIVER = "deliver"
+    BLOCK = "block"
+    FAIL = "fail"
+    CANCEL = "cancel"
+    COMPLETE = "complete"
+
+
+class AssignmentAction(str, Enum):
+    LAUNCH = "launch"
+    END = "end"
+    FAIL = "fail"
+    CANCEL = "cancel"
+    INTERRUPT = "interrupt"
+    RELAUNCH = "relaunch"
+
+
+class EffectAction(str, Enum):
+    CLAIM = "claim"
+    SUCCEED = "succeed"
+    RETRY = "retry"
+    FAIL = "fail"
+    CANCEL = "cancel"
+    RECLAIM = "reclaim"
+
+
+_TICKET_TABLE: dict[tuple[TicketStatus, TicketAction], TicketStatus] = {
+    (TicketStatus.OPEN, TicketAction.QUEUE): TicketStatus.QUEUED,
+    (TicketStatus.OPEN, TicketAction.CANCEL): TicketStatus.CANCELLED,
+    (TicketStatus.QUEUED, TicketAction.START): TicketStatus.RUNNING,
+    (TicketStatus.QUEUED, TicketAction.CANCEL): TicketStatus.CANCELLED,
+    (TicketStatus.RUNNING, TicketAction.WAIT): TicketStatus.WAITING,
+    (TicketStatus.RUNNING, TicketAction.DELIVER): TicketStatus.READY,
+    (TicketStatus.RUNNING, TicketAction.BLOCK): TicketStatus.BLOCKED,
+    (TicketStatus.RUNNING, TicketAction.FAIL): TicketStatus.FAILED,
+    (TicketStatus.RUNNING, TicketAction.CANCEL): TicketStatus.CANCELLED,
+    (TicketStatus.WAITING, TicketAction.START): TicketStatus.RUNNING,
+    (TicketStatus.WAITING, TicketAction.BLOCK): TicketStatus.BLOCKED,
+    (TicketStatus.WAITING, TicketAction.FAIL): TicketStatus.FAILED,
+    (TicketStatus.WAITING, TicketAction.CANCEL): TicketStatus.CANCELLED,
+    (TicketStatus.BLOCKED, TicketAction.QUEUE): TicketStatus.QUEUED,
+    (TicketStatus.BLOCKED, TicketAction.CANCEL): TicketStatus.CANCELLED,
+    (TicketStatus.READY, TicketAction.COMPLETE): TicketStatus.COMPLETED,
+    (TicketStatus.READY, TicketAction.CANCEL): TicketStatus.CANCELLED,
+}
+
+_ASSIGNMENT_TABLE: dict[tuple[AssignmentStatus, AssignmentAction], AssignmentStatus] = {
+    (AssignmentStatus.PENDING, AssignmentAction.LAUNCH): AssignmentStatus.RUNNING,
+    (AssignmentStatus.PENDING, AssignmentAction.CANCEL): AssignmentStatus.CANCELLED,
+    (AssignmentStatus.RUNNING, AssignmentAction.END): AssignmentStatus.ENDED,
+    (AssignmentStatus.RUNNING, AssignmentAction.FAIL): AssignmentStatus.FAILED,
+    (AssignmentStatus.RUNNING, AssignmentAction.CANCEL): AssignmentStatus.CANCELLED,
+    (AssignmentStatus.RUNNING, AssignmentAction.INTERRUPT): AssignmentStatus.INTERRUPTED,
+    (AssignmentStatus.INTERRUPTED, AssignmentAction.RELAUNCH): AssignmentStatus.RUNNING,
+    (AssignmentStatus.INTERRUPTED, AssignmentAction.CANCEL): AssignmentStatus.CANCELLED,
+}
+
+_EFFECT_TABLE: dict[tuple[EffectState, EffectAction], EffectState] = {
+    (EffectState.PENDING, EffectAction.CLAIM): EffectState.RUNNING,
+    (EffectState.PENDING, EffectAction.CANCEL): EffectState.CANCELLED,
+    (EffectState.RUNNING, EffectAction.SUCCEED): EffectState.SUCCEEDED,
+    (EffectState.RUNNING, EffectAction.RETRY): EffectState.RETRY_WAIT,
+    (EffectState.RUNNING, EffectAction.FAIL): EffectState.FAILED,
+    (EffectState.RUNNING, EffectAction.RECLAIM): EffectState.PENDING,
+    (EffectState.RETRY_WAIT, EffectAction.CLAIM): EffectState.RUNNING,
+    (EffectState.RETRY_WAIT, EffectAction.FAIL): EffectState.FAILED,
+    (EffectState.RETRY_WAIT, EffectAction.CANCEL): EffectState.CANCELLED,
+}
+
+TERMINAL_TICKET_STATUSES = frozenset(
+    {TicketStatus.COMPLETED, TicketStatus.CANCELLED, TicketStatus.FAILED}
+)
+
+_StateT = TypeVar("_StateT", bound=Enum)
+_ActionT = TypeVar("_ActionT", bound=Enum)
+
+
+def _step(
+    table: dict[tuple[_StateT, _ActionT], _StateT],
+    machine: str,
+    current: _StateT,
+    action: _ActionT,
+) -> _StateT:
+    try:
+        return table[(current, action)]
+    except KeyError as exc:
+        raise IllegalTransitionError(machine, current.value, action.value) from exc
+
+
+def next_ticket_status(current: TicketStatus, action: TicketAction) -> TicketStatus:
+    return _step(_TICKET_TABLE, "ticket", current, action)
+
+
+def next_assignment_status(current: AssignmentStatus, action: AssignmentAction) -> AssignmentStatus:
+    return _step(_ASSIGNMENT_TABLE, "assignment", current, action)
+
+
+def next_effect_status(current: EffectState, action: EffectAction) -> EffectState:
+    return _step(_EFFECT_TABLE, "effect", current, action)
+
+
+def assert_assignment_belongs_to(ticket: Ticket, assignment: Assignment) -> None:
+    if assignment.ticket_id != ticket.id:
+        raise IllegalTransitionError(
+            "assignment", assignment.status.value, f"cross_ticket:{ticket.id}"
+        )

@@ -6,7 +6,7 @@
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
 > **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m1-skeleton` 上开始，
-> DoD 2/60，里程碑步骤 1/30，M1 任务级步骤 10/50）。**
+> DoD 4/60，里程碑步骤 2/30，M1 任务级步骤 15/50）。**
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6 节的 M1 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
@@ -66,8 +66,12 @@
       证据（2026-11-02，Task 1）：`mypy` = `Success: no issues found in 30 source files`，
       `ruff check stableagent tests` = `All checks passed!`，`ruff format --check` = `60 files already formatted`，
       `pytest tests/unit/test_orchestration_boundaries.py --no-cov` = `6 passed`。
-- [ ] **M1.2** `model.py`：7 模型 + 4 枚举 + `IdFactory`/`Clock` 协议与默认实现 +
+- [x] **M1.2** `model.py`：7 模型 + 4 枚举 + `IdFactory`/`Clock` 协议与默认实现 +
       三个纯状态转换函数（先写 `test_orchestration_model.py` 的转换矩阵与序列化 round-trip）。
+      证据（2026-11-02，Task 2 + Task 3）：7 模型 + 8 个枚举（5 个状态/类型枚举 + 3 个 action 枚举，
+      原文"4 枚举"按实际成员数订正）+ `IdFactory`/`Clock` 协议与 `Uuid4Id`/`SystemClock` 默认实现 +
+      `next_ticket_status`/`next_assignment_status`/`next_effect_status`/`assert_assignment_belongs_to`；
+      `tests/unit/test_orchestration_model.py` = `20 passed`，全量 `309 passed, 1 skipped`。
 - [ ] **M1.3** `store.py`：8 张表 + `schema_migrations` + `transaction()`（重入与 `in_transaction` 守卫）+
       唯一键 `(ticket_id, attempt)` / `worker_run_id` / `kind + idempotency_key`。
       先写 `test_orchestration_store.py`：重开无损、回滚、唯一键冲突、排序分页。
@@ -160,13 +164,26 @@
       证据（2026-11-02，Task 2）：`tests/support.py` 追加 `SequenceIds`（`tk-0001` 形状）与
       `FixedClock`（起点 `1_700_000_000_000`，只 `advance()`），`model.py` 的 `Uuid4Id`/`SystemClock`
       仅供生产默认，测试路径不引用；本 Task 全部用例经注入工厂取 ID。
-- [ ] **A3** 状态转换只经集中纯函数，Repository 无任意字段更新入口（无私有 setter 暴露）。
-      验证：转换矩阵全绿 + 断言 `Store` 无 `update_ticket(status=...)` 类接口。证据：（待记录）。
+- [x] **A3** 状态转换只经集中纯函数，Repository 无任意字段更新入口（无私有 setter 暴露）。
+      验证：转换矩阵全绿 + 断言 `Store` 无 `update_ticket(status=...)` 类接口。
+      证据（2026-11-02，Task 3）：`next_ticket_status` / `next_assignment_status` / `next_effect_status`
+      三个纯函数各自查 `_TICKET_TABLE` / `_ASSIGNMENT_TABLE` / `_EFFECT_TABLE`，非法组合统一抛
+      `IllegalTransitionError`，`test_legal_ticket_transitions` 9 条参数化 + 3 条非法路径用例全绿；
+      "Store 无状态更新入口"的后半在 Task 4/5 建 `store.py` 后由
+      `test_orchestration_boundaries.py` 补断言（Task 10 收口）。
 - [ ] **A4** 模型级校验：Ticket 不得依赖自身、Assignment 必属某 Ticket、`attempt >= 1`、
-      `worker_run_id` 启动前可空启动后必填。验证：`test_orchestration_model.py` 的拒绝用例。证据：（待记录）。
+      `worker_run_id` 启动前可空启动后必填。验证：`test_orchestration_model.py` 的拒绝用例。
+      证据（前半，2026-11-02 Task 2/3）：自指依赖被 `Dependency` 的 `model_validator` 拒绝、
+      `attempt=0` 被 `ge=1` 拒绝、缺 `ticket_id` 构造不出 `Assignment`、
+      `assert_assignment_belongs_to()` 拒绝跨 Ticket 挂载；"启动后必填"半边等 Task 7 的
+      `test_run_id_is_registered_once_at_the_first_step_boundary`（见 ADR-04 决策 4.1）闭合后才勾。
 - [ ] **A5** `TicketView` 只由持久化记录派生，无缓存事实源。证据：（待记录）。
-- [ ] **A6** Ticket 状态机七个中间态语义齐备：`open→queued→running→waiting|ready|blocked|failed|cancelled→completed`，
-      且 `ready` 不自动等同 `completed`（需 `complete_ticket()`）。证据：（待记录）。
+- [x] **A6** Ticket 状态机七个中间态语义齐备：`open→queued→running→waiting|ready|blocked|failed|cancelled→completed`，
+      且 `ready` 不自动等同 `completed`（需 `complete_ticket()`）。
+      证据（2026-11-02，Task 3）：`TicketStatus` 9 个成员齐备；`_TICKET_TABLE` 里 `ready` 只有
+      `COMPLETE→completed` 与 `CANCEL→cancelled` 两条出边，`test_ready_is_not_completed_and_completed_is_terminal`
+      断言 `READY is not COMPLETED`、`READY not in TERMINAL_TICKET_STATUSES`，
+      且 `TERMINAL_TICKET_STATUSES == {COMPLETED, CANCELLED, FAILED}`、终态出边为空即非法。
 
 ### B. SQLite Store 与迁移（spec WP-4.2）
 
@@ -889,7 +906,7 @@ A4 的"启动后必填"半边由 Task 7 的行为断言闭合，到那时才整�
   `next_assignment_status(...)`、`next_effect_status(...)`、`TERMINAL_TICKET_STATUSES`、
   `assert_assignment_belongs_to(ticket, assignment) -> None`。非法组合抛 `IllegalTransitionError`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_model.py 追加
@@ -967,12 +984,12 @@ def test_effect_claim_and_retry_paths() -> None:
         next_effect_status(EffectState.SUCCEEDED, EffectAction.CLAIM)
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py -k transition or assignment or effect`
 Expected: FAIL —`ImportError: cannot import name 'TicketAction'`
 
-- [ ] **Step 3: 实现转换表**
+- [x] **Step 3: 实现转换表**
 
 ```python
 # stableagent/orchestration/model.py 追加
@@ -1084,29 +1101,45 @@ def assert_assignment_belongs_to(ticket: Ticket, assignment: Assignment) -> None
 A4 的"启动后必填"半边不在这里做模型不变量：`RUNNING` 早于 run_id 注册（ADR-04 决策 4.1），
 硬校验会把 Task 7 的正常转换打成红。它由 Task 7 的行为断言闭合，见该任务 Step 1 的
 `test_run_id_is_registered_once_at_the_first_step_boundary`。
-```
 
 注意：`TicketAction.START` 同时用于 `QUEUED→RUNNING` 与 `WAITING→RUNNING`（唤醒继续跑），
 `BLOCKED→QUEUE` 是给"人工重试/输入唤醒"重新排队的；`FAILED`/`CANCELLED`/`COMPLETED` 是终态，
 转换表里没有出边即为非法（A3/A6）。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py && .venv/bin/mypy`
-Expected: PASS。删掉测试里 `or True` 那行的宽松断言，改为
-`assert (TicketStatus.READY, TicketAction.COMPLETE) in {(TicketStatus.READY, TicketAction.COMPLETE)}`——
-不，改为 `assert next_ticket_status(TicketStatus.READY, TicketAction.COMPLETE) is TicketStatus.COMPLETED`
-并保留 `ready` 不等于 `completed` 的独立断言：
-`assert TicketStatus.READY is not TicketStatus.COMPLETED`。
+Expected: PASS。A6 的两条核心断言按原文落地：
+`assert TicketStatus.READY is not TicketStatus.COMPLETED`（ready 只是"可收口"）与
+`assert next_ticket_status(TicketStatus.READY, TicketAction.COMPLETE) is TicketStatus.COMPLETED`
+（进 `completed` 必须显式 `COMPLETE`）。
 
-- [ ] **Step 5: 提交**
+> 计划订正（执行时）：本 Step 原文夹着一段自我改口的话（"删掉 `or True` 那行……不，改为……"），
+> 那是写计划阶段的草稿残留，最终测试里既没有 `or True` 也没有恒真断言，已按上面的口径重写为单一指令。
+> 同时删掉了 Step 3 代码块后那个孤立的 ``` 闭合符（多余的 fence 会让后面两段正文被吞进代码块）。
+
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/model.py tests/unit/test_orchestration_model.py
 git commit -m "feat: put every P4 state machine behind one pure transition table"
 ```
 
+> 实跑（2026-11-02，分支 `feat/p4-m1-skeleton`）：Step 2 红 =
+> `ImportError: cannot import name 'TERMINAL_TICKET_STATUSES' from 'stableagent.orchestration.model'`；
+> Step 4 绿 = 本文件 `20 passed`，全量 `309 passed, 1 skipped`、`Total coverage: 98.54%`，
+> `mypy` = `Success: no issues found in 31 source files`，`ruff check` = `All checks passed!`，
+> `ruff format --check` = `62 files already formatted`。
+> 与原文的三处偏差（都不改语义）：
+> ① 追加的测试块没有另起一份 `import pytest` / `from ... model import`，而是并入既有导入块
+> ——重复导入会被 ruff `F811`/`I001` 判红；
+> ② `_step()` 按原文是无标注 def，本仓库 mypy 开了 `check_untyped_defs`，故补成
+> `TypeVar("_StateT" / "_ActionT", bound=Enum)` 的签名，三个 `next_*` 因此仍返回精确枚举类型；
+> ③ 多加一条 `test_assignment_cross_record_check_rejects_foreign_ticket`，让
+> `assert_assignment_belongs_to()`（本 Task 的 Produces 项）有真实断言，否则它是无测试的公开函数。
+
 **关闭 DoD：** A3、A6。
+> 实勾（2026-11-02）：两条均在本任务后勾选，证据见 §2 A3/A6 条目。
 ---
 
 ### Task 4: SQLite schema、事务守卫与迁移
