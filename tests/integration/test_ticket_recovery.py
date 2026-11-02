@@ -79,3 +79,8 @@ async def test_crash_mid_flight_then_recover_finishes(tmp_path: Path) -> None:
     assert ended_before, "演练应至少留下一个已完成的 Assignment"
     assert all(after[key] == "ended" for key in ended_before)  # 已完成不重跑
     assert all(status != "running" for status in after.values())  # 全部收敛
+
+    # M1.9 的"Provider 调用次数硬断言"：恢复进程只为被中断的 B 建了 1 个 Worker；
+    # 从 step-1 快照续跑恰好重放 [工具, 工具, 终答] 三轮——A 若被重跑，这里会多一个条目。
+    calls_lines = [x for x in recovered if "provider_calls" in x]
+    assert [x["provider_calls"] for x in calls_lines] == [[3]]

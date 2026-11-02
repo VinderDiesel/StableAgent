@@ -1,6 +1,7 @@
-"""L4 依赖方向 + 编排层版本口径（ADR-04 决策 1）。"""
+"""L4 依赖方向 + L1 loop 零 diff + 编排层版本口径（ADR-04 决策 1）。"""
 
 import ast
+import hashlib
 import pathlib
 
 import pytest
@@ -10,6 +11,9 @@ from stableagent.orchestration import ORCHESTRATION_SCHEMA_VERSION
 from stableagent.orchestration.errors import IdempotencyConflictError, OrchestrationError
 
 ROOT = pathlib.Path(stableagent.__file__).parent
+
+# P4 起点 46441f0 的 loop.py 内容哈希（M1 出口实测，与 git show 46441f0:...| shasum -a 256 一致）。
+_LOOP_SHA256_AT_P4_BASE = "27b71b6100a9813e59b25d8c016ba3e99527e6fa7dc1f895a4d446255cfc6299"
 
 
 def _imports_of(path: pathlib.Path) -> set[str]:
@@ -37,3 +41,9 @@ def test_orchestration_version_is_independent_and_not_reexported() -> None:
 def test_every_error_carries_a_stable_code() -> None:
     assert issubclass(OrchestrationError, ValueError)
     assert IdempotencyConflictError("x", "y").code == "orchestration.idempotency_conflict"
+
+
+def test_loop_py_is_byte_identical_to_p4_base() -> None:
+    """L1：M1 期间 loop.py 零 diff——用内容哈希替代 git 区间比对，测试保持离线。"""
+    digest = hashlib.sha256((ROOT / "core" / "loop.py").read_bytes()).hexdigest()
+    assert digest == _LOOP_SHA256_AT_P4_BASE

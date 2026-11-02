@@ -129,7 +129,7 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def _build(db: Path, clock: _AdvanceClock, tag: str):
+def _build(db: Path, clock: _AdvanceClock, tag: str, built: list[SlowProvider]):
     store = Store(db / "orchestration.db", clock=clock)
     ids = _PrefixedIds(tag)
     service = OrchestrationService(store, clock=clock, ids=ids)
@@ -148,6 +148,7 @@ def _build(db: Path, clock: _AdvanceClock, tag: str):
             ]
         )
         provider = SlowProvider(responses, delay=0.5)
+        built.append(provider)
         return Agent(
             name=f"worker-{assignment.attempt}",
             provider=provider,
@@ -183,7 +184,8 @@ async def _drain_to_idle(scheduler: Scheduler) -> None:
 
 async def run(phase: str, db: Path) -> None:
     clock = _AdvanceClock()
-    store, service, factory = _build(db, clock, phase)
+    built: list[SlowProvider] = []
+    store, service, factory = _build(db, clock, phase, built)
     sink = PrintingSink(service, store)
     executor = AgentExecutor(sink=sink, agent_factory=factory, clock=clock)
     scheduler = Scheduler(
@@ -210,6 +212,8 @@ async def run(phase: str, db: Path) -> None:
                 json.dumps({"ticket": view.ticket.id, "status": view.ticket.status.value}),
                 flush=True,
             )
+        # M1.9 的"Provider 调用次数硬断言"数据源：恢复进程里每建一个 Worker 记一条。
+        print(json.dumps({"provider_calls": [len(p.calls) for p in built]}), flush=True)
     store.close()
 
 
