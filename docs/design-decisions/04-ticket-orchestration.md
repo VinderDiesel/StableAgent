@@ -72,6 +72,24 @@ P4 要回答的是"多个长期任务如何被组织"：创建 `Ticket`、派生
 `launch_assignment`，executor 走 `Agent.stream_recover(worker_run_id)`——不重放 Event、不复制 state，
 沿用 ADR-02 的快照恢复语义。已 `ended` 的 Assignment 不得被再次启动，测试以 Provider 调用次数断言。
 
+### 4.1 补充（写计划时发现）：`worker_run_id` 在第一个 step 边界注册，而不是启动前
+
+规格 WP-4.4.5 要求"每次启动前注册 Assignment 的 `worker_run_id`"，但 Core 在 `Agent._drive()` 内部
+才生成 run_id（`stableagent/core/agent.py:325`），公开事件流里它只出现在 `CHECKPOINT` 事件的
+`data["run_id"]`，`agent.last_state.run_id` 同样只在 step 边界之后可读（`core/agent.py:240`）。
+P4 不改 Core 来迁就这条表述，改为精确化注册时机：
+
+1. `AgentExecutor` 驱动 `agent.stream(task)`，在**第一个 step 边界事件**处把 run_id 单条 UPDATE 写入
+   `Assignment.worker_run_id`；
+2. 未启用 checkpoint 的 Worker 配置（`Config.checkpoint.backend == "memory"` 或
+   `auto_save_every < 1`）一律拒绝启动并抛 `WorkerConfigError`——没有快照就没有可恢复的 Assignment，
+   编排层不该假装能恢复；
+3. 崩溃发生在第一个 step 边界之前时 run_id 仍为 `NULL`，`recover()` 以同一 Assignment、同一 `attempt`
+   重新入队 `launch_assignment` 并覆盖注册。其重复风险就是 ADR-02 后果 1 已声明的"一步的崩溃窗口
+   意味着工具调用必须可重入"，不新增不变式。
+
+对应规格文本的同步修订见 [P4 规格第 6 节第 7 条](../specs/p4-ticket-orchestration-kernel.md)。
+
 ### 5. Event→Report 映射与默认噪音
 
 映射固定：`DONE→ready`、`ERROR→failed`、`PAUSED(needs_human)→waiting_for_human`、

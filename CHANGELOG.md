@@ -24,8 +24,14 @@
   [P4 规格](docs/specs/p4-ticket-orchestration-kernel.md) 与
   [P7 规格](docs/specs/p7-production-hardening-ecosystem.md) 同步该归属
 - [P4 规格](docs/specs/p4-ticket-orchestration-kernel.md) 增加第 6 节"决策补充（2026-11-02，ADR-04）"，
-  以追加方式消解六处留白（驱动模型、事务不变式、暂停中投递输入的实现口径、公开契约与包名、
-  调度优先级、deadline 分层归属），不改写原文要求；首屏状态标签改为 Active
+  以追加方式消解八处留白（驱动模型、事务不变式、暂停中投递输入的实现口径、公开契约与包名、
+  调度优先级、deadline 分层归属、`worker_run_id` 注册时机、错误基类不继承 Core 的 `UserError`
+  ——Core 全库无此类，编排层改用 `OrchestrationError(ValueError)` 加稳定 `.code`），
+  不改写原文要求；首屏状态标签改为 Active
+- [P4 验收账本](docs/acceptance/p4-ticket-orchestration.md) 追加第 6 节"M1 任务级实施计划"：
+  10 个 Task / 50 个 TDD Step，每个 Task 写明精确文件、测试名、红绿命令与提交信息，并给出
+  Task ↔ 里程碑步骤 ↔ DoD 三项归属对照（第 1.4 节 M1 的 30 项在任务级全部有落点）。
+  M2/M3 的同粒度计划在各自里程碑开工前追加为第 7、8 节；**未提交任何 P4 实现代码**
 - `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 阶段表的 P4 行同步为
   Active；无任何文档把 P4 能力描述为已交付
 

@@ -254,7 +254,7 @@ P5 开始前必须保存 P4 的 SQLite recovery 集成基线和 Worker Event→R
 
 ## 6. 决策补充（2026-11-02，[ADR-04](../design-decisions/04-ticket-orchestration.md)）
 
-启动 P4 前，规格有六处留白会直接改变实现形状。以下补充是已接受的决策，不改动上文任何原始要求：
+启动 P4 前，规格有八处留白会直接改变实现形状。以下补充是已接受的决策，不改动上文任何原始要求：
 
 1. **驱动模型**：Scheduler 运行在单一 asyncio 事件循环内，用 `asyncio.Semaphore(max_concurrency)`
    驱动 `AgentExecutor`；`OrchestrationService` 的领域命令保持同步（只写记录与入队 effect）。
@@ -281,6 +281,25 @@ P5 开始前必须保存 P4 的 SQLite recovery 集成基线和 Worker Event→R
    `stableagent/core/` 的调用点，与 ADR-04 决策 6"P4 只允许一处 Core 兼容扩展"冲突，改归
    P7 [WP-7.2](p7-production-hardening-ecosystem.md)。
 
+7. **`worker_run_id` 的注册时机**：WP-4.4.5 写"每次启动前注册 Assignment 的 `worker_run_id`"，
+   但 Core 的 run_id 在 `Agent._drive()` 内部生成（`stableagent/core/agent.py:325`，
+   `uuid.uuid4().hex`），编排层在启动之前拿不到；公开面上它只在两处可观测——`CHECKPOINT` 事件的
+   `data["run_id"]`（`core/agent.py:178`）与 `agent.last_state.run_id`（同步于 step 边界，
+   `core/agent.py:240`）。已批准口径：`AgentExecutor` 在**第一个 step 边界事件**处注册 run_id，
+   且拒绝在未启用 checkpoint 的 Worker 配置上启动（抛 `WorkerConfigError`）；若进程在第一个 step
+   边界之前崩溃，`Assignment.worker_run_id` 仍为 `NULL`，`recover()` 以同一 Assignment、同一
+   `attempt` 重新入队 `launch_assignment` 并覆盖注册。此路径的重复风险就是
+   [ADR-02 后果 1](../design-decisions/02-checkpoint.md)"一步的崩溃窗口意味着工具调用必须可重入"
+   已声明的那一条，不是 P4 新增缺陷。
+
+8. **"稳定 `UserError` 子类"的错误基类**：第 4 节要求非法状态、未知 ID 等抛"稳定的 `UserError`
+   子类"，但 Core 里不存在 `UserError`（`stableagent/` 全库无此类），继承它意味着为错误类型再改
+   `stableagent/core/`，与第 3 条"唯一一处 Core 兼容扩展"冲突。已批准口径：编排层以
+   `stableagent/orchestration/errors.py` 的 `OrchestrationError(ValueError)` 为基类，每个实例携带
+   机器可判的稳定 `.code`（`orchestration.<snake_case>`），"按类型文案判断"一律禁止；
+   本节原文的 `UserError` 读作"用户可读错误家族"这一语义而非某个既有类名。
+   P5/P6 需要把 code 映射到外部错误面时，取账本 G5 登记的清单。
+
 实施顺序按"走骨架优先"切分为 M1（端到端骨架，Core 零改动）/ M2（输入投递、取消、DAG、真并发、
 Core 扩展）/ M3（示例、CI 扩容、收口），步骤与验证命令见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)
-的第 1 节"实施顺序"。 
+的第 1 节"实施顺序"；M1 已进一步拆成任务级计划，见同一账本的第 6 节。 
