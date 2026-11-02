@@ -151,3 +151,58 @@ class FixedClock:
 
     def advance(self, ms: int) -> None:
         self._now += ms
+
+
+class RecordingSink:
+    """AssignmentSink 的测试替身：记录编排层写意图，不碰数据库。"""
+
+    def __init__(self) -> None:
+        self.reports: list[tuple[str, str, str, int | None]] = []
+        self.finished: list[tuple[str, str, str | None]] = []
+        self.ticket_actions: list[tuple[str, str]] = []
+        self.run_ids: list[tuple[str, str]] = []
+
+    def add_report(
+        self,
+        *,
+        ticket_id: str,
+        assignment_id: str,
+        kind: Any,
+        summary: str,
+        event_step: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.reports.append((ticket_id, assignment_id, kind.value, event_step))
+
+    def register_run_id(self, assignment_id: str, worker_run_id: str) -> None:
+        self.run_ids.append((assignment_id, worker_run_id))
+
+    def finish_assignment(
+        self, assignment_id: str, action: Any, *, failure: str | None = None
+    ) -> None:
+        self.finished.append((assignment_id, action.value, failure))
+
+    def transition_ticket(self, ticket_id: str, action: Any) -> None:
+        self.ticket_actions.append((ticket_id, action.value))
+
+
+class StubAgent:
+    """只暴露 AgentExecutor 用到的面：stream / stream_recover / last_state。"""
+
+    def __init__(self, events: list[Any], *, run_id: str = "run-1", config: Any = None) -> None:
+        from stableagent.core.agent import Config  # 局部导入避免测试耦合
+
+        self._events = list(events)
+        self.last_state = None
+        self.config = config or Config()
+        self.recovered_with: list[str | None] = []
+        self._run_id = run_id
+
+    async def stream(self, task: str) -> AsyncIterator[Any]:
+        for event in self._events:
+            yield event
+
+    async def stream_recover(self, run_id: str | None = None) -> AsyncIterator[Any]:
+        self.recovered_with.append(run_id)
+        for event in self._events:
+            yield event
