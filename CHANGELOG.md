@@ -4,7 +4,15 @@
 
 ## [Unreleased]
 
-### 规划与决策（P4 启动，2026-11-02；未提交任何 P4 实现代码）
+### 实现（P4 里程碑 M1 进行中；进度以[P4 验收账本](docs/acceptance/p4-ticket-orchestration.md)为准，P4 能力未交付）
+- 新增 `stableagent/orchestration/` 包骨架（账本 Task 1）：`ORCHESTRATION_SCHEMA_VERSION = "0.1.0"`
+  只在本包内定义、不在顶层 `stableagent/__init__.py` 重导出；`errors.py` 的
+  `OrchestrationError(ValueError)` 家族（7 个子类）按规格第 6 节第 8 条以 `.code` 提供机器可判的稳定标识
+- 新增 `tests/unit/test_orchestration_boundaries.py`：AST 扫描 `core/context/providers/tools` 四包，
+  断言无任何 `stableagent.orchestration` 导入（L4 依赖方向前半）
+- `stableagent/planning/__init__.py` docstring 去掉"Phase 4 交付"这一不实声明，改指 `orchestration/`
+
+### 规划与决策（P4 启动，2026-11-02）
 - 新增 [ADR-04](docs/design-decisions/04-ticket-orchestration.md)（Accepted）：P4 的驱动模型（单一 asyncio
   事件循环 + `asyncio.Semaphore`）、事务不变式（`Store.transaction()` 内禁止 `await`，提交前不得启动
   Worker）、恢复所有权（`_tasks` 只作取消句柄，单个 `worker_run_id` 同时最多一个驱动者）、
@@ -31,7 +39,9 @@
 - [P4 验收账本](docs/acceptance/p4-ticket-orchestration.md) 追加第 6 节"M1 任务级实施计划"：
   10 个 Task / 50 个 TDD Step，每个 Task 写明精确文件、测试名、红绿命令与提交信息，并给出
   Task ↔ 里程碑步骤 ↔ DoD 三项归属对照（第 1.4 节 M1 的 30 项在任务级全部有落点）。
-  M2/M3 的同粒度计划在各自里程碑开工前追加为第 7、8 节；**未提交任何 P4 实现代码**
+  M2/M3 的同粒度计划在各自里程碑开工前追加为第 7、8 节。M1 自 Task 1（包骨架 + 稳定错误码 +
+  依赖方向边界测试）起在分支 `feat/p4-m1-skeleton` 上推进，逐项证据写进账本对应条目；
+  **P4 能力在 M3 收口前不算交付**
 - `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 阶段表的 P4 行同步为
   Active；无任何文档把 P4 能力描述为已交付
 

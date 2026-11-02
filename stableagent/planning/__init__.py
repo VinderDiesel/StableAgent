@@ -1,1 +1,1 @@
-"""任务规划与编排（Phase 4 交付）：planner / dag / scheduler。"""
+"""任务规划占位：P6+ 的 LLM Planner。P4 的编排内核在 stableagent/orchestration/。"""

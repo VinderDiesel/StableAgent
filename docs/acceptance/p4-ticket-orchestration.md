@@ -5,8 +5,8 @@
 > + [ADR-02 Checkpoint](../design-decisions/02-checkpoint.md)（`stream_recover` 语义与单快照源）
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
-> **状态：Active（2026-11-02 计划经维护者确认，实现尚未开始；DoD 0/60，里程碑步骤 0/30，
-> M1 任务级步骤 0/50）。**
+> **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m1-skeleton` 上开始，
+> DoD 0/60，里程碑步骤 1/30，M1 任务级步骤 5/50）。**
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6 节的 M1 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
@@ -60,9 +60,12 @@
 
 ### M1：端到端骨架（Core 零改动，一个 Ticket 跑完并能在 SIGKILL 后恢复）
 
-- [ ] **M1.1** 建包骨架：`orchestration/__init__.py`（含 `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"`，
+- [x] **M1.1** 建包骨架：`orchestration/__init__.py`（含 `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"`，
       顶层 `stableagent/__init__.py` 不重导出）+ `errors.py` 的 `OrchestrationError` 家族与稳定 `code`；
       `planning/__init__.py` docstring 改指 `orchestration/`。验证：`.venv/bin/mypy`、`.venv/bin/ruff check .`。
+      证据（2026-11-02，Task 1）：`mypy` = `Success: no issues found in 30 source files`，
+      `ruff check stableagent tests` = `All checks passed!`，`ruff format --check` = `60 files already formatted`，
+      `pytest tests/unit/test_orchestration_boundaries.py --no-cov` = `6 passed`。
 - [ ] **M1.2** `model.py`：7 模型 + 4 枚举 + `IdFactory`/`Clock` 协议与默认实现 +
       三个纯状态转换函数（先写 `test_orchestration_model.py` 的转换矩阵与序列化 round-trip）。
 - [ ] **M1.3** `store.py`：8 张表 + `schema_migrations` + `transaction()`（重入与 `in_transaction` 守卫）+
@@ -406,7 +409,7 @@ M1 期间 Task 7/8/9 的测试会顺手覆盖一些 M2 归属项的前半（`D4`
   `IllegalTransitionError` / `UnknownTicketError` / `UnknownAssignmentError` / `ReentrantTransactionError` /
   `DuplicateLaunchError` / `WorkerConfigError` / `IdempotencyConflictError`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_boundaries.py
@@ -451,12 +454,12 @@ def test_every_error_carries_a_stable_code() -> None:
     assert IdempotencyConflictError("x", "y").code == "orchestration.idempotency_conflict"
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_boundaries.py -v`
 Expected: FAIL —`ModuleNotFoundError: No module named 'stableagent.orchestration'`
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 # stableagent/orchestration/errors.py
@@ -546,17 +549,27 @@ __all__ = ["ORCHESTRATION_SCHEMA_VERSION"]
 把 `stableagent/planning/__init__.py` 的 docstring 改为
 `"""任务规划占位：P6+ 的 LLM Planner。P4 的编排内核在 stableagent/orchestration/。"""`。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_boundaries.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS（4 个 parametrize + 2 条断言全绿，mypy 无问题）
 
-- [ ] **Step 5: 提交**
+> 实跑（2026-11-02）：Step 2 红 = `ModuleNotFoundError: No module named 'stableagent.orchestration'`；
+> Step 4 绿 = `6 passed`，`.venv/bin/mypy` = `Success: no issues found in 30 source files`，
+> `.venv/bin/ruff check stableagent tests` = `All checks passed!`。
+> 两处口径补充：单文件跑测试要加 `--no-cov`（否则 `fail_under=70` 对单文件的 41% 必然红，不是回归）；
+> 本 Task 的代码块经 `.venv/bin/ruff format` 后 `IdempotencyConflictError.__init__` 的
+> `super().__init__(...)` 合成一行（原文按 100 列折行会触发 format 差异），语义不变。
+
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ stableagent/planning/__init__.py tests/unit/test_orchestration_boundaries.py
 git commit -m "feat: open the orchestration package with its own version and stable codes"
 ```
+
+> 实跑：本账本的勾选与本 Task 代码同批提交（账本与代码同步是第 1 节"先测试后实现"的同一条要求），
+> 实现提交在分支 `feat/p4-m1-skeleton` 上，`git log` 可查。
 
 **关闭 DoD：** L4 前半（依赖方向扫描 + 版本不重导出）。G5 的 code 清单登记属 M2，本任务不勾；
 L4 要等 Task 10 补上 L1/L5 断言才整条勾。
