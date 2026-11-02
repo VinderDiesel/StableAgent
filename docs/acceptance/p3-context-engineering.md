@@ -4,7 +4,7 @@
 > P3 接入点预留）+ `docs/design-decisions/01-loop-runtime.md`（ADR-01 loop 契约）
 > + `docs/design-decisions/02-checkpoint.md`（ADR-02，压缩产物与快照/恢复的交互必须遵守其结论）。
 > 使用方式：每条都有"怎么验"，全部勾选即 P3 收口；未达 DoD 不进 P4。
-> **状态：51/52 本地收口（P3 实现、文档、benchmark 与本地 3.10/3.11/3.12 验证已完成；仅 G6 远端 GitHub Actions 待维护者提交/推送后确认）。**
+> **状态：52/52 正式收口（2026-11-02，CI run 41384598912 在 Python 3.10 / 3.12 两个 job 全绿）。**
 
 ---
 
@@ -363,9 +363,11 @@
       压缩产物入快照的理由与代价、reject 走外层而非抛异常、能力视图的召回护栏设计、
       与 checkpoint/恢复的交互；含**被否决方案**（至少：在 loop 内联压缩、组装器抛
       `BudgetExceeded`、引入 tiktoken、摘要只放内存、用 LLM 当质量评审）。
-- [ ] **G6 CI 全绿**：3.10/3.12 矩阵 + 心脏闸门（最后一条，需要将当前变更提交并推送后以 GitHub Actions 验证）。
+- [x] **G6 CI 全绿**：3.10/3.12 矩阵 + 心脏闸门（最后一条，需要将当前变更提交并推送后以 GitHub Actions 验证）。
       （本地等价预检已在 Python 3.10 / 3.11 / 3.12 通过；远端 workflow 只会运行远端已提交内容，
       未经维护者授权不得为验证而提交或推送工作区改动。）
+      **已关闭（2026-11-02）**：经维护者授权后提交并推送 `main`，远端 run 41384598912 针对 commit `707dff2`
+      两个 job 全部 success。逐 job 数值见本文末尾“远端 CI 收口记录”。
 
 ## H. 配套二并行轨道（Roadmap：P3 期间启动）
 
@@ -561,6 +563,8 @@ D 节第一版测试拿 `test_compression.corpus()` 的中文任务跑，`SHARED
 
 本次补齐了 E1–E3、F1–F5、G2/G4/G5 与 H1/H2，并重新验证既有 P3 实现。验收账本当前为 **51/52**：仅 G6 的远端 GitHub Actions 仍待当前变更被维护者提交并推送后验证。
 
+> 后续说明（同日）：本段是推送前快照，保留原文不重写。G6 已由其后的“远端 CI 收口记录”关闭，账本现为 52/52。
+
 ### 本地验证证据
 
 ```bash
@@ -583,3 +587,53 @@ D 节第一版测试拿 `test_compression.corpus()` 的中文任务跑，`SHARED
 ### G6 远端验证步骤
 
 维护者确认本工作区中所有改动后，提交并推送包含本次 P3 变更的分支；GitHub Actions 必须在 Python 3.10 / 3.12 均通过 ruff、format、mypy、pytest、全库 ≥70% 覆盖率和扩展后的核心 ≥90% 覆盖率门禁。记录 workflow run URL/ID 后，才可将 G6 勾选并宣布 P3 **52/52 正式收口**。
+
+## 远端 CI 收口记录（2026-11-02）
+
+P3 **52/52 正式收口**。证据链：本地门禁 fresh 复跑 → 分 4 个提交 → 推送 `main` → 远端矩阵全绿。
+
+### 推送前的本地复核（全部为本轮实跑，不是沿用上一轮结论）
+
+```bash
+.venv/bin/ruff check stableagent tests examples benchmarks   # All checks passed!
+.venv/bin/ruff format --check stableagent tests examples benchmarks   # 65 files already formatted
+.venv/bin/mypy                                                # Success: no issues found in 28 source files
+.venv/bin/pytest -q                                           # 283 passed, 1 skipped / 98.99%
+/tmp/sa-3.10/bin/python -m pytest -q --no-cov                 # 283 passed, 1 skipped (3.10.20)
+/tmp/sa-3.12/bin/python -m pytest -q --no-cov                 # 283 passed, 1 skipped (3.12.13)
+git diff 46441f0 -- stableagent/core/loop.py | wc -l           # 0（L1 复核：P3 全程未动 loop）
+.venv/bin/python benchmarks/context_compression_benchmark.py --tools 200
+```
+
+benchmark 复跑与 [基准记录](../evidence/p3-context-benchmark-2026-11-02.md) 逐项一致：hybrid 629 估算
+token / 节省 51.16% / 事实保留 100%，truncation 节省 64.29% 但只留 25% 事实，summary MAE 124；
+200 工具场景裁掉 8,570 token（节省 98.59%）后 `resident_audit` 仍在保留集合内、`fallback=false`；
+checkpoint payload 4,056 → 2,594 字节。恢复耗时本轮为 0.250 / 0.427 ms，与记录的 0.237 / 0.272 ms
+同为本机 SQLite 噪声量级——按该记录的约束，**不据此声称稳定的延迟改进**。
+
+### 提交划分
+
+推送把本地领先的 10 个提交一起带上 `origin/main`，其中本轮新增 4 个：`e079c14`（Evidence 迁至
+`tools/evidence.py`，registry 重导出）、`31b7b55`（离线 benchmark 与其形状断言）、
+`09a88a1`（CI FOCUS 扩到 12 个文件）、`707dff2`（文档重组与 P3 记录）。
+
+### 远端结果
+
+- Run：<https://github.com/VinderDiesel/StableAgent/actions/runs/41384598912>（ID 41384598912，head SHA `707dff24195d63ffe410ad58fda73a2741b9745c`）
+- `quality (3.12)` success，30s；`quality (3.10)` success，33s
+- 两个 job 逐条相同：ruff `All checks passed!`、format `65 files already formatted`、
+  mypy `Success: no issues found in 28 source files`、pytest `283 passed, 1 skipped`、
+  总覆盖率 **98.99%**（门槛 70%）
+- 心脏闸门（≥90% 每文件）：`context/{assembly,budget,capability,compression,engine,tokens}.py`
+  与 `tools/evidence.py`、`core/checkpoint/manager.py` 均 **100.0%**；
+  `core/checkpoint/storage.py` 99.3%、`recovery.py` 99.0%、`core/errors.py` 98.3%、
+  `core/loop.py` **96.8%**
+- 唯一标注是 Actions runner 层面的弃用提示（checkout@v4 / setup-python@v5 的 Node 20、
+  ubuntu-latest 迁移到 Ubuntu 26），与 P3 判定无关
+
+### 收口后的状态
+
+L1~L7、A~H 全部勾选，52/52。P4 的进入条件（`specs/README.md` 规则 4：仅当阶段全部退出条件具备
+可复现证据才可启动下一阶段）自此满足；P4 启动时把 [P3 Spec](../specs/p3-worker-context-runtime.md)
+第 7 节“阶段交接”作为输入，并沿用本记录的估算误差范围与 benchmark 基线位置。
+

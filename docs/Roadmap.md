@@ -85,7 +85,7 @@ StableAgent Core（P0–P3）
 ## 实施与验收资料
 
 - [文档中心](README.md) 是全部设计、规格、验收与历史资料的导航入口。
-- 当前 P3 的实现合同是 [Worker Context Runtime Spec](specs/p3-worker-context-runtime.md)，完成状态和验证证据以 [P3 Context Engineering Acceptance](acceptance/p3-context-engineering.md) 为准。
+- P3 的实现合同是 [Worker Context Runtime Spec](specs/p3-worker-context-runtime.md)，完成状态和验证证据以 [P3 Context Engineering Acceptance](acceptance/p3-context-engineering.md) 为准。
 - P4–P7 的未来实施合同由 [阶段规格索引](specs/README.md) 统一维护。
 - P1/P2 的完成证据在 [Acceptance](acceptance/README.md)；公共契约与已接受设计见 [Design Decisions](design-decisions/)。
 
@@ -136,11 +136,11 @@ StableAgent Core（P0–P3）
 
 ---
 
-## P3：Worker Context Runtime — 本地收口，待远端 CI
+## P3：Worker Context Runtime — 已完成（52/52）
 
 **目标**：让单个 Worker 在长任务中以可测量、可恢复、可治理的方式使用历史消息和工具能力。
 
-P3 的实现、文档和本地质量门禁已完成。P4 仍不得启动，直到当前变更被维护者确认、提交并经 GitHub Actions 的 3.10/3.12 矩阵验证。
+P3 已正式收口：变更提交并推送 `main` 后，GitHub Actions run 41384598912 在 Python 3.10 / 3.12 两个 job 全绿（`283 passed, 1 skipped`、总覆盖率 98.99%、12 个 FOCUS 心脏文件均 ≥90%）。逐条证据与命令记在 [P3 验收账本](acceptance/p3-context-engineering.md) 的“远端 CI 收口记录”。
 
 ### 已完成的基础
 
@@ -150,7 +150,7 @@ P3 的实现、文档和本地质量门禁已完成。P4 仍不得启动，直�
 - `ContextAssembler` 注入点与默认路径短路。
 - P3 DoD：`docs/acceptance/p3-context-engineering.md`。
 
-### 本地完成的交付
+### 交付内容
 
 1. **动态能力视图与预算治理**
    - `static` 保持 P2 工具顺序与事件流；`relevance` 使用确定性规则、resident 护栏、空集 fallback 和稳定排序。
@@ -165,13 +165,13 @@ P3 的实现、文档和本地质量门禁已完成。P4 仍不得启动，直�
 
 3. **发布与工程收口**
    - [ADR-03](design-decisions/03-context-engineering.md)、[P3 验收账本](acceptance/p3-context-engineering.md)、[P3 实施规格](specs/p3-worker-context-runtime.md) 和 [对外文章](blog/02-context-engineering.md) 已同步。
-   - 本地 ruff、format、mypy、全量 pytest 和 Python 3.10/3.12 矩阵通过；CI context 核心覆盖率门禁已扩展。
+   - 本地与远端质量门禁通过：ruff、format、mypy、全量 pytest、覆盖率，以及扩展后的 12 文件核心覆盖率闸门。
 
-### P3 正式退出条件
+### P3 正式退出条件（已满足）
 
-- 当前分支经维护者确认后提交并推送。
-- GitHub Actions 在 Python 3.10 / 3.12 均通过 ruff、format、mypy、pytest、全库覆盖率与扩展后的核心覆盖率闸门。
-- 将 workflow run URL/ID 记录到 [P3 验收账本](acceptance/p3-context-engineering.md)，将 G6 勾选为 52/52。
+- [x] 当前分支经维护者确认后提交并推送（`origin/main` @ `707dff2`，共 10 个提交）。
+- [x] GitHub Actions 在 Python 3.10 / 3.12 均通过 ruff、format、mypy、pytest、全库覆盖率与扩展后的核心覆盖率闸门（run 41384598912，两 job success）。
+- [x] 将 workflow run URL/ID 记录到 [P3 验收账本](acceptance/p3-context-engineering.md)，G6 已勾选为 52/52。
 
 
 ---

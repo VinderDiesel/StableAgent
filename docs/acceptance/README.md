@@ -6,7 +6,7 @@
 |---|---|---|---|
 | P1 | [Core Runtime](p1-core-runtime.md) | Completed evidence | 追溯 AgentLoop、事件、暂停和 P3 接缝契约 |
 | P2 | [Checkpoint & Recovery](p2-checkpoint-recovery.md) | Completed evidence | 追溯 checkpoint、恢复、重试、CI 和恢复性能基线 |
-| P3 | [Context Engineering](p3-context-engineering.md) | Local close / CI pending | 实现、benchmark 与本地质量证据已齐；远端 CI 通过后正式收口 |
+| P3 | [Context Engineering](p3-context-engineering.md) | Completed evidence | 追溯压缩/能力视图/预算治理、Evidence 位置决策、benchmark 与 CI 收口记录 |
 
 使用规则：
 

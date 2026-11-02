@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-### 契约扩展（P3 本地收口，远端 CI 待确认；全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
+### 契约扩展（P3 已收口，run 41384598912；全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
 - `ContextConfig` 新增 5 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /
   `tool_result_excerpt_chars=200` / `max_visible_tools=8`；`on_budget_exceeded` 的
   `compress` / `degrade` / `reject` 三个取值从"声明未实现"变为真实语义（见下方引擎条目）。
@@ -85,6 +85,18 @@
   不作为真实模型 tokenizer 精度声明
 - `tests/unit/test_evidence.py` 与 `tests/unit/test_context_benchmark.py`：覆盖 Evidence 兼容/不变式/追溯字段，
   以及 benchmark 的质量、校准、resident 护栏和 checkpoint 输出形状
+
+### P3 收口
+- DoD **52/52**：最后一项 G6（CI 3.10/3.12 矩阵 + 心脏闸门）由 run 41384598912 关闭（head SHA `707dff2`），
+  两个 job 均为 `283 passed, 1 skipped` / 覆盖率 98.99% / 12 个 FOCUS 文件 96.8–100%，
+  与推送前的本地预跑数值逐条一致；证据记在 `docs/acceptance/p3-context-engineering.md`
+  的 G6 条目与“远端 CI 收口记录”
+- 文档按职责重组（不改任何运行时代码语义）：Roadmap 只留范围与退出条件摘要，P3–P7 实施合同进
+  `docs/specs/`，各阶段 DoD 与实测输出进 `docs/acceptance/`，benchmark 口径进 `docs/evidence/`，
+  原始构想进 `docs/archive/`；新增 `docs/documentation-standards.md` 定义状态标签与冲突裁决优先级。
+  `docs/p1-dod-checklist.md` 保留为跳转存根，因为冻结的 `core/loop.py:12` 仍引用该路径
+- CI 心脏模块 FOCUS 从 5 个文件扩到 12 个：新增 `context/{assembly,tokens,compression,capability,budget,engine}.py`
+  与 `tools/evidence.py`，每文件单独要求 ≥90% 行覆盖
 
 ### P2 收口
 - DoD **34/34**：最后一项 F5（CI 3.10/3.12 矩阵全绿）由 run 41032998523 关闭，

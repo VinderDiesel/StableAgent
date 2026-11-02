@@ -236,9 +236,9 @@ python benchmarks/recovery_time_benchmark.py
 - [x] compress/degrade/reject 在入场和运行中语义明确，终止事件契约未被破坏。
 - [x] Evidence 的文件位置与兼容策略已由 ADR-03 记录并测试；P3 不增加会改变默认 event payload 的 trace 字段。
 - [x] context benchmark、200 工具爆炸 benchmark、summary checkpoint 影响和 P2 recovery 基线均可复现并有日期明确的对外证据。
-- [x] 本地 CI 等价验证在 Python 3.10 / 3.11 / 3.12 通过；全库覆盖率 98.99%，Core 与 context FOCUS 每文件 ≥90%。
+- [x] 本地与远端 CI 验证在 Python 3.10 / 3.12 通过（run 41384598912，两 job success）；3.11 本地同规格通过；全库覆盖率 98.99%，Core 与 context FOCUS 每文件 ≥90%。
 - [x] ADR-03、P3 DoD、契约文档、CHANGELOG、README、博客与源码一致。
-- [ ] 当前分支提交并推送后的 GitHub Actions 3.10/3.12 workflow 尚待验证；通过后记录 run URL/ID 并将 P3 Acceptance G6 标记为 52/52 正式收口。
+- [x] 当前分支已提交并推送（`origin/main` @ `707dff2`），GitHub Actions 3.10/3.12 workflow 全绿；run URL 与逐 job 数值记在 [P3 Acceptance](../acceptance/p3-context-engineering.md) 的“远端 CI 收口记录”，G6 已标记 52/52 正式收口。
 
 ## 7. 阶段交接：P4 的输入
 
