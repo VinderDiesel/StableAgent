@@ -4,7 +4,7 @@
 > P3 接入点预留）+ `docs/design-decisions/01-loop-runtime.md`（ADR-01 loop 契约）
 > + `docs/design-decisions/02-checkpoint.md`（ADR-02，压缩产物与快照/恢复的交互必须遵守其结论）。
 > 使用方式：每条都有"怎么验"，全部勾选即 P3 收口；未达 DoD 不进 P4。
-> **状态：0/52 未开始。**
+> **状态：3/52 进行中（A 节度量地基已落，见文末进度记录）。**
 
 ---
 
@@ -43,19 +43,24 @@
 
 ## A. 度量地基：token 估算与校准（没有这一步，后面全是玄学）
 
-- [ ] **A1 `TokenCounter` 协议 + 启发式默认实现**（`context/tokens.py`）：
+- [x] **A1 `TokenCounter` 协议 + 启发式默认实现**（`context/tokens.py`）：
       `count(text) -> int`、`count_messages(messages) -> int`、`count_tools(specs) -> int`；
       默认启发式 = `ceil(chars / 4)` + 每条消息固定开销，**纯函数、可单测、无依赖**。
-- [ ] **A2 工具规格也要计入成本**：`count_tools` 对 `ToolRegistry.specs()` 的 JSON 结构计价
+      （落地补充：CJK/全角按 ≈1 token/字计价，否则中文任务上估算会系统性偏低。）
+- [x] **A2 工具规格也要计入成本**：`count_tools` 对 `ToolRegistry.specs()` 的 JSON 结构计价
       （name/description/parameters）。能力视图的收益必须算这块，否则等于没测。
+      （`sort_keys` 定序已锁：键序不同计数必须相等。）
 - [ ] **A3 估算可注入可替换**：Agent/Engine 接受 `token_counter=`，缺省用启发式；
       测试注入"每条 1 token"的桩，断言预算判定随之改变（证明决策链真的消费这个量）。
+      （协议面与 `resolve_token_counter` 的缺方法早失败已完成并有测试；
+      **Agent/Engine 的注入参数随 D1 一起落**，故本条不勾。）
 - [ ] **A4 事后校准**：Provider 回报 `usage.prompt_tokens` 时，记录 `(估算, 真实)` 对；
       `state.usage` 里以 `context_tokens_est` / `prompt_tokens` 并存（`usage` 是 `dict[str,int]`，
-      **不构成契约变更**）。
+      **不构成契约变更**）。**未做**：写入点在引擎与外层（D1/D5），那里才是估算与真实值同时可见
+      的唯一位置；未接线前不占名、不写半成品。
 - [ ] **A5 估算误差进 benchmark 报告**：`benchmarks` 输出估算相对真实值的 MAE 与偏差方向；
       README/blog 只引用带误差标注的数字。
-- [ ] **A6 单测**：同一输入两次计数相等（确定性）；空消息、超长消息、非 ASCII、
+- [x] **A6 单测**：同一输入两次计数相等（确定性）；空消息、超长消息、非 ASCII、
       JSON schema 嵌套这几类边界各 1 条。
 
 ## B. 历史压缩（`context/compression.py`）
@@ -201,4 +206,28 @@ L1~L7（钉边界，尤其 L2 与 L5，这两条决定了后面所有设计的�
 
 ## 验收记录
 
-（待填：每条的验证命令与真实输出，格式沿用 `docs/p2-dod-checklist.md` 的"验收记录/复核记录"两节。）
+### 2026-11-02 · A 节度量地基（A1 / A2 / A6 勾选）
+
+新增 `stableagent/context/tokens.py`（估算协议 + 启发式实现 + `count_context` +
+`resolve_token_counter`）与 `tests/unit/test_token_counter.py`（15 条）。
+
+```
+$ .venv/bin/ruff check stableagent tests examples benchmarks   → All checks passed!
+$ .venv/bin/ruff format --check ...                            → 51 files already formatted
+$ .venv/bin/mypy                                               → Success: no issues found in 23 source files
+$ .venv/bin/pytest -q                                          → 141 passed, 1 skipped / 98.19%
+$ .venv/bin/pytest --cov=stableagent/context/tokens            → tokens.py 51 stmts 0 miss 100%
+```
+
+过程中改的两处判断，记录以免被后人当成随手改：
+
+1. **启发式必须分域计价**。原计划 `ceil(chars/4)` 一刀切，在中文任务上会把
+   "恢复"两个字估成 0.5→1 token 的级别，而 BPE 实际接近 1 token/字——预算阈值若按此估算
+   设定，会在中文语料上**系统性高估容量**，等于把超限判断推迟到真实请求里爆掉。
+   现实现按 CJK/全角 ≈1 token/字、其余 ≈4 字/1 token，`test_a6_wide_chars_cost_more_per_char_than_ascii`
+   锁住方向。
+2. **计数必须定序**。`_dump` 用 `sort_keys=True`：否则同一个工具规格因键序不同给出不同计数，
+   "裁掉 N 个工具省了多少 token"就掺进了哈希噪声，F1/F2 的差值不可复现。
+
+A3 只落了协议与早失败校验，`token_counter=` 的注入参数留给 D1 的引擎；A4/A5 未动——
+写入点在引擎与 Agent 外层，未接线前不写半成品（避免 P2 那种"数字先于链路存在"的尴尬）。
