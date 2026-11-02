@@ -6,8 +6,13 @@ import asyncio
 
 import pytest
 
-from stableagent.orchestration.errors import DuplicateLaunchError
-from stableagent.orchestration.model import Ticket
+from stableagent.orchestration.errors import DuplicateLaunchError, UnknownAssignmentError
+from stableagent.orchestration.model import (
+    AssignmentStatus,
+    Effect,
+    EffectKind,
+    Ticket,
+)
 from stableagent.orchestration.scheduler import Scheduler
 from stableagent.orchestration.service import OrchestrationService
 from stableagent.orchestration.store import Store
@@ -17,6 +22,7 @@ from tests.support import FixedClock, SequenceIds
 class StubExecutor:
     def __init__(self) -> None:
         self.launched: list[str] = []
+        self.recovered: list[str] = []
         self.gate = asyncio.Event()
         self.started = asyncio.Event()
 
@@ -29,7 +35,8 @@ class StubExecutor:
 
     async def cancel(self, assignment) -> None: ...
 
-    async def recover(self, assignment, ticket) -> None: ...
+    async def recover(self, assignment, ticket) -> None:
+        self.recovered.append(assignment.id)
 
 
 @pytest.fixture
@@ -98,3 +105,45 @@ async def test_queue_survives_reopen_without_memory_state(env, tmp_path) -> None
         assert [t.id for t in reopened.list_runnable_tickets(clock.now_ms())]  # 事实源在库里
     finally:
         reopened.close()
+
+
+async def test_drain_launches_every_queued_worker_then_quiets(env) -> None:
+    _, service, executor, scheduler, _ = env
+    for index in range(3):
+        _queued(service, f"任务 {index}")
+    executor.gate.set()  # 桩 Worker 立刻结束，drain 靠轮次推进把队列跑空
+    results = await scheduler.drain(max_rounds=20)
+    assert not scheduler.running_assignments()
+    assert results[-1].enqueued == 0 and results[-1].dispatched == 0
+    assert len(executor.launched) == 3
+
+
+async def test_interrupted_assignment_is_relaunched_via_recover(env) -> None:
+    store, service, executor, scheduler, _ = env
+    ticket = _queued(service, "被打断过")
+    assignment = store.list_assignments(ticket.id)[0]
+    interrupted = assignment.model_copy(update={"status": AssignmentStatus.INTERRUPTED})
+    store.update_assignment(interrupted)
+    executor.gate.set()
+    # 崩溃现场语义：Assignment 仍是 INTERRUPTED 就被驱动（enqueue_work 路径会先行翻转，
+    # 真实翻转在 _guarded 里由 relaunch_assignment 完成）。
+    await scheduler.drive(interrupted, ticket)
+    await _wait_until_idle(scheduler)
+    assert executor.recovered == [assignment.id]  # 恢复走 recover，不再冷启动
+    assert executor.launched == []
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.RUNNING
+
+
+async def test_launch_effect_pointing_at_missing_assignment_raises(env) -> None:
+    store, _, _, scheduler, clock = env
+    effect = store.enqueue_effect(
+        Effect(
+            id="ef-ghost",
+            kind=EffectKind.LAUNCH_ASSIGNMENT,
+            idempotency_key="launch:as-ghost:1",
+            payload={"assignment_id": "as-ghost", "ticket_id": "tk-ghost"},
+            due_at=clock.now_ms(),
+        )
+    )
+    with pytest.raises(UnknownAssignmentError):
+        await scheduler._handle_launch(effect)
