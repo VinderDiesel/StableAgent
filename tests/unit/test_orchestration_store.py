@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,19 @@ def test_all_eight_tables_exist_with_schema_version(store: Store) -> None:
     }
     assert names >= TABLES
     assert store.schema_version() == "0.1.0"
+
+
+def test_p4_database_keeps_p2_checkpoint_tables_out(store: Store) -> None:
+    """L5：编排库只含自己的 8 张表——P2 的 `checkpoints` 不被带进来，两边各自演进。"""
+    names = {
+        row[0]
+        for row in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    user_tables = {name for name in names if not name.startswith("sqlite_")}
+    assert user_tables == TABLES
+    assert "checkpoints" not in user_tables
 
 
 def test_transaction_is_atomic_for_both_ticket_and_effect(store: Store) -> None:
@@ -219,3 +233,21 @@ def test_due_effects_and_update_effect_round_trip(store: Store) -> None:
     assert store.update_effect(claimed) == claimed
     assert store.due_effects(10) == []
     assert store.count_effects("tk-1", EffectState.RUNNING) == 0
+
+
+def test_concurrent_reader_only_sees_committed_state(tmp_path: Path) -> None:
+    """B6 后半"并发读取"：独立连接与写事务并发——未提交内容对它不可见，提交后可见。"""
+    handle = Store(tmp_path / "orchestration.db", clock=FixedClock())
+    reader = sqlite3.connect(str(tmp_path / "orchestration.db"))
+    reader.row_factory = sqlite3.Row
+    try:
+        handle.insert_ticket(_ticket("tk-1"))
+        with handle.transaction():
+            handle.insert_ticket(_ticket("tk-2"))
+            seen = {row[0] for row in reader.execute("SELECT id FROM tickets").fetchall()}
+            assert seen == {"tk-1"}  # 事务内未提交的 tk-2 不泄漏给并发读取
+        seen = {row[0] for row in reader.execute("SELECT id FROM tickets").fetchall()}
+        assert seen == {"tk-1", "tk-2"}  # 提交后立即可读
+    finally:
+        reader.close()
+        handle.close()
