@@ -4,15 +4,16 @@
 > P3 接入点预留）+ `docs/design-decisions/01-loop-runtime.md`（ADR-01 loop 契约）
 > + `docs/design-decisions/02-checkpoint.md`（ADR-02，压缩产物与快照/恢复的交互必须遵守其结论）。
 > 使用方式：每条都有"怎么验"，全部勾选即 P3 收口；未达 DoD 不进 P4。
-> **状态：3/52 进行中（A 节度量地基已落，见文末进度记录）。**
+> **状态：11/52 进行中（A 节度量地基 + B 节历史压缩已落，L1 复核 0 diff，见文末进度记录）。**
 
 ---
 
 ## 0. 前置约束（本阶段的硬边界，违反即不算完成）
 
-- [ ] **L1 `core/loop.py` 零修改**：压缩 / 能力视图 / 预算治理全部经 P1 预留的两个位点接入
+- [x] **L1 `core/loop.py` 零修改**：压缩 / 能力视图 / 预算治理全部经 P1 预留的两个位点接入
       （`ContextAssembler.assemble()`、`tool_selector(specs, state)`）+ Agent 外层。
       验收方式：`git diff <P2收口提交>..HEAD -- stableagent/core/loop.py` 为空，结果记进本文件。
+      （A+B 节落地后复核：`git diff 46441f0 -- stableagent/core/loop.py` 输出 0 行。）
 - [ ] **L2 组装器不得抛异常来表达"拒绝"**：`AgentLoop.advance()` 里 `assemble()` /
       `tool_selector()` 的调用**在 provider 的 try/except 之外**（`core/loop.py:60-61`），
       抛出即绕过 `error` 事件、直接破坏 F4。所以 `on_budget_exceeded="reject"` 必须由
@@ -65,27 +66,69 @@
 
 ## B. 历史压缩（`context/compression.py`）
 
-- [ ] **B1 `truncation`**：保留 system + 最近 `keep_recent_messages` 条，丢弃最旧；
+> **本节的两条设计决策（写在这里，因为代码形状就是被它俩决定的）**
+> 1. **压缩是快照的纯函数**：`ContextAssembler.assemble()` 只拿到 `state.messages`
+>    （`core/loop.py:60`），拿不到快照的其余部分，也写不回快照。所以默认路径不在进程里
+>    留任何缓存——同一份 `messages` 必得同一份上下文，L5 因此以"根本没有第二份状态"的形式成立。
+>    缓存的载体是上下文里的一条 `role="system"` + `name="context_summary"` 标记消息：
+>    输入里有它就当作"已折叠段的既有成果"，输出至多一条，绝不叠加。
+> 2. **压缩的开关只有一个：`ContextConfig.compression`**。`assembly` 保持 `passthrough`
+>    时压缩照样生效（`resolve_assembler` 组装 `CompressedAssembler`），避免出现
+>    "配了压缩却因为 assembly 没换而静默失效"。`compression="none"`（默认）返回 None，路径短路。
+
+- [x] **B1 `truncation`**：保留 system + 最近 `keep_recent_messages` 条，丢弃最旧；
       **不得拆散 `tool_call` / `tool_result` 配对**（截断点落在配对中间会让 Provider 报错）。
       单测断言：任意截断结果里不存在"有 `tool_calls` 的 assistant 消息其后没有对应 tool 消息"。
-- [ ] **B2 `summary`**：把被折叠的历史压成一条摘要，写入 `AgentState.context_summary`（L5），
+      （`partition()` 的边界回退规则：保留段首条若是 `tool`，边界往前挪到它的 assistant。
+      验收：`test_b1_truncation_never_splits_tool_pairs` 对 keep=0..12 全扫，
+      `test_b1_boundary_rule_holds_for_all_strategies` 对三档策略同样全扫——同一不变式跑 39 组参数。
+      额外常驻规则：**首条 user 消息（任务本体）也常驻**，否则截断会把"当初要干什么"丢掉。）
+- [x] **B2 `summary`**：把被折叠的历史压成一条摘要，写入 `AgentState.context_summary`（L5），
       由 assembler 在发给 Provider 时替换原始旧消息段。
       摘要生成器**可注入**：默认实现是**离线抽取式**（对 `Evidence` 的 `output`/`error` 与
       assistant 文本做定长摘录，确定性、零模型调用）；接真实模型的实现经 `summariser=` 注入。
-- [ ] **B3 `hybrid`**：先折叠工具结果（`Evidence` 文本是 token 大头），再对更早的消息做摘要，
+      （已落：`ExtractiveSummariser` + `SummaryCompressor(config, summariser)`，
+      注入用例 `test_b2_injected_summariser_replaces_default` 断言摘要器收到的正是折叠段本身。
+      **`AgentState.context_summary` 字段的写入点随 D1 的 `ContextEngine` 接线**：
+      loop 位点看不到也写不了快照（见上面决策 1），外层在每次进入 `_pipeline` 的边界压缩一次才是
+      "一次模型调用换 N 步复用"的落点。B2 的"摘要进上下文"已闭环，"摘要进快照"归 D1，
+      与 A3/A4/A5 的处理方式一致：未接线前不写半成品。）
+- [x] **B3 `hybrid`**：先折叠工具结果（`Evidence` 文本是 token 大头），再对更早的消息做摘要，
       最后才截断；三档顺序有单测锁死（顺序换了，质量保留率就变了）。
-- [ ] **B4 注册表接入**：`COMPRESSIONS: dict[str, type[...]]` + `resolve_compression(config)`，
+      （顺序证据用两条测试钉死，不靠注释：`test_b3_hybrid_level_order_is_locked` 断言
+      `levels == ("tool_excerpt", "summary", "truncation")`；
+      `test_b3_summary_sees_excerpted_tool_results_not_originals` 用记录型摘要器证明
+      摘要器看到的工具文本已被摘录过——即"先折工具"确实发生在"再摘要"之前。
+      第一档只动折叠段，保留段的证据保持原样（`test_b3_recent_window_stays_verbatim`）。）
+- [x] **B4 注册表接入**：`COMPRESSIONS: dict[str, type[...]]` + `resolve_compression(config)`，
       与 `ASSEMBLERS` 同构；未知名 `KeyError` 带出已注册清单（照 `resolve_assembler` 的错误文案）。
-- [ ] **B5 质量保留的**确定性**度量**：固定语料任务里在已知位置埋 N 条"答案必需事实"，
+      （`test_b4_*` 6 条：注册表内容、未知名文案、默认短路、单一开关、
+      既有 assembly 报错文案不变、压缩经 loop 位点真的到达 Provider
+      ——与 passthrough 同一脚本对跑，第三条调用的消息数更少且带摘要占位。）
+- [x] **B5 质量保留的**确定性**度量**：固定语料任务里在已知位置埋 N 条"答案必需事实"，
       断言每种策略下：(a) 事实是否仍在组装后的上下文里（fact-retention 率，子串判定）；
       (b) 最终答案的可断言部分正确。指标 = `token 节省率` 与 `质量保留率` **成对**出现，
       禁止只报节省率。
-- [ ] **B6 幂等**：同一状态重复 `assemble()` 不重复摘要、不使 `context_summary` 增长
+      （`test_b5_retention_pairs_with_savings_on_fixed_corpus`：13 条消息、6 个 `FACT-i` 埋在工具结果里，
+      三档策略各算 (节省率, 保留率) 并断言相对关系——truncation 省最多只留 2/6，
+      summary 保留 6/6 但节省率更低，hybrid 保留 6/6 且节省率 ≥ summary。
+      绝对数值留给 F 节的 benchmark 报告，这里锁的是**关系**，防止以后改坏了没人知道。）
+- [x] **B6 幂等**：同一状态重复 `assemble()` 不重复摘要、不使 `context_summary` 增长
       （否则每步多花一次模型调用）。单测：连调两次，第二次输出与 `context_summary` 均不变。
-- [ ] **B7 旧快照兼容**：`context_summary` 缺省 `""`，v1.0.0 / v1.1.0 fixture 在 P3 代码下
+      （比"连调两次"更强的形式：`compress(compress(m).kept) == compress(m)` 且第二次
+      `folded == 0`（`test_b6_compress_is_idempotent`，三档参数化）。
+      增量折叠的另一侧也测了：新段落进来时旧摘要原样保留、只并入新摘录（`test_b2_second_fold_*`），
+      合并不超过 `max_summary_chars`。）
+- [x] **B7 旧快照兼容**：`context_summary` 缺省 `""`，v1.0.0 / v1.1.0 fixture 在 P3 代码下
       仍可 `migrate_state()` → 恢复（扩 `tests/fixtures/`，不改 `AgentState.loads` 严格性）。
+      （`test_b7_*`：无该字段的 v1.1.0 payload 直接 `model_validate` → `""` 且往返无损；
+      v1.0.0 fixture 经 `migrate_state()` 仍恢复得到、`context_summary == ""`。
+      **没动 `recovery.py`**：字段带默认值即兼容，往 `_backfill_v1_1_0` 里加 `setdefault`
+      是重复劳动，还会让"迁移函数"和"模型默认值"变成两处需要同步的事实源。）
 - [ ] **B8 与 checkpoint 的交互**：摘要进快照后 payload 变大，`payload_bytes` 与恢复耗时的
       变化要在 F5 里量化（不许悄悄劣化 P2 已发布的基线）。
+      （待 D1 把摘要写进快照后与 F5 一并测：现在 `messages` 里多出的摘要消息只影响
+      发给 Provider 的上下文，不影响快照，量了会误导。）
 
 ## C. 动态能力视图（`context/capability.py`）
 
@@ -231,3 +274,38 @@ $ .venv/bin/pytest --cov=stableagent/context/tokens            → tokens.py 51 
 
 A3 只落了协议与早失败校验，`token_counter=` 的注入参数留给 D1 的引擎；A4/A5 未动——
 写入点在引擎与 Agent 外层，未接线前不写半成品（避免 P2 那种"数字先于链路存在"的尴尬）。
+
+### 2026-11-02 · B 节历史压缩（B1 / B2 / B3 / B4 / B5 / B6 / B7 勾选）
+
+新增 `stableagent/context/compression.py`（三档压缩 + `Summariser` 协议 +
+`ExtractiveSummariser` + `COMPRESSIONS` / `resolve_compression`）、
+`tests/unit/test_compression.py`（56 条）；扩展 `assembly.py`（`CompressedAssembler`，
+`resolve_assembler` 多收一个可选 `summariser=`）与 `core/state.py`
+（`ContextConfig` 三个带默认值字段、`AgentState.context_summary: str = ""`）。
+
+```
+$ git diff 46441f0 -- stableagent/core/loop.py                 → 0 行（L1 复核）
+$ .venv/bin/ruff check stableagent tests examples benchmarks   → All checks passed!
+$ .venv/bin/ruff format --check ...                            → 53 files already formatted
+$ .venv/bin/mypy                                               → Success: no issues found in 24 source files
+$ .venv/bin/pytest -q                                          → 197 passed, 1 skipped / 98.49%
+$ .venv/bin/pytest --cov=stableagent/context                   → compression.py 111 stmts 0 miss 100%
+                                                                  assembly.py 22 stmts 0 miss 100%
+$ /tmp/sa-3.10/bin/python -m pytest -q                         → 197 passed, 1 skipped
+$ /tmp/sa-3.12/bin/python -m pytest -q                         → 197 passed, 1 skipped
+```
+
+三处判断，记下来免得被当成随手改：
+
+1. **压缩不在进程里缓存**。 assembler 位点只拿到 `state.messages`，写不回快照，
+   所以任何"内存缓存 + 快照字段"的双写方案都会造出第二个事实源，L5/D4 反而更脆。
+   改成纯函数 + 上下文内的 `context_summary` 标记消息承载既有成果：恢复后不需要重算，
+   也无处可算错。B6 的幂等测试因此能写成更强的形式（二次压缩输出逐条相等、`folded == 0`）。
+2. **保留段边界只往前挪、不往后挪**。`partition()` 遇到"保留段首条是 `tool`"时把边界
+   前移到它的 `assistant`，代价是可能多留几条消息（超预算一点点），
+   换来的是"永不发出 Provider 会拒绝的上下文"。反过来往后挪会直接产出残缺配对。
+3. **没往 `_backfill_v1_1_0` 加 `setdefault("context_summary", "")`**。字段带默认值即兼容，
+   加进去只是把同一事实写两处；B7 用测试而不是迁移函数来钉这个结论。
+
+未勾选的两项各有归属：**B8**（摘要进快照后 `payload_bytes` / 恢复耗时对 P2 基线的影响）
+等 D1 接线后与 F5 一并测；**B2 的"摘要进快照"那一半**同样落在 D1 的边界压缩上。

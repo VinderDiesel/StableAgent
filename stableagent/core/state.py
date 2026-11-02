@@ -85,6 +85,8 @@ class AgentState(BaseModel):
     status: AgentStatus = AgentStatus.PENDING
     step: int = 0
     messages: list[Message] = Field(default_factory=list)
+    context_summary: str = ""
+    """P3 扩展：已折叠历史段的摘要。带默认值，旧快照缺字段即取空串（非破坏性）。"""
     usage: dict[str, int] = Field(default_factory=dict)
     error: str | None = None
 
@@ -108,6 +110,10 @@ class ContextConfig(BaseModel):
     capability_filter: str = "static"
     max_context_tokens: int | None = None
     on_budget_exceeded: Literal["compress", "degrade", "reject"] = "compress"
+    # P3 扩展（全部带默认值；compression="none" 时不生效，默认路径行为不变）
+    keep_recent_messages: int = 8
+    max_summary_chars: int = 1200
+    tool_result_excerpt_chars: int = 200
 
 
 class CheckpointConfig(BaseModel):
