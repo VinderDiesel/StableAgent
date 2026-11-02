@@ -6,7 +6,7 @@
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
 > **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m1-skeleton` 上开始，
-> DoD 0/60，里程碑步骤 1/30，M1 任务级步骤 5/50）。**
+> DoD 2/60，里程碑步骤 1/30，M1 任务级步骤 10/50）。**
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6 节的 M1 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
@@ -152,9 +152,14 @@
 
 ### A. 模型、ID、时间与状态机（spec WP-4.1）
 
-- [ ] **A1** `Ticket`/`Mandate`/`Assignment`/`TicketInput`/`Report`/`Dependency`/`Effect` 字段与语义符合
-      spec §2.1，序列化 round-trip 稳定。验证：`test_orchestration_model.py`。证据：（待记录）。
-- [ ] **A2** ID 与时钟注入，测试不读墙钟（`IdFactory` 序列工厂 + 固定 `Clock`）。证据：（待记录）。
+- [x] **A1** `Ticket`/`Mandate`/`Assignment`/`TicketInput`/`Report`/`Dependency`/`Effect` 字段与语义符合
+      spec §2.1，序列化 round-trip 稳定。验证：`test_orchestration_model.py`。
+      证据（2026-11-02，Task 2）：7 模型 + 8 枚举齐备，`test_ticket_round_trips_and_is_deterministic`
+      以 `model_validate_json(model_dump_json()) == ticket` 通过（`6 passed`）。
+- [x] **A2** ID 与时钟注入，测试不读墙钟（`IdFactory` 序列工厂 + 固定 `Clock`）。
+      证据（2026-11-02，Task 2）：`tests/support.py` 追加 `SequenceIds`（`tk-0001` 形状）与
+      `FixedClock`（起点 `1_700_000_000_000`，只 `advance()`），`model.py` 的 `Uuid4Id`/`SystemClock`
+      仅供生产默认，测试路径不引用；本 Task 全部用例经注入工厂取 ID。
 - [ ] **A3** 状态转换只经集中纯函数，Repository 无任意字段更新入口（无私有 setter 暴露）。
       验证：转换矩阵全绿 + 断言 `Store` 无 `update_ticket(status=...)` 类接口。证据：（待记录）。
 - [ ] **A4** 模型级校验：Ticket 不得依赖自身、Assignment 必属某 Ticket、`attempt >= 1`、
@@ -590,7 +595,7 @@ L4 要等 Task 10 补上 L1/L5 断言才整条勾。
   模型 `Mandate` / `Ticket` / `Assignment` / `TicketInput` / `Report` / `Dependency` / `Effect`。
 - Consumes: Task 1 的 `errors`。
 
-- [ ] **Step 1: 写测试资产**
+- [x] **Step 1: 写测试资产**
 
 ```python
 # tests/support.py 追加（不改动既有类）
@@ -618,7 +623,7 @@ class FixedClock:
         self._now += ms
 ```
 
-- [ ] **Step 2: 写失败的测试**
+- [x] **Step 2: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_model.py
@@ -685,12 +690,12 @@ def test_assignment_belongs_to_a_ticket_by_construction() -> None:
         Assignment(id="as-1", attempt=1)
 ```
 
-- [ ] **Step 3: 跑到红**
+- [x] **Step 3: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py -v`
 Expected: FAIL —`ModuleNotFoundError: ... orchestration.model`
 
-- [ ] **Step 4: 实现模型**
+- [x] **Step 4: 实现模型**
 
 ```python
 # stableagent/orchestration/model.py（模型与协议部分；状态机在 Task 3 追加到同一文件）
@@ -848,10 +853,16 @@ class Effect(BaseModel):
     last_error: str | None = None
 ```
 
-- [ ] **Step 5: 跑到绿并提交**
+- [x] **Step 5: 跑到绿并提交**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py && .venv/bin/mypy`
 Expected: PASS
+
+> 实跑（2026-11-02，分支 `feat/p4-m1-skeleton`）：Step 3 红 = 收集期 `ModuleNotFoundError`（`model` 不存在）；
+> Step 5 绿 = `6 passed`，`mypy` = `Success: no issues found in 31 source files`，
+> `ruff check stableagent tests` = `All checks passed!`，`ruff format --check` = `62 files already formatted`，
+> 全量 `.venv/bin/pytest -q` = `295 passed, 1 skipped`，`Total coverage: 98.43%`。
+> 计划原文的代码块逐字落地，`ruff format` 无需再改（与 Task 1 不同）。
 
 ```bash
 git add stableagent/orchestration/model.py tests/support.py tests/unit/test_orchestration_model.py
@@ -860,6 +871,7 @@ git commit -m "feat: give the control plane its records, ids and clocks"
 
 **关闭 DoD：** A1、A2、A4 前半（`attempt >= 1`、`ticket_id` 必填、依赖自指拒绝、run_id 可空）。
 A4 的"启动后必填"半边由 Task 7 的行为断言闭合，到那时才整条勾 A4。
+> 实勾（2026-11-02）：A1、A2 已在本任务后勾选；A4 保持未勾，等 Task 7 后半。
 
 ---
 

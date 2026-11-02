@@ -127,3 +127,27 @@ class FakeRedisClient:
 
     async def delete(self, key: str) -> int:
         return 1 if self.data.pop(key, None) is not None else 0
+
+
+class SequenceIds:
+    """确定性 ID：同前缀按序号递增，测试可读且可断言。"""
+
+    def __init__(self) -> None:
+        self._counters: dict[str, int] = {}
+
+    def new_id(self, prefix: str) -> str:
+        self._counters[prefix] = self._counters.get(prefix, 0) + 1
+        return f"{prefix}-{self._counters[prefix]:04d}"
+
+
+class FixedClock:
+    """可推进的毫秒时钟；测试绝不读墙钟。"""
+
+    def __init__(self, start: int = 1_700_000_000_000) -> None:
+        self._now = start
+
+    def now_ms(self) -> int:
+        return self._now
+
+    def advance(self, ms: int) -> None:
+        self._now += ms
