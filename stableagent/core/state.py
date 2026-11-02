@@ -85,8 +85,6 @@ class AgentState(BaseModel):
     status: AgentStatus = AgentStatus.PENDING
     step: int = 0
     messages: list[Message] = Field(default_factory=list)
-    context_summary: str = ""
-    """P3 扩展：已折叠历史段的摘要。带默认值，旧快照缺字段即取空串（非破坏性）。"""
     usage: dict[str, int] = Field(default_factory=dict)
     error: str | None = None
 

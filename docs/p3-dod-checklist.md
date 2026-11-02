@@ -4,7 +4,8 @@
 > P3 接入点预留）+ `docs/design-decisions/01-loop-runtime.md`（ADR-01 loop 契约）
 > + `docs/design-decisions/02-checkpoint.md`（ADR-02，压缩产物与快照/恢复的交互必须遵守其结论）。
 > 使用方式：每条都有"怎么验"，全部勾选即 P3 收口；未达 DoD 不进 P4。
-> **状态：17/52 进行中（A 度量地基 + B 历史压缩 + C 能力视图已落，L1 复核 0 diff，见文末进度记录）。**
+> **状态：31/52 进行中（A 度量地基 + B 历史压缩 + C 能力视图 + D 预算治理已落，L1 复核 0 diff、
+> L4 跨版本金标准逐字节一致，见文末进度记录）。**
 
 ---
 
@@ -13,31 +14,56 @@
 - [x] **L1 `core/loop.py` 零修改**：压缩 / 能力视图 / 预算治理全部经 P1 预留的两个位点接入
       （`ContextAssembler.assemble()`、`tool_selector(specs, state)`）+ Agent 外层。
       验收方式：`git diff <P2收口提交>..HEAD -- stableagent/core/loop.py` 为空，结果记进本文件。
-      （A+B 节落地后复核：`git diff 46441f0 -- stableagent/core/loop.py` 输出 0 行。）
-- [ ] **L2 组装器不得抛异常来表达"拒绝"**：`AgentLoop.advance()` 里 `assemble()` /
+      （A+B 节落地后复核：`git diff 46441f0 -- stableagent/core/loop.py` 输出 0 行；
+      D 节落地后同样 0 行——预算治理的三个动作全在引擎与 Agent 外层，loop 一行未动。）
+- [x] **L2 组装器不得抛异常来表达"拒绝"**：`AgentLoop.advance()` 里 `assemble()` /
       `tool_selector()` 的调用**在 provider 的 try/except 之外**（`core/loop.py:60-61`），
       抛出即绕过 `error` 事件、直接破坏 F4。所以 `on_budget_exceeded="reject"` 必须由
       **Agent 外层**产生唯一终止事件，而不是让组装器 raise。
       验收方式：`test_d4` 式断言——reject 路径的流恰好一个终止事件且在末尾。
+      （已落：`ContextEngine.assemble/select` 全程不 raise（超限只写报告与标志），拒绝由
+      `_pipeline` 开头的 `preflight` 分支产生。`test_d5_reject_terminates_at_entry_without_touching_the_provider`
+      断言事件流恰为 `[ERROR]` 且 `provider.calls == []`；`test_d7_budget_and_max_steps_are_two_separate_terminations`
+      再证两条终止路径互不掩盖。）
 - [ ] **L3 运行时依赖仍为 3 个**（`pydantic` / `anyio` / `httpx`）：token 计数用**可注入估算器 +
       启发式默认实现**，不引入 `tiktoken` 等新依赖；真实 token 数只在 Provider 回报 `usage` 时
       做事后校准。验收方式：`python -c "import stableagent"` 在无额外包的环境通过 +
       `pyproject` 的 `dependencies` 条目数不变。
-- [ ] **L4 默认配置零回归**：`Config()`（`assembly="passthrough"`、`compression="none"`、
+- [x] **L4 默认配置零回归**：`Config()`（`assembly="passthrough"`、`compression="none"`、
       `capability_filter="static"`、`max_context_tokens=None`）下，P3 代码路径全部短路，
       事件流与 P2 逐条一致。
       验收方式：新增等价测试 `test_p3_default_config_stream_identical_to_p2`，
       与 P1 重放等价 / P2 D4 测试互证。
-- [ ] **L5 压缩产物必须进快照，不能只进内存**：否则崩溃恢复后要么重算（多花一次模型调用）、
+      （落地形式比"在 P3 里断言没建引擎"更强：`tests/fixtures/l4_p2_default_stream.json`
+      是在 **P2 收口提交 `46441f0` 的工作树**里跑 `tests/l4_default_stream_dump.py` 生成的金标准
+      （事件流 + 每次发给 Provider 的 messages/tools + 终态快照 + `CONTRACT_VERSION` +
+      `EventType` 全集，7252 字节），当前代码复现它并逐字节相等。重新生成步骤写在该模块 docstring 里。
+      另一侧的结构断言：`test_d6_default_config_builds_no_engine_and_stays_silent`。）
+- [x] **L5 压缩产物必须进快照，不能只进内存**：否则崩溃恢复后要么重算（多花一次模型调用）、
       要么与不中断运行不等价，直接违反 ADR-02 的 D4 结论。
       验收方式：开启压缩跑"崩溃→恢复"，断言恢复流与不中断流逐条一致（复用
       `tests/integration/test_crash_recovery.py` 的骨架参数化一份压缩版）。
+      （已落：`ContextEngine.fold(state) -> state'` 在**每段入口**（`_pipeline` 开头）折一次，
+      摘要的载体是 `messages` 里那条 `name=context_summary` 标记消息——**不给 `AgentState`
+      加第二个字段**，理由见 L6。`test_l5_recovered_stream_with_compression_is_event_identical`
+      除了逐条比对事件流，还多断言 `restarted.calls[0][0] == steady.calls[2][0]`
+      （恢复后第一次发给 Provider 的上下文，与不中断跑的那一次完全相同，等于"零重算"）。
+      合流性另有 `test_l5_folding_is_confluent_across_segment_boundaries` 兜住分段折叠；
+      注入式 LLM 摘要器不满足合流，那正是"必须落盘"的适用场景，测试里写明了这条边界。）
 - [ ] **L6 契约只扩展不推翻**：本阶段预声明的扩展集（逐项进 CHANGELOG）：
-      1. `AgentState.context_summary: str = ""`（带默认值，旧快照缺字段即取默认）；
+      1. ~~`AgentState.context_summary: str = ""`~~ **实际未加此字段**（D1 收口时删掉）。
+         理由：摘要已有唯一载体——`messages` 里那条 `role="system"` + `name="context_summary"`
+         标记消息（`fold()` 把它写进快照，`compress()` 把它当既有成果复用）。再加一个
+         `AgentState` 字段就是第二份事实源，会漂移、要同步、还得写迁移函数；
+         `test_b7_summary_travels_in_messages_not_in_a_second_field` 直接断言
+         `"context_summary" not in state.model_dump()`。兼容面因此更小：旧快照一个字段都不用补。
       2. `ContextConfig` 新增若干**带默认值**字段（保留窗口、摘要来源、最小工具数等）；
       3. **可选**新枚举成员 `EventType.CONTEXT`（默认不发事件，opt-in，见 D6）。
       除此之外不允许任何既有字段/不变式语义变化；`CONTRACT_VERSION` 抬不抬版由 ADR-03 明确决策
       并写理由（P2 先例：兼容扩展不抬版）。
+      （本条待 ADR-03（G5）落笔后勾选：抬版的决策依据是它要求的，不在这里自说自话。
+      目前已成立的部分：`CONTRACT_VERSION` 仍为 `1.1.0`（由 L4 金标准里的
+      `contract_version` 字段把关，抬版会当场让这条测试红），且未新增 `EventType` 成员。）
 - [ ] **L7 全部验收离线确定性**：压缩/预算/能力视图的测试不得依赖网络、墙钟或随机；
       模型调用一律走脚本 Provider 或注入的摘要器。
       验收方式：CI 无 secrets 也能全绿（沿用现有 workflow，不加任何 env 要求）。
@@ -51,14 +77,24 @@
 - [x] **A2 工具规格也要计入成本**：`count_tools` 对 `ToolRegistry.specs()` 的 JSON 结构计价
       （name/description/parameters）。能力视图的收益必须算这块，否则等于没测。
       （`sort_keys` 定序已锁：键序不同计数必须相等。）
-- [ ] **A3 估算可注入可替换**：Agent/Engine 接受 `token_counter=`，缺省用启发式；
+- [x] **A3 估算可注入可替换**：Agent/Engine 接受 `token_counter=`，缺省用启发式；
       测试注入"每条 1 token"的桩，断言预算判定随之改变（证明决策链真的消费这个量）。
-      （协议面与 `resolve_token_counter` 的缺方法早失败已完成并有测试；
-      **Agent/Engine 的注入参数随 D1 一起落**，故本条不勾。）
-- [ ] **A4 事后校准**：Provider 回报 `usage.prompt_tokens` 时，记录 `(估算, 真实)` 对；
+      （已落：`ContextEngine(config, token_counter=)` 与 `make_agent(..., token_counter=)` 都吃注入。
+      `test_a3_the_injected_counter_is_the_one_that_decides`：同一份上下文、同一个上限 500，
+      启发式判超限、`FlatCounter` 判达标——结论真的跟着注入的量走，不是配了个没人读的参数。
+      `test_a3_a_counter_missing_a_method_fails_early`：缺方法的桩 `TypeError` 且点名缺哪个，
+      不留到第 N 步才炸。）
+- [x] **A4 事后校准**：Provider 回报 `usage.prompt_tokens` 时，记录 `(估算, 真实)` 对；
       `state.usage` 里以 `context_tokens_est` / `prompt_tokens` 并存（`usage` 是 `dict[str,int]`，
-      **不构成契约变更**）。**未做**：写入点在引擎与外层（D1/D5），那里才是估算与真实值同时可见
-      的唯一位置；未接线前不占名、不写半成品。
+      **不构成契约变更**）。
+      （已落，形态与预想不同：`prompt_tokens` 本来就在 `state.usage` 里（Provider 原样累加），
+      再往快照写一份 `context_tokens_est` 就是同一个量的两处记录、且要为它动契约——估算值改放在
+      `ContextReport.estimated_prompt_tokens` / `observed_prompt_tokens` 成对出现
+      （`ContextEngine.observe()` 在每步快照产出后按 `step` 去重取**增量**，
+      `preflight()` 在段入口重置基线，跨段不会把上一段的量算进本段）。
+      `test_a4_observed_usage_pairs_with_the_estimate_per_step` 断言三对 `(估算, 真实)`；
+      `test_a4_calibration_is_reporting_only_and_never_feeds_back` 让 Provider 谎报 usage，
+      断言决策序列逐条不变——校准不回灌判定，否则快照之外的量会左右行为（违反 L5）。）
 - [ ] **A5 估算误差进 benchmark 报告**：`benchmarks` 输出估算相对真实值的 MAE 与偏差方向；
       README/blog 只引用带误差标注的数字。
 - [x] **A6 单测**：同一输入两次计数相等（确定性）；空消息、超长消息、非 ASCII、
@@ -83,16 +119,16 @@
       验收：`test_b1_truncation_never_splits_tool_pairs` 对 keep=0..12 全扫，
       `test_b1_boundary_rule_holds_for_all_strategies` 对三档策略同样全扫——同一不变式跑 39 组参数。
       额外常驻规则：**首条 user 消息（任务本体）也常驻**，否则截断会把"当初要干什么"丢掉。）
-- [x] **B2 `summary`**：把被折叠的历史压成一条摘要，写入 `AgentState.context_summary`（L5），
+- [x] **B2 `summary`**：把被折叠的历史压成一条摘要，写进快照（L5；载体是 `messages` 里那条
+      标记消息，不是 `AgentState` 的新字段——理由见 L6 第 1 条），
       由 assembler 在发给 Provider 时替换原始旧消息段。
       摘要生成器**可注入**：默认实现是**离线抽取式**（对 `Evidence` 的 `output`/`error` 与
       assistant 文本做定长摘录，确定性、零模型调用）；接真实模型的实现经 `summariser=` 注入。
       （已落：`ExtractiveSummariser` + `SummaryCompressor(config, summariser)`，
       注入用例 `test_b2_injected_summariser_replaces_default` 断言摘要器收到的正是折叠段本身。
-      **`AgentState.context_summary` 字段的写入点随 D1 的 `ContextEngine` 接线**：
+      **"摘要进快照"那一半已随 D1 的 `ContextEngine.fold()` 收口**：
       loop 位点看不到也写不了快照（见上面决策 1），外层在每次进入 `_pipeline` 的边界压缩一次才是
-      "一次模型调用换 N 步复用"的落点。B2 的"摘要进上下文"已闭环，"摘要进快照"归 D1，
-      与 A3/A4/A5 的处理方式一致：未接线前不写半成品。）
+      "一次模型调用换 N 步复用"的落点（验收见 L5 与 `test_l5_*`）。）
 - [x] **B3 `hybrid`**：先折叠工具结果（`Evidence` 文本是 token 大头），再对更早的消息做摘要，
       最后才截断；三档顺序有单测锁死（顺序换了，质量保留率就变了）。
       （顺序证据用两条测试钉死，不靠注释：`test_b3_hybrid_level_order_is_locked` 断言
@@ -113,22 +149,26 @@
       三档策略各算 (节省率, 保留率) 并断言相对关系——truncation 省最多只留 2/6，
       summary 保留 6/6 但节省率更低，hybrid 保留 6/6 且节省率 ≥ summary。
       绝对数值留给 F 节的 benchmark 报告，这里锁的是**关系**，防止以后改坏了没人知道。）
-- [x] **B6 幂等**：同一状态重复 `assemble()` 不重复摘要、不使 `context_summary` 增长
-      （否则每步多花一次模型调用）。单测：连调两次，第二次输出与 `context_summary` 均不变。
+- [x] **B6 幂等**：同一状态重复 `assemble()` 不重复摘要、不使折叠前缀（`context_summary`
+      标记消息，见 L6 第 1 条）增长
+      （否则每步多花一次模型调用）。单测：连调两次，第二次输出与其摘要均不变。
       （比"连调两次"更强的形式：`compress(compress(m).kept) == compress(m)` 且第二次
       `folded == 0`（`test_b6_compress_is_idempotent`，三档参数化）。
       增量折叠的另一侧也测了：新段落进来时旧摘要原样保留、只并入新摘录（`test_b2_second_fold_*`），
       合并不超过 `max_summary_chars`。）
-- [x] **B7 旧快照兼容**：`context_summary` 缺省 `""`，v1.0.0 / v1.1.0 fixture 在 P3 代码下
+- [x] **B7 旧快照兼容**：旧快照不含折叠前缀也能载入，v1.0.0 / v1.1.0 fixture 在 P3 代码下
       仍可 `migrate_state()` → 恢复（扩 `tests/fixtures/`，不改 `AgentState.loads` 严格性）。
-      （`test_b7_*`：无该字段的 v1.1.0 payload 直接 `model_validate` → `""` 且往返无损；
-      v1.0.0 fixture 经 `migrate_state()` 仍恢复得到、`context_summary == ""`。
-      **没动 `recovery.py`**：字段带默认值即兼容，往 `_backfill_v1_1_0` 里加 `setdefault`
-      是重复劳动，还会让"迁移函数"和"模型默认值"变成两处需要同步的事实源。）
+      （`test_b7_*` 三条：没有标记消息的 v1.1.0 payload 直接 `model_validate` → 无折叠前缀、
+      往返无损（`AgentState.loads(state.snapshot()) == state`）；
+      `test_b7_summary_travels_in_messages_not_in_a_second_field` 断言摘要只活在 `messages` 里
+      （`"context_summary" not in state.model_dump()`）；
+      v1.0.0 fixture 经 `migrate_state()` 仍恢复得到、无折叠前缀。
+      **没动 `recovery.py`**：P3 没给 `AgentState` 加字段，迁移函数压根不需要 `setdefault`——
+      这条比原计划更省：既没有"迁移函数"和"模型默认值"两处同步的问题，旧快照也没有任何新字段要补。）
 - [ ] **B8 与 checkpoint 的交互**：摘要进快照后 payload 变大，`payload_bytes` 与恢复耗时的
       变化要在 F5 里量化（不许悄悄劣化 P2 已发布的基线）。
-      （待 D1 把摘要写进快照后与 F5 一并测：现在 `messages` 里多出的摘要消息只影响
-      发给 Provider 的上下文，不影响快照，量了会误导。）
+      （D1 已把 `fold()` 接到段入口，摘要现在**真的**进快照了，这条测量随之可以做——
+      归 F5，与 `benchmarks/recovery_time_benchmark.py` 一起跑。）
 
 ## C. 动态能力视图（`context/capability.py`）
 
@@ -164,33 +204,116 @@
       （已落：`CapabilityReport.dropped_tokens` 用 A 节的 `count_context` 对**实际被裁掉的那批规格**
       算出，测试里独立重算一遍对比（`test_c6_dropped_tokens_are_measured_not_declared`），
       并断言 `0 < dropped_tokens < 全量`（`test_c6_saving_never_exceeds_the_full_tool_list`）。
-      **"记进 `state.usage`" 的写入点归 D1**：`tool_selector(specs, state)` 只能返回规格，
-      写快照要改 loop（L1 禁止），改 `state.usage` 更是会污染已经 yield 出去的快照。
-      所以计量的落点是外层持有的引擎 → 快照，与 B2 的"摘要进快照"同一半在 D1 收口。）
+      **"记进 `state.usage`" 改成记进 `ContextReport`**（D1 收口）：`tool_selector(specs, state)`
+      只能返回规格，写快照要改 loop（L1 禁止），改 `state.usage` 更是会污染已经 yield 出去的快照。
+      所以落点是引擎的报告：`ContextReport.tools_kept` / `tools_dropped_tokens`，每步一条
+      （`test_d4_report_makes_every_level_readable` 断言这些字段在真实一步里的数值）。）
 
 ## D. 预算治理（`context/budget.py` + `context/engine.py`）
 
-- [ ] **D1 `ContextEngine` 抽象**（`context/engine.py`）：组合
+- [x] **D1 `ContextEngine` 抽象**（`context/engine.py`）：组合
       `压缩 → 能力视图 → 预算判定`，对 loop 暴露 `assemble()` 与 `select()` 适配器，
       对外层暴露 `preflight(state, specs) -> BudgetDecision`。**同一个引擎实例**同时服务两侧，
       杜绝"外层判的量与真发的量不一致"。
-- [ ] **D2 `max_context_tokens` 语义钉死**：比较对象 = 本次将要发出的
+      （已落：`ContextEngine` + `EngineAssembler` + `Plan(keep_recent, max_visible_tools)`。
+      `Agent.__init__` 只在任一 P3 开关打开时建引擎，建了就把**两侧**都交给它：
+      `assembler=EngineAssembler(self._context)`、`tool_selector=self._context.select`。
+      `test_d1_the_same_engine_serves_the_loop_and_the_outer_layer` 直接比对象身份
+      （`agent._assembler._engine is engine` 且 `agent._tool_selector.__self__ is engine`），
+      并断言外层估的量 == 真发出去的那份（`engine.estimate(sent) == FIRST_VIEW ==
+      report.estimated_prompt_tokens`）。
+      顺带删掉了 P2 遗留的**第二条能力视图通路**（`as_tool_selector` + `Agent._capability`）：
+      引擎接管后它就是唯一事实源，覆盖一条没人走的路径等于留一份会腐烂的假象；
+      覆盖率报告把这条指出来（`agent.py:151` 死代码）才删的，不是顺手重构。
+      调用方自带 `tool_selector` 时引擎仍在、但配置副本强制 `capability_filter="static"`，
+      且 `agent.capability_report` 返回 None——选择器被接管还报筛选结果就是在说谎。）
+- [x] **D2 `max_context_tokens` 语义钉死**：比较对象 = 本次将要发出的
       `messages(组装后) + tool specs` 的估算总量（A1+A2），不是历史全长。
       边界单测：恰好等于上限（不触发动作）、上限 -1（触发）。
-- [ ] **D3 `compress`**：按 B3 顺序逐级压缩直到达标；压到位则继续，压不动了走 D5 升级。
-- [ ] **D4 `degrade`**：先裁工具规格（C 的能力视图加严），再压历史；每级动作可观测
+      （`estimate(view, specs)` = `count_context(counter, 组装后的视图, 实际选中的规格)`——
+      三段都是真发出去的，没有"历史全长"这种宽估。
+      `test_d2_estimate_is_the_payload_about_to_be_sent_not_the_history_length` 用一个
+      "历史很长但视图很小"的状态证明判的是视图不是历史；
+      `test_d2_hard_limit_boundary_is_inclusive` 参数化 `(SHARED_VIEW, True)` 与
+      `(SHARED_VIEW - 1, False)`——**等于上限不发**动作，越界一格才触发；
+      `test_d2_select_side_records_the_same_verdict` 断言 loop 位点那侧得到同一个结论。）
+- [x] **D3 `compress`**：按 B3 顺序逐级压缩直到达标；压到位则继续，压不动了走 D5 升级。
+      （阶梯在 `_ladder()`：`compress` 先按 `keep_recent` 收缩历史、再动工具上限，
+      `degrade` 反之——**顺序就是策略**，两条序列在测试里逐档写出：
+      `[(8,8),(4,8),(2,8),(1,8),(1,4),(1,2),(1,1)]`（`test_d3_ladder_is_bounded_deterministic_and_ordered`，
+      含 `KEEP_FLOOR=1` / `TOOLS_FLOOR=1` / `LADDER_STEP=2` 的边界）。
+      达标路径 `test_d3_compress_shrinks_history_before_touching_the_tool_view`：
+      上限 95 时落在 `Plan(4,8)`，视图从 7 条缩到 5 条、`after=90 ≤ 95`、工具一个没裁。
+      升级在**下一次模型调用**才可见（`advance()` 一次做完副作用，没有步中刹车，见 ADR-01），
+      `test_d3_escalated_plan_applies_to_the_next_step` 断言下一帧真的变短、
+      `FACT-0` 已被折掉而窗口内的 `FACT-2` 原样保留、`levels == ("truncation",)`——
+      截断档不产生摘要标记，这是 B1 的取舍，写进断言而不是注释。
+      压不动路径 `test_d3_compress_exhausts_when_the_floor_is_still_over_the_limit`：
+      上限 49 < 阶梯地板 50 时 `levels_tried == 7 == len(_ladder())` 且 `exhausted`，
+      计划**不**被改成半档（`engine.plan` 仍是原计划）。）
+- [x] **D4 `degrade`**：先裁工具规格（C 的能力视图加严），再压历史；每级动作可观测
       （`ContextReport` 记录 `action`、`levels_tried`、`before/after` 估算）。
-- [ ] **D5 `reject`**：**在 Agent 外层**产生唯一 `error` 事件 + `AgentStatus.FAILED`
+      （`test_d4_degrade_tightens_the_view_before_shrinking_history`：同一份数据、同一个上限，
+      `degrade` 落在 `Plan(8,1)`（历史一条不动、视图裁到 1 个规格），
+      与 D3 的 `Plan(4,8)` 形成对照——两个动作的差别必须能在计划上读出来。
+      `test_d4_report_makes_every_level_readable` 逐字段断言
+      `(action, levels_tried, exhausted) == ("degrade", 4, False)`、
+      `(before, after, estimate, dropped) == (270, 110, 95, 6)`、`tools 10 → 2`、`orphans == 0`。
+      运行中触发由 `test_d4_mid_run_degrade_reaches_the_next_provider_call` 用三步脚本量出
+      `levels_tried == [0, 3, 6]`（第 1 步达标、第 2 步降到 3 档、第 3 步降到 6 档），
+      并断言第 3 次调用发给 Provider 的工具列表确实变短。）
+- [x] **D5 `reject`**：**在 Agent 外层**产生唯一 `error` 事件 + `AgentStatus.FAILED`
       （L2 的具体落点：外层 preflight 命中即不调 `drive()`），错误详情可判读、
       且**不进重试**（属 `non_retryable`：再跑一遍预算判定必然同样超限——这条要写进 ADR-03 并被
       单测锁住：reject 后 `provider_calls` 不增加）。
-- [ ] **D6 可观测性**：默认**不发**每步上下文事件（沿用 P2"静默落盘 + 只读属性"的先例），
+      （入场：`_pipeline` 开头 `fold()` → `preflight()`，命中即 yield 一条
+      `EventType.ERROR(reason="budget_exceeded")` + `FAILED` 并 `return`，不进 `drive()`、不进重试环。
+      `test_d5_reject_terminates_at_entry_without_touching_the_provider` 断言事件流恰为
+      `[ERROR]` 且 `provider.calls == []`（重试过一次就会多一次调用，这条断言同时锁住"不进重试"）；
+      `test_d5_reject_does_not_silently_degrade_quality_at_entry` 锁住"拒 ≠ 偷偷降质量"：
+      reject 的入场判定不动计划，`engine.plan` 保持默认；
+      `test_d5_reject_persists_a_failed_snapshot` 用 `auto_save_every=1` 的内存 store 验 `FAILED`
+      快照确实落盘（可审计，不是只发个事件）。
+      detail 文案含 `on_budget_exceeded=reject` 与 `estimate > limit` 两个数，可判读。
+      **运行中**超限是另一条路：不能紧急制动（`advance()` 已把整步副作用做完），
+      只能按 F3 在步边界暂停 —— `test_d5_mid_run_exhaustion_pauses_at_the_step_boundary`
+      断言 `status == PAUSED`、`error` 含 "budget"、`provider.calls == 2`（不多烧一次）。
+      `test_d5_resuming_into_a_still_tight_budget_fails_instead_of_re_pausing` 防止"暂停→恢复→又暂停"
+      的死循环：恢复后入场判定同样超限就直接 ERROR 终止。
+      `test_d5_late_exhaustion_does_not_leave_the_loop_paused` 是收尾发现的坑：暂停标志若不复位，
+      下一个任务一进来就停在第 0 步——现在 `_pipeline` 的 `finally` 里清。）
+- [x] **D6 可观测性**：默认**不发**每步上下文事件（沿用 P2"静默落盘 + 只读属性"的先例），
       `agent.context_reports` 提供历史；若要把 `EventType.CONTEXT` 变成 opt-in，
       须证明 F4 未被破坏，并在 L6 里登记为新增枚举成员。
-- [ ] **D7 与 `ControlConfig.max_steps` / `max_total_tokens` 的关系写清**：
+      （**没加** `EventType.CONTEXT`：加枚举成员是契约动作，而"只读属性"这条通道已经够用，
+      P2 的静默落盘先例照搬。`test_d6_default_config_builds_no_engine_and_stays_silent` 断言
+      `"context" not in {event.value for event in EventType}`、默认配置下 `agent._context is None`、
+      `context_reports == []`、事件流仍为 `[THINKING, DONE]` 且发给 Provider 的是**全量**规格。
+      `test_d6_reports_are_one_per_step_and_the_property_is_a_copy`：三步跑完 `len(reports) == 3`、
+      `steps == [0, 1, 2]`（记的是"发出时已完成几步"）、宽松上限下 `action == "none"` 且
+      `within_budget`，属性返回的是副本，外部 append 改不动引擎的事实源。）
+- [x] **D7 与 `ControlConfig.max_steps` / `max_total_tokens` 的关系写清**：
       预算超限与步数耗尽是两条独立终止路径，各自有测试，不得互相掩盖（F2 的先例）。
-- [ ] **D8 单测三态齐全**：compress / degrade / reject 各 ≥2 条（达标路径 + 压不动路径），
+      （`test_d7_max_steps_still_terminates_when_the_budget_is_ample`：引擎开着、上限给足，
+      步数耗尽仍是 `error(reason="max_steps_exceeded")` + `FAILED`，预算不插队。
+      `test_d7_budget_and_max_steps_are_two_separate_terminations` 把两条路径放进同参数化里比对：
+      `reasons == ["max_steps_exceeded", "budget_exceeded"]`，且宽松那路真调了模型 1 次
+      （`loose_provider.calls == 1`）、预算那路一次没调（`tight_provider.calls == []`）——
+      两条路径的**可观测后果**不同，不是同一个 error 换个文案。
+      `max_total_tokens` 仍**不在本阶段实现**：它是账单口径的累计上限（属后续"成本控制"阶段），
+      P3 的 `max_context_tokens` 是单次请求口径，两者不能混为一个开关。此条写进 ADR-03。）
+- [x] **D8 单测三态齐全**：compress / degrade / reject 各 ≥2 条（达标路径 + 压不动路径），
       Roadmap 明确要求"预算超限时行为确定"。
+      （`test_d8_every_mode_has_a_determined_answer_at_the_same_limit` 参数化同一上限 95 下三态结论
+      （`within_budget` 分别 True/True/False，且 `decision.action` 始终记下配置的动作，
+      即使阶梯把它救回来也照记——D4 可观测的另一半）；
+      `test_d8_every_mode_bottoms_out_deterministically` 参数化"压到底也不行"：
+      `reject` 在入场直接拒（`levels_tried == 0`、不动 `exhausted_reject` 标志），
+      `compress`/`degrade` 走满 7 档后 `exhausted is True`；
+      `test_d8_reachability_of_the_escalated_plan_differs_by_action_not_by_data` 断言同一份数据下
+      `compress → Plan(4,8)` 与 `degrade → Plan(8,1)` 落在**不同**计划上：
+      结论由动作决定，不由数据偶然决定。D 节共 42 条，全在
+      `tests/unit/test_context_engine.py`。）
 
 ## E. Evidence 增强与追溯（Roadmap 交付物 `tools/evidence.py`）
 
@@ -202,8 +325,16 @@
       （扩一条 property 测试）。
 - [ ] **E3 压缩以 Evidence 文本为主要目标**：工具结果通常最占 token 且最可摘要；
       B3 的顺序必须体现这一点，并有"摘要后 user/assistant 原文未被改写"的断言。
-- [ ] **E4 截断安全性**：任何压缩/截断都不得产生"孤儿 `tool_call`"（同 B1 判据），
+- [x] **E4 截断安全性**：任何压缩/截断都不得产生"孤儿 `tool_call`"（同 B1 判据），
       把这条列为 `ContextReport` 的自检项，每次组装都验。
+      （`count_orphan_tool_calls(view)` 在 `ContextEngine.select()` 里**每次组装都算**，
+      进 `ContextReport.orphans`（`context/engine.py`），不是测试里临时算的量。
+      `test_e4_no_ladder_level_produces_an_orphan_tool_call` 对 3 种动作 × 整条阶梯（7 档）
+      逐档扫，并要求"确实折叠过"（最严档比原语料短）——否则"零孤儿"会因为什么都没切而假通过。
+      `test_e4_orphan_count_is_a_per_report_self_check_not_a_one_off` 反手删掉最后一条 `tool`
+      结果，断言同一处自检报出 `orphans == 1`：这个字段是判据，不是常数 0。
+      B1 的边界回退（`test_b1_*` 两条、39 组参数）与本条互补：B1 管"不主动切散配对"，
+      E4 管"任何来源的残缺配对都能被当场发现"。）
 
 ## F. Benchmark 与对外证据（Roadmap 的量化指标）
 
@@ -304,7 +435,8 @@ A3 只落了协议与早失败校验，`token_counter=` 的注入参数留给 D1
 `ExtractiveSummariser` + `COMPRESSIONS` / `resolve_compression`）、
 `tests/unit/test_compression.py`（56 条）；扩展 `assembly.py`（`CompressedAssembler`，
 `resolve_assembler` 多收一个可选 `summariser=`）与 `core/state.py`
-（`ContextConfig` 三个带默认值字段、`AgentState.context_summary: str = ""`）。
+（`ContextConfig` 三个带默认值字段、`AgentState.context_summary: str = ""`
+——后者已在 D1 收口时删除，摘要只活在那条标记消息里，见 L6 与 D 节记录。）
 
 ```
 $ git diff 46441f0 -- stableagent/core/loop.py                 → 0 行（L1 复核）
@@ -363,3 +495,62 @@ $ /tmp/sa-3.12/bin/python -m pytest -q                         → 220 passed, 1
 3. **`static` 不排序**。默认路径连工具顺序都不动（P2 的事件流一致性包含发给 Provider 的
    tools 列表形状），要动态视图就得显式改名——但配置项 `compression` 那种"单一开关"
    的坑在这里不存在，因为 `capability_filter` 本身就是开关。
+
+### 2026-11-02 · D 节预算治理（D1~D8 + A3/A4 + L2/L4/L5 + E4 勾选，进度 31/52）
+
+新增 `stableagent/context/budget.py`（`BudgetAction` / `ContextReport` / `BudgetDecision` /
+`count_orphan_tool_calls`）、`stableagent/context/engine.py`（`ContextEngine` / `Plan` /
+`EngineAssembler`）、`tests/l4_default_stream_dump.py` + `tests/fixtures/l4_p2_default_stream.json`
+（L4 跨版本金标准）、`tests/unit/test_context_engine.py`（42 条）、
+`tests/unit/test_l4_default_equivalence.py`（2 条）；
+改 `core/agent.py`（两侧接同一引擎 + 段入口 `fold`/`preflight` + `observe` + 暂停标志复位）、
+`core/state.py`（**删掉** B 节临时加的 `AgentState.context_summary`）、
+`context/compression.py`（`SUMMARY_NAME` 语义改为"进快照的唯一载体"）。
+
+```
+$ git diff 46441f0 -- stableagent/core/loop.py                 → 0 行（L1 复核，D 节未动 loop）
+$ .venv/bin/ruff check stableagent tests examples benchmarks   → All checks passed!
+$ .venv/bin/ruff format --check ...                            → 60 files already formatted
+$ .venv/bin/mypy                                               → Success: no issues found in 27 source files
+$ .venv/bin/pytest -q                                          → 265 passed, 1 skipped / 98.84%
+$ .venv/bin/pytest --cov=stableagent/context                   → engine.py 146 / budget.py 40 /
+                                                                  compression.py 111 / capability.py 81 /
+                                                                  assembly.py 22 / tokens.py 51 全 100%
+$ core/agent.py                                                → 240 stmts 9 miss 96%（9 行全是 P2 遗留分支：
+                                                                  310 / 389 / 400 / 402 / 410 / 421 / 427 / 432 / 435）
+$ /tmp/sa-3.10/bin/python -m pytest -q --no-cov                → 265 passed, 1 skipped
+$ /tmp/sa-3.12/bin/python -m pytest -q --no-cov                → 265 passed, 1 skipped
+L4 金标准：7252 字节，P2 收口提交工作树 == 当前工作树，diff 为空
+```
+
+五处判断（都有对应的坑，不是事后合理化）：
+
+1. **摘要进快照靠 `fold()`，不新增 `AgentState` 字段**。B 节先加了 `context_summary: str = ""`
+   占位，D1 接线时发现它必然与 `messages` 里那条标记消息漂移——两处真相、还要写迁移函数，
+   而标记消息本身就是"进快照"的载体。删字段后旧快照兼容反而更简单（一个字段都不用补），
+   L6/B2/B7 三处文案同步改写。落点在**每段入口**而非 loop 位点：位点看不到也写不回快照，
+   段入口折一次才是"一次模型调用换 N 步复用"。
+2. **`reject` 是不对称的**。入场命中 = 直接拒、不 escalate、不动计划、不烧模型；
+   运行中命中 = 只能到步边界暂停（ADR-01：`advance()` 一次做完整步副作用，没有步中紧急制动）。
+   把两条混成一条会写出"入场悄悄降质量"的实现——`test_d5_reject_does_not_silently_degrade_quality_at_entry`
+   专门盯这个。另一条连环坑：恢复进同样紧的预算必须 `FAILED` 而不是再 `PAUSED`，
+   否则"暂停↔恢复"永动（`test_d5_resuming_into_a_still_tight_budget_fails_instead_of_re_pausing`）。
+3. **暂停标志要在 `finally` 里复位**。预算暂停走的是引擎自己置 `loop.pause_requested`，
+   正常 F3 暂停路径不会替它清；不复位则**下一个任务**一进来就停在第 0 步。这类跨任务的状态泄漏
+   是 P2 "静默落盘"没遇到过的形状，测试 `test_d5_late_exhaustion_does_not_leave_the_loop_paused` 盯住。
+4. **L4 用跨版本金标准，不用"P3 里断言没建引擎"**。原计划只写结构断言，但"没建引擎"证明不了
+   "发的东西一样"。改成把 P2 收口提交的实际输出（事件流 + 每次 provider 请求 + 终态快照 +
+   `CONTRACT_VERSION` + `EventType` 全集）存成 fixture 比字节，金标准本身由
+   `tests/l4_default_stream_dump.py` 在两版代码上跑同一段脚本产出，重生成步骤写在模块 docstring 里。
+   顺带把"不许抬 `CONTRACT_VERSION`"也纳入这条测试（真要抬版就是一次显式契约决策，见 L6）。
+5. **删掉了 Agent 的第二条能力视图通路**。C 节的 `as_tool_selector` + `Agent._capability` 在引擎
+   接管后没人走；是覆盖率报告把 `agent.py:151` 指成死代码才删的（连带删导入）。
+   留着等于多养一份"看起来还在生效"的假象，比少 2% 覆盖率贵得多。
+
+一处必须记下的坑：**中文语料在英文工具描述上一个词都不命中**，会走 C4 的全量兜底。
+D 节第一版测试拿 `test_compression.corpus()` 的中文任务跑，`SHARED_VIEW` 预期 110、实得 270，
+19 条同时红。修法不是改判据，是 `loaded()` 把首条 user 换成英文 `TASK` 并在 docstring 里
+写明这个陷阱——预算测试要的是"视图真的被裁过"，不是"相关性筛选在中文上表现如何"。
+
+仍未勾选的都有归属：**L6/L7** 等 ADR-03（G5）与 CI（G6）；**A5/B8/F1~F5** 是 benchmark 轨道；
+**E1~E3** 是 Evidence 增强；**G/H** 是收口与对外。

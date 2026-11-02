@@ -275,22 +275,31 @@ def test_b6_repeated_assemble_returns_identical_context(name: str) -> None:
 # ------------------------------------------------------------------ B7 旧快照兼容
 
 
-def test_b7_snapshot_without_context_summary_still_loads() -> None:
+def test_b7_snapshot_without_summary_marker_still_loads() -> None:
     payload: dict[str, Any] = {
         "run_id": "r1",
         "agent_name": "a",
         "contract_version": "1.1.0",
-        "messages": [{"role": "user", "content": "旧快照里没有 context_summary 字段"}],
+        "messages": [{"role": "user", "content": "旧快照里没有摘要标记"}],
     }
     state = AgentState.model_validate(payload)
-    assert state.context_summary == ""
+    assert not any(is_summary_message(m) for m in state.messages)
     assert AgentState.loads(state.snapshot()) == state  # E3 往返无损在 P3 仍成立
+
+
+def test_b7_summary_travels_in_messages_not_in_a_second_field() -> None:
+    """摘要的唯一载体是 messages 里的标记消息；再加一个字段就是两份会漂移的事实源。"""
+    kept = COMPRESSIONS["summary"](ContextConfig(keep_recent_messages=4)).compress(corpus()).kept
+    state = AgentState(run_id="r", agent_name="a", messages=kept)
+    dumped = state.model_dump()
+    assert "context_summary" not in dumped
+    assert any(m.get("name") == SUMMARY_NAME for m in dumped["messages"])
+    assert AgentState.loads(state.snapshot()) == state
 
 
 def test_b7_v1_0_0_fixture_migrates_under_p3_fields() -> None:
     fixture = FIXTURE_DIR / "state_v1_0_0.json"
     state = migrate_state(fixture.read_text())
-    assert state.context_summary == ""
     assert state.messages and all(m.tool_calls == [] for m in state.messages)
 
 

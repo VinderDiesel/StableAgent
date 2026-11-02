@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from stableagent.core.state import ContextConfig, Message
 
 SUMMARY_NAME = "context_summary"
-"""折叠前缀在上下文里的固定身份；与 `AgentState.context_summary` 配对使用（D 节接线）。"""
+"""折叠前缀在上下文里的固定身份，也是它进快照的唯一载体（D1 的 `ContextEngine.fold()`）。"""
 
 
 @runtime_checkable

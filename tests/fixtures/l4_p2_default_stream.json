@@ -1,0 +1,357 @@
+{
+  "contract_version": "1.1.0",
+  "event_types": [
+    "checkpoint",
+    "done",
+    "error",
+    "paused",
+    "retry",
+    "thinking",
+    "tool_call",
+    "tool_result"
+  ],
+  "events": [
+    {
+      "data": {
+        "text": "thinking one"
+      },
+      "step": 1,
+      "type": "thinking"
+    },
+    {
+      "data": {
+        "tool_call": {
+          "arguments": {
+            "text": "hello"
+          },
+          "id": "c1",
+          "name": "echo"
+        }
+      },
+      "step": 1,
+      "type": "tool_call"
+    },
+    {
+      "data": {
+        "evidence": {
+          "error": null,
+          "ok": true,
+          "output": "hello",
+          "tool_call": {
+            "arguments": {
+              "text": "hello"
+            },
+            "id": "c1",
+            "name": "echo"
+          }
+        }
+      },
+      "step": 1,
+      "type": "tool_result"
+    },
+    {
+      "data": {
+        "text": "thinking two"
+      },
+      "step": 2,
+      "type": "thinking"
+    },
+    {
+      "data": {
+        "tool_call": {
+          "arguments": {
+            "text": "a b c"
+          },
+          "id": "c2",
+          "name": "count"
+        }
+      },
+      "step": 2,
+      "type": "tool_call"
+    },
+    {
+      "data": {
+        "evidence": {
+          "error": null,
+          "ok": true,
+          "output": "3",
+          "tool_call": {
+            "arguments": {
+              "text": "a b c"
+            },
+            "id": "c2",
+            "name": "count"
+          }
+        }
+      },
+      "step": 2,
+      "type": "tool_result"
+    },
+    {
+      "data": {
+        "text": "final answer"
+      },
+      "step": 3,
+      "type": "thinking"
+    },
+    {
+      "data": {
+        "result": "final answer",
+        "steps": 3
+      },
+      "step": 3,
+      "type": "done"
+    }
+  ],
+  "final_state": {
+    "agent_name": "l4",
+    "contract_version": "1.1.0",
+    "error": null,
+    "messages": [
+      {
+        "content": "echo then count",
+        "name": null,
+        "role": "user",
+        "tool_call_id": null,
+        "tool_calls": []
+      },
+      {
+        "content": "thinking one",
+        "name": null,
+        "role": "assistant",
+        "tool_call_id": null,
+        "tool_calls": [
+          {
+            "arguments": {
+              "text": "hello"
+            },
+            "id": "c1",
+            "name": "echo"
+          }
+        ]
+      },
+      {
+        "content": "hello",
+        "name": "echo",
+        "role": "tool",
+        "tool_call_id": "c1",
+        "tool_calls": []
+      },
+      {
+        "content": "thinking two",
+        "name": null,
+        "role": "assistant",
+        "tool_call_id": null,
+        "tool_calls": [
+          {
+            "arguments": {
+              "text": "a b c"
+            },
+            "id": "c2",
+            "name": "count"
+          }
+        ]
+      },
+      {
+        "content": "3",
+        "name": "count",
+        "role": "tool",
+        "tool_call_id": "c2",
+        "tool_calls": []
+      },
+      {
+        "content": "final answer",
+        "name": null,
+        "role": "assistant",
+        "tool_call_id": null,
+        "tool_calls": []
+      }
+    ],
+    "run_id": "RUN",
+    "status": "succeeded",
+    "step": 3,
+    "usage": {
+      "completion_tokens": 7,
+      "prompt_tokens": 66
+    }
+  },
+  "provider_calls": [
+    {
+      "messages": [
+        {
+          "content": "echo then count",
+          "name": null,
+          "role": "user",
+          "tool_call_id": null,
+          "tool_calls": []
+        }
+      ],
+      "tools": [
+        {
+          "description": "echo back the input text",
+          "name": "echo",
+          "parameters": {
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "description": "count words in a text",
+          "name": "count",
+          "parameters": {
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    },
+    {
+      "messages": [
+        {
+          "content": "echo then count",
+          "name": null,
+          "role": "user",
+          "tool_call_id": null,
+          "tool_calls": []
+        },
+        {
+          "content": "thinking one",
+          "name": null,
+          "role": "assistant",
+          "tool_call_id": null,
+          "tool_calls": [
+            {
+              "arguments": {
+                "text": "hello"
+              },
+              "id": "c1",
+              "name": "echo"
+            }
+          ]
+        },
+        {
+          "content": "hello",
+          "name": "echo",
+          "role": "tool",
+          "tool_call_id": "c1",
+          "tool_calls": []
+        }
+      ],
+      "tools": [
+        {
+          "description": "echo back the input text",
+          "name": "echo",
+          "parameters": {
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "description": "count words in a text",
+          "name": "count",
+          "parameters": {
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    },
+    {
+      "messages": [
+        {
+          "content": "echo then count",
+          "name": null,
+          "role": "user",
+          "tool_call_id": null,
+          "tool_calls": []
+        },
+        {
+          "content": "thinking one",
+          "name": null,
+          "role": "assistant",
+          "tool_call_id": null,
+          "tool_calls": [
+            {
+              "arguments": {
+                "text": "hello"
+              },
+              "id": "c1",
+              "name": "echo"
+            }
+          ]
+        },
+        {
+          "content": "hello",
+          "name": "echo",
+          "role": "tool",
+          "tool_call_id": "c1",
+          "tool_calls": []
+        },
+        {
+          "content": "thinking two",
+          "name": null,
+          "role": "assistant",
+          "tool_call_id": null,
+          "tool_calls": [
+            {
+              "arguments": {
+                "text": "a b c"
+              },
+              "id": "c2",
+              "name": "count"
+            }
+          ]
+        },
+        {
+          "content": "3",
+          "name": "count",
+          "role": "tool",
+          "tool_call_id": "c2",
+          "tool_calls": []
+        }
+      ],
+      "tools": [
+        {
+          "description": "echo back the input text",
+          "name": "echo",
+          "parameters": {
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "description": "count words in a text",
+          "name": "count",
+          "parameters": {
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

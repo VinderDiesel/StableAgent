@@ -5,22 +5,71 @@
 ## [Unreleased]
 
 ### 契约扩展（P3 进行中，全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
-- `AgentState.context_summary: str = ""`：新增带默认值字段，旧快照缺字段即取空串，
-  `AgentState.loads` 的严格性与往返无损不变式不受影响（v1.0.0 fixture 已回归验证）
-- `ContextConfig` 新增 4 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /
-  `tool_result_excerpt_chars=200` / `max_visible_tools=8`。既有 `Config()` 的
-  `compression="none"` + `capability_filter="static"` 组合下这些字段不参与任何代码路径
+- `ContextConfig` 新增 5 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /
+  `tool_result_excerpt_chars=200` / `max_visible_tools=8`；`on_budget_exceeded` 的
+  `compress` / `degrade` / `reject` 三个取值从"声明未实现"变为真实语义（见下方引擎条目）。
+  既有 `Config()` 的 `compression="none"` + `capability_filter="static"` +
+  `max_context_tokens=None` 组合下这些字段不参与任何代码路径
+- **`AgentState` 未新增字段**：本阶段一度加过 `context_summary: str = ""`，D 节收口时删除。
+  摘要的唯一载体是 `messages` 里那条 `role="system"` + `name="context_summary"` 标记消息，
+  再加一个字段就是会与它漂移的第二份事实源；好处是旧快照兼容面更小（无字段可补）
+- 未新增 `EventType` 成员：上下文决策走只读属性（`agent.context_reports`），
+  沿用 P2"静默落盘 + 只读属性"的先例，也避免动终止事件序列（F4）
+- `ContextConfig` 的四个既有占位项（`assembly` / `compression` / `capability_filter` /
+  `max_context_tokens`）现在都有消费方；`ControlConfig.max_total_tokens` 仍为声明未实现
+  （账单口径累计上限，属后续成本控制阶段，与 P3 的单次请求口径不同）
 - 新模块 `stableagent/context/{tokens,compression,capability}.py`：三张注册表
   （`ASSEMBLERS` / `COMPRESSIONS` / `CAPABILITY_FILTERS`）+ `resolve_*` 工厂，
   与 P1 的组装位点同构；未知名一律 `KeyError` 带出已注册清单
 - `resolve_assembler(config, summariser=None)`：新增第二个可选参数（位置参数量不变，
   旧的单参调用形状完全兼容）。`compression != "none"` 时返回 `CompressedAssembler` 包装，
   `== "none"` 时返回的对象与类型都与 P2 一致
-- `Agent` 新增只读属性 `capability_report`（未启用动态视图时为 `None`）；
-  构造时若显式传入 `tool_selector`，配置项 `capability_filter` 不参与——显式优先，
-  且此时 `capability_report` 为 `None`，不报一份"其实没生效"的结果
+- 新模块 `stableagent/context/budget.py`：`ContextReport`（每步一条：`step` / `action` /
+  `limit` / `before` / `after` / `levels` / `levels_tried` / `tools_total` / `tools_kept` /
+  `tools_dropped_tokens` / `orphans` / `within_budget` / `exhausted` /
+  `estimated_prompt_tokens` / `observed_prompt_tokens`）+ `BudgetDecision`（入场判定）+
+  `count_orphan_tool_calls`（"没拆散 `tool_call`/`tool_result` 配对"的自检，E4）
+- 新模块 `stableagent/context/engine.py`：`ContextEngine`（压缩 → 能力视图 → 预算判定的组合，
+  `plan` / `estimate` / `fold` / `assemble` / `select` / `preflight` / `observe`）+
+  `Plan(keep_recent, max_visible_tools)`（frozen，可当适配器缓存的键）+
+  `EngineAssembler`（把引擎的组装能力包成 loop 认识的适配器，L1 因此零改 loop）
+- `Agent.__init__` 新增两个可选关键字注入项 `token_counter=` / `summariser=`（缺省用内置启发式
+  计数与离线抽取式摘要；位置参数量与旧调用形状不变）
+- `Agent` 新增只读属性 `context_reports`（返回副本，外部改不动引擎的事实源）；
+  `capability_report` 改由引擎提供，**未启用动态视图时为 `None`**；构造时若显式传入
+  `tool_selector`，引擎的配置副本强制 `capability_filter="static"` 且 `capability_report`
+  为 `None`——显式选择器优先，不报一份"其实没生效"的结果
+- **移除** `Agent` 内部的第二条能力视图通路（C 节留下的 `as_tool_selector` 装配路径与
+  `Agent._capability`）：D 节把动态视图收进引擎后它已无调用方，覆盖率报告指为死代码。
+  `stableagent.context.capability.as_tool_selector` 仍是公开 API，未删除
 - 运行时依赖仍为 3 个（`pydantic` / `anyio` / `httpx`）：token 估算为内置启发式，
   未引入 `tiktoken`
+
+### Added（P3 D 节：预算治理）
+- `ContextEngine` 一个实例同时服务 loop 位点与 Agent 外层：外层 `preflight()` 判的量与
+  位点实际发出的量必然一致（`test_d1_*` 直接比对象身份），杜绝"外层以为没超、发出去爆了"
+- 预算判据 `max_context_tokens` 钉死为"将要发出的组装后消息 + 实际注入的工具规格"
+  （不是历史全长），边界语义为"等于上限不触发动作"
+- 阶梯（`_ladder()`，`KEEP_FLOOR=1` / `TOOLS_FLOOR=1` / `LADDER_STEP=2`）：
+  `compress` 先按 B3 顺序收缩历史再动工具视图，`degrade` 先加严能力视图再压历史，
+  `reject` 在入场直接拒且**不 escalate、不动计划**；`degrade` 之后才升级，
+  阶梯顺序与长度都有测试逐档写出
+- **摘要进快照**（L5）：`ContextEngine.fold(state)` 在每段入口（`_pipeline` 开头）折叠一次并
+  写回 `messages`，崩溃恢复不需要重算——`test_l5_recovered_stream_with_compression_is_event_identical`
+  除逐条比对事件流外还断言恢复后首次请求的上下文与不中断那次完全相同
+- 运行中压到地板仍超限 → 走 F3 的步边界暂停（`reason="budget_exceeded"`），语义与 P2 的
+  `needs_human` 同形；恢复进同样紧的预算则直接 `FAILED`，不再重复暂停（防"暂停↔恢复"循环）；
+  `_pipeline` 的 `finally` 复位 `pause_requested`，避免跨任务泄漏
+- A4 事后校准：`ContextEngine.observe(state)` 把 Provider 回报的 `prompt_tokens` **增量**
+  与估算成对记进报告（按 `step` 去重、段入口重置基线）；**只报告不回灌**，
+  校准不参与任何决策（Provider 谎报 usage 时决策序列逐条不变）
+- L4 跨版本等价证据：`tests/l4_default_stream_dump.py` +
+  `tests/fixtures/l4_p2_default_stream.json`（P2 收口提交 `46441f0` 工作树产出的金标准：
+  事件流 / 每次发给 Provider 的 messages+tools / 终态快照 / `CONTRACT_VERSION` /
+  `EventType` 全集），`test_p3_default_config_stream_identical_to_p2` 断言当前代码逐字节复现
+- 测试 +45（合计 265 passed, 1 skipped）：`test_context_engine.py` 42 条（含 E4 的阶梯孤儿扫描
+  4 条）+ L4 跨版本等价 2 条 + B7 拆分 1 条；`stableagent/context/` 六个模块全部 100%，
+  全库 98.84%；`core/loop.py` 相对 P2 收口提交零修改
 
 ### P2 收口
 - DoD **34/34**：最后一项 F5（CI 3.10/3.12 矩阵全绿）由 run 41032998523 关闭，
