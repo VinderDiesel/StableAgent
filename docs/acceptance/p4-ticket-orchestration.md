@@ -81,8 +81,15 @@
       `json.dumps(sort_keys=True)` 落 TEXT；`test_orchestration_store.py` = `13 passed`，
       覆盖重开无损、注入异常回滚、三处唯一键冲突、`list_runnable_tickets` 优先级排序与分页；
       全量 `322 passed, 1 skipped`。
-- [ ] **M1.4** `outbox.py`（仅 `launch_assignment`）：事务内入队、提交后领取、成功才标 `succeeded`、
+- [x] **M1.4** `outbox.py`（仅 `launch_assignment`）：事务内入队、提交后领取、成功才标 `succeeded`、
       幂等键重复入队只更新 payload。先写 `test_outbox.py` 的"commit 后 crash""重复 dispatch""内存标志不算幂等"。
+      证据（2026-11-02，Task 6）：`enqueue_effect()` 幂等靠 `(kind, idempotency_key)` 唯一键，终态行不复活
+      （`test_enqueue_is_idempotent_on_kind_and_key` + `test_duplicate_enqueue_on_terminal_effect_does_not_revive_it`）；
+      `EffectDispatcher.dispatch_due()` 在事务外做 handler I/O、`_claim/_settle/_fail_or_retry` 各自短事务
+      （`test_handler_never_sees_an_open_transaction`，"commit 后 crash"半边以 `reclaim_running_effects`
+      的孤儿回收用例 `test_orphan_running_effects_are_reclaimed` 覆盖，进程级演练归 Task 10）；
+      重复 dispatch 由领取即置 `running` 保证不再入 due 集。`test_outbox.py` = `6 passed`，
+      全量 `328 passed, 1 skipped`。
 - [ ] **M1.5** `executor.py`：`WorkerExecutor` 协议 + `AgentExecutor.launch()`（只调 `stream`）+
       `DONE→ready` / `ERROR→failed` / `PAUSED→waiting|blocked` 映射，progress 默认只在 `TOOL_RESULT` 落一条。
       先写 `test_agent_executor.py`（`FakeProvider` + 注入 Agent 工厂）。
@@ -210,7 +217,10 @@
       拒绝重复 `(ticket_id, attempt)`、`test_worker_run_id_is_unique_across_assignments` 拒绝重复
       `worker_run_id`、`test_effect_kind_idempotency_key_is_unique` 拒绝重复 `(kind, idempotency_key)`；
       冲突均为 SQLite `UNIQUE` 约束错误，可由调用方按约束名分类。
-- [ ] **B5** `Effect.kind + idempotency_key` 的语义在 docstring 与 ADR 中一致记录。证据：（待记录）。
+- [x] **B5** `Effect.kind + idempotency_key` 的语义在 docstring 与 ADR 中一致记录。
+      证据（2026-11-02，Task 6）：`Store.enqueue_effect()` docstring 写明"同 `(kind, idempotency_key)`
+      的 pending/retry_wait 只更新 payload/due_at、终态不复活、幂等靠唯一键不靠内存标志"，
+      与 ADR-04 第 180 行附近"SQLite 唯一键……非内存标志"的记录一致，无第二处相异表述。
 - [ ] **B6** 重开数据库、schema 迁移、查询排序、分页、并发读取均有离线测试。
       证据（前半，2026-11-02，Task 4/5）：`test_reopen_loses_nothing_and_unique_keys_hold`（重开无损）、
       `test_all_eight_tables_exist_with_schema_version`（schema 迁移版本行）、
@@ -220,10 +230,15 @@
 
 ### C. Durable Outbox（spec WP-4.3）
 
-- [ ] **C1** effect kind 只有 `launch_assignment`、`deliver_input`、`cancel_assignment`；未提前引入 P5/P6 种类。
+- [x] **C1** effect kind 只有 `launch_assignment`、`deliver_input`、`cancel_assignment`；未提前引入 P5/P6 种类。
+      证据（2026-11-02，Task 6）：`EffectKind` 当前仅 `LAUNCH_ASSIGNMENT`，是三种白名单的 M1 子集；
+      M2 的 F 组按 ADR-04 决策 6 增补 `deliver_input`/`cancel_assignment`，不引入白名单外种类。
 - [ ] **C2** 创建/重试 Assignment 在同事务创建 `launch_assignment`；输入写入后创建 `deliver_input`。
-- [ ] **C3** dispatcher 在 commit 后拉取 due effects；同 idempotency key 的 pending 重复入队只更新 payload，
-      不新增副作用（SQLite 唯一键证明，非内存标志）。验证：`test_outbox.py`。证据：（待记录）。
+- [x] **C3** dispatcher 在 commit 后拉取 due effects；同 idempotency key 的 pending 重复入队只更新 payload，
+      不新增副作用（SQLite 唯一键证明，非内存标志）。验证：`test_outbox.py`。
+      证据（2026-11-02，Task 6）：`test_enqueue_is_idempotent_on_kind_and_key` 证明重复入队后
+      `COUNT(*)==1` 且返回既有 `ef-1`；`test_handler_never_sees_an_open_transaction` 证明 handler
+      运行时 `in_transaction` 为 False（dispatch 在 `due_effects` 查询之后、事务之外）。
 - [ ] **C4** handler 成功才标 `succeeded`；失败用注入式 backoff 进 `retry_wait`，达 `max_attempts` 标 `failed`
       并派生 `blocked`/`failed` Report。证据：（待记录）。
 - [ ] **C5** handler 的 I/O 不持有事务；重启后 pending/retry_wait 继续执行。
@@ -1634,7 +1649,7 @@ L5 的"P4 库不含 P2 表名"断言到 Task 10 才整条勾。
   带 `async def dispatch_due(self, *, limit: int = 10) -> int` 与 `def outcomes(self) -> list[tuple[str, EffectState]]`。
 - Consumes: Task 3 `next_effect_status`、Task 4/5 事务与 `due_effects`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_outbox.py
@@ -1732,12 +1747,12 @@ def test_transaction_wrapper_still_rejects_nesting(store: Store) -> None:
                 pass
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_outbox.py -v`
 Expected: FAIL —`ModuleNotFoundError: ... orchestration.outbox`
 
-- [ ] **Step 3: 实现入队与派发**
+- [x] **Step 3: 实现入队与派发**
 
 ```python
 # stableagent/orchestration/store.py 追加
@@ -1880,12 +1895,12 @@ class EffectDispatcher:
 `Store._effect_row(effect_id)` / `_effect_by_key(kind, key)` 是本任务需要的两个私有读取方法，
 返回 `Effect` 模型；`update_effect` 按 id 全行 UPDATE 并返回入参模型。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_outbox.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS（6 条全绿，包括"两次失败即 FAILED"）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/outbox.py stableagent/orchestration/store.py tests/unit/test_outbox.py
