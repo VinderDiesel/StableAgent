@@ -3,7 +3,7 @@
 - 状态：Accepted（P2）
 - 日期：2026-10-30
 - 关联：`00-contracts.md`（冻结规则、P2 扩展记录）、`01-loop-runtime.md`（F1/F3/F4）、
-  `docs/p2-dod-checklist.md`（L1~L5、A~G 验收条目）
+  `docs/acceptance/p2-checkpoint-recovery.md`（L1~L5、A~G 验收条目）
 - 代码入口：`stableagent/core/checkpoint/{storage,manager,recovery}.py`、
   `stableagent/core/errors.py`、`stableagent/core/agent.py`（外层 `_pipeline`）
 
@@ -148,7 +148,7 @@ Roadmap 的差异化卖点是"执行可靠性"，P2 的硬指标是招牌动作�
      `examples/03_checkpoint_resume.py` 首轮在 CI 矩阵 3.10 上因此偶发失败（父进程
      `SIGKILL` 时子进程已正常退出）。框架行为正确，改法是让击杀点之后仍留一整轮
      provider 往返（`TOTAL_STEPS` 3 → 4），把可击杀窗口从十几毫秒拉到 `delay` 的线性
-     量级——见 `docs/p2-dod-checklist.md` 的复核记录。**任何外部编排（P6 的超时看门狗、
+     量级——见 `docs/acceptance/p2-checkpoint-recovery.md` 的复核记录。**任何外部编排（P6 的超时看门狗、
      运维脚本）想用 checkpoint 事件判断"现在杀是安全的"，都必须按这条时序设计。**
 - 契约影响：全部为兼容扩展（新枚举成员 `retry`、`CheckpointConfig` 新增 7 个带默认值
   字段），逐条记录见 `CHANGELOG.md` 与 `00-contracts.md` 的"P2 扩展记录"。

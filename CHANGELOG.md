@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-### 契约扩展（P3 进行中，全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
+### 契约扩展（P3 本地收口，远端 CI 待确认；全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
 - `ContextConfig` 新增 5 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /
   `tool_result_excerpt_chars=200` / `max_visible_tools=8`；`on_budget_exceeded` 的
   `compress` / `degrade` / `reject` 三个取值从"声明未实现"变为真实语义（见下方引擎条目）。
@@ -71,10 +71,25 @@
   4 条）+ L4 跨版本等价 2 条 + B7 拆分 1 条；`stableagent/context/` 六个模块全部 100%，
   全库 98.84%；`core/loop.py` 相对 P2 收口提交零修改
 
+### Added（P3 E/F：Evidence 与可复现证据）
+- `stableagent/tools/evidence.py`：`Evidence` 的 canonical 定义；`tools/registry.py` 和顶层包
+  保留同一个类对象的重导出，旧导入路径不变。P3 保持 Evidence 既有序列化字段，不新增默认 trace 字段，
+  以维持 P2 默认 `tool_result` 事件金标准；`step` / `origin` / `parent_call_id` 延后至 P4 的
+  Ticket/Assignment 领域记录。模型强制 `ok == (error is None)`；失败缺少错误说明时补齐
+  确定性错误文本，避免 tool message 退化成字符串 `"None"`
+- `benchmarks/context_compression_benchmark.py`：固定离线语料输出压缩 token/事实保留/tool pair、
+  独立 reference Provider usage 校准、200+ 工具 resident 护栏和第 3 步 SQLite checkpoint 恢复影响
+- `docs/evidence/p3-context-benchmark-2026-11-02.md`：记录命令、环境、固定变量与本机结果；
+  `hybrid` 在该语料中节省 51.16% 估算 token 且保留全部事实，200 工具动态视图节省 98.59% 工具 token，
+  summary 恢复段的最新 snapshot payload 从 4,056 降至 2,594 字节。reference usage 是离线模拟口径，
+  不作为真实模型 tokenizer 精度声明
+- `tests/unit/test_evidence.py` 与 `tests/unit/test_context_benchmark.py`：覆盖 Evidence 兼容/不变式/追溯字段，
+  以及 benchmark 的质量、校准、resident 护栏和 checkpoint 输出形状
+
 ### P2 收口
 - DoD **34/34**：最后一项 F5（CI 3.10/3.12 矩阵全绿）由 run 41032998523 关闭，
   两个 job 均为 `126 passed, 1 skipped` / 覆盖率 98.20% / 心脏模块 96.8–100%，
-  与本地预跑数值逐条一致；证据记在 `docs/p2-dod-checklist.md` 的 F5 条目与复核记录
+  与本地预跑数值逐条一致；证据记在 `docs/acceptance/p2-checkpoint-recovery.md` 的 F5 条目与复核记录
 - 崩溃恢复用例的击杀时序竞态修复（详见 `02-checkpoint.md` 后果 5）：只在编排侧改步数，
   运行时代码零改动
 
@@ -97,7 +112,7 @@
 - `OpenAIProvider.from_config(ProviderConfig, ...)`：新增构造入口，把
   `request_timeout_seconds` / `api_base` / `model` 贯通到 httpx 客户端（验收 C5）
 - **未动**：`Event` / `Message` / `AgentState` / `Provider` / `Tool` / `Evidence`
-  的既有字段与不变式；`core/loop.py` 零修改（见 `docs/p2-dod-checklist.md` F1 的 diff 证明）
+  的既有字段与不变式；`core/loop.py` 零修改（见 `docs/acceptance/p2-checkpoint-recovery.md` F1 的 diff 证明）
 
 ### Added（P2）
 - `core/checkpoint/storage.py`：`CheckpointStore` 统一异步协议（`save/load/records/delete`）
@@ -134,7 +149,7 @@
 - `ControlConfig` 新增字段 `max_steps: int = 10`
 - `ToolCall` 定义移入 `core/state.py`（解除 Message 循环引用），
   `providers/base.py` 保留重导出，**旧导入路径不变**
-- P1 语义决策 F1~F5（详见 `docs/p1-dod-checklist.md` 第 0 节）：
+- P1 语义决策 F1~F5（详见 `docs/acceptance/p1-core-runtime.md` 第 0 节）：
   advance 纯转移接口 / max_steps→error+FAILED / pause 步边界生效、非法态 no-op /
   终止事件恰一且居尾 / 暂停表达=新枚举成员 PAUSED
 

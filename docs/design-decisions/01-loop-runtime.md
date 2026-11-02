@@ -2,7 +2,7 @@
 
 - 状态：Accepted（P1）
 - 日期：2026-10-30
-- 关联：`00-contracts.md`（契约 v1.1.0）、`docs/p1-dod-checklist.md`（F1~F5、C2、D1~D4）
+- 关联：`00-contracts.md`（契约 v1.1.0）、`docs/acceptance/p1-core-runtime.md`（F1~F5、C2、D1~D4）
 - 代码入口：`stableagent/core/loop.py`、`stableagent/core/agent.py`、`stableagent/context/assembly.py`
 
 ## 背景

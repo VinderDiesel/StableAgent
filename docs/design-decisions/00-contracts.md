@@ -1,12 +1,12 @@
-# ADR-00：公共契约基线（Contract v1.0.0）
+# ADR-00：公共契约基线（当前 Contract v1.1.0）
 
-- 状态：Accepted（P0 基线；P1 修订与 P2 兼容扩展见文末记录，当前 CONTRACT_VERSION = 1.1.0）
+- 状态：Accepted（P0 初始基线 v1.0.0；P1 修订及 P2/P3 兼容扩展见文末记录，当前 `CONTRACT_VERSION = 1.1.0`）
 - 日期：2026-10-30
 - 代码入口：`stableagent/core/state.py`（`CONTRACT_VERSION = "1.1.0"`）
 
 ## 版本化与冻结规则（全局）
 
-1. 五大契约统一以 `CONTRACT_VERSION` 标注当前基线版本 **v1.0.0**。
+1. 六项公共契约以 `CONTRACT_VERSION` 标注当前版本 **v1.1.0**；v1.0.0 是 P0 初始基线。
 2. **P0~P1：允许修订**。任何字段/语义变更必须：
    - 写入 `CHANGELOG.md`，标注**破坏性 / 非破坏性**；
    - 同步更新本文档对应小节。
@@ -71,7 +71,7 @@
 
 ## 契约五：Tool / Evidence —— 工具抽象与失败归一化（v1.0.0）
 
-代码入口：`stableagent/tools/registry.py`
+代码入口：`stableagent/tools/evidence.py`（canonical `Evidence`）与 `stableagent/tools/registry.py`（`Tool` / `ToolRegistry` / 兼容重导出）
 
 - `Tool.execute(arguments) -> ToolResult`（async）；工具实现**不吞异常**。
 - `ToolRegistry.call(tool_call) -> Evidence`：唯一归一化点——注册缺失、执行异常、
@@ -156,8 +156,32 @@
 - 失败自愈三分类与重试边界（`max_attempts` 含首次调用）；需人工停在 `PAUSED`，
   不新增状态机成员。
 
+## P3 扩展记录（v1.1.0 之上的兼容扩展，版本不变）
+
+P3 没有改变既有 Event、Message、AgentState、Provider、Tool、Evidence 或 Config 的字段语义与状态机。所有新增字段带默认值，默认 `Config()` 仍使用 P2 的 pass-through 消息、全量原序工具和零 ContextEngine 路径，因此 `CONTRACT_VERSION` 保持 `1.1.0`。
+
+| 变更 | 类型 | 说明 |
+|---|---|---|
+| `ContextConfig.keep_recent_messages` / `max_summary_chars` / `tool_result_excerpt_chars` / `max_visible_tools` | 新带默认值字段 | 历史压缩和能力视图参数；默认值不启用压缩/动态筛选。 |
+| `ContextConfig.compression` / `capability_filter` / `max_context_tokens` / `on_budget_exceeded` | 既有配置的首次执行语义 | `compression="none"`、`capability_filter="static"`、无 budget 时保持 P2 路径；预算动作见 ADR-03。 |
+| `Agent(..., token_counter=/summariser=)` | 新关键字注入项 | 可替换 token 估算和摘要器；位置参数调用形状不变。 |
+| `Agent.context_reports` | 新只读属性 | 返回 ContextReport 副本；不新增 EventType，避免事件流噪音和终止语义变化。 |
+| `ContextReport` / `BudgetDecision` | 新观测数据模型 | 进程内上下文观测与入口判定，不是 AgentState 的第二份快照。 |
+| Evidence 位置与失败不变式 | 兼容实现调整 | canonical 类型移至 `tools/evidence.py`，registry 和顶层导入保持兼容；P3 不新增 trace 字段，避免默认 event payload 变化，Ticket/Assignment trace 延后至 P4。 |
+
+### P3 锁定的上下文契约
+
+- 上下文逻辑只经 `ContextAssembler`、`ToolSelector` 和 Agent 外层接入，`core/loop.py` 不认识 compression、budget 或 capability。
+- 摘要唯一持久化载体是 `Message(role="system", name="context_summary")`，由 `ContextEngine.fold()` 写入 `AgentState.messages`；不新增会漂移的 `AgentState.context_summary` 字段。
+- 工具裁剪永不删除本 run 已使用的 resident 工具；筛选为空时退回全量工具。
+- `max_context_tokens` 比较实际发送的 messages + specs；入口 reject 产生标准 error 且不调用 Provider，运行中无法安全中止的超限在步边界暂停。
+- Provider usage 仅用于 ContextReport 事后校准，不反馈到决策，因此 checkpoint/recover 保持确定性。
+
+决策理由、替代方案、失败语义与 benchmark 见 **ADR-03 `03-context-engineering.md`**。
+
 ## 关联 ADR
 
 - ADR-01：Loop 执行模型（P1）——`01-loop-runtime.md`
 - ADR-02：Checkpoint 与失败自愈（P2）——`02-checkpoint.md`
+- ADR-03：Worker Context Engineering 与预算治理（P3）——`03-context-engineering.md`
 

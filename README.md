@@ -280,7 +280,7 @@ those rows, not how large the restored snapshot is — 40 snapshots of 8 KB prun
 ruff check stableagent tests examples benchmarks
 ruff format --check stableagent tests examples benchmarks
 mypy                        # config in pyproject, python_version = 3.10
-pytest                      # 126 passed, 1 skipped; fail_under = 70
+pytest                      # run the configured suite; acceptance evidence records the dated result
 ```
 
 CI runs that matrix on Python 3.10 and 3.12, plus a stricter gate: the heart modules
@@ -298,21 +298,26 @@ enum members, new config sections).
 | Phase | Scope | Status |
 |---|---|---|
 | P0 | Contracts, package skeleton, CI | ✅ done |
-| P1 | Executable core: loop, OpenAI provider, tool loop, pause/resume | ✅ done |
+| P1 | Worker runtime: loop, OpenAI provider, tool loop, pause/resume | ✅ done |
 | P2 | Checkpoint & recovery: 3 backends, self-healing, snapshot versioning | ✅ done — 34/34, CI matrix green on 3.10 & 3.12 |
-| P3 | Context engineering: compression, dynamic capability view, token budget | 🔜 next |
-| P4 | Planning & SubAgent: decomposition, DAG, concurrent scheduling | ⏳ |
-| P5 | Capability substrate: MCP, sandbox, memory | ⏳ |
-| P6 | Control & hardening: multi-model, observability, docs site | ⏳ |
+| P3 | Worker context runtime: compression, capability view, budget, evidence | 🟡 local close — remote CI pending on the submitted branch |
+| P4 | Ticket orchestration: Ticket, Assignment, Scheduler, DAG, Durable Outbox | ⏳ gated on P3 CI |
+| P5 | Guarded execution and repository integration | ⏳ |
+| P6 | Single-repository Super-Agent Beta | ⏳ |
+| P7 | Production hardening and ecosystem | ⏳ |
 
-Per-phase acceptance evidence: `docs/p1-dod-checklist.md`, `docs/p2-dod-checklist.md`.
+Implementation contracts and acceptance evidence: [`docs/README.md`](docs/README.md), [P3 Spec](docs/specs/p3-worker-context-runtime.md), and [P3 Acceptance](docs/acceptance/p3-context-engineering.md).
 
 ## Design documentation
 
+- [`docs/README.md`](docs/README.md) — documentation hub: roadmap, implementation specs, acceptance evidence, ADRs, articles, and archives
 - `docs/design-decisions/00-contracts.md` — the public contract, its invariants, and what is frozen
 - `docs/design-decisions/01-loop-runtime.md` — ADR-01: why the loop is a pure step transition
 - `docs/design-decisions/02-checkpoint.md` — ADR-02: consistency, concurrency, migration, retry boundaries
+- `docs/design-decisions/03-context-engineering.md` — ADR-03: context assembly, budget governance, snapshot summaries, and evidence boundaries
+- `docs/acceptance/p3-context-engineering.md` — P3 acceptance ledger and dated validation evidence
 - `docs/blog/01-checkpoint-deep-dive.md` — the checkpoint design written up as an essay
+- `docs/blog/02-context-engineering.md` — measured context engineering design and limits
 - `docs/Roadmap.md` — phases, DoD gates, and the quality baseline that only ratchets up
 
 Design docs are Chinese; code and this README are English.

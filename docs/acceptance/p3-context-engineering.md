@@ -4,8 +4,7 @@
 > P3 接入点预留）+ `docs/design-decisions/01-loop-runtime.md`（ADR-01 loop 契约）
 > + `docs/design-decisions/02-checkpoint.md`（ADR-02，压缩产物与快照/恢复的交互必须遵守其结论）。
 > 使用方式：每条都有"怎么验"，全部勾选即 P3 收口；未达 DoD 不进 P4。
-> **状态：31/52 进行中（A 度量地基 + B 历史压缩 + C 能力视图 + D 预算治理已落，L1 复核 0 diff、
-> L4 跨版本金标准逐字节一致，见文末进度记录）。**
+> **状态：51/52 本地收口（P3 实现、文档、benchmark 与本地 3.10/3.11/3.12 验证已完成；仅 G6 远端 GitHub Actions 待维护者提交/推送后确认）。**
 
 ---
 
@@ -25,7 +24,7 @@
       `_pipeline` 开头的 `preflight` 分支产生。`test_d5_reject_terminates_at_entry_without_touching_the_provider`
       断言事件流恰为 `[ERROR]` 且 `provider.calls == []`；`test_d7_budget_and_max_steps_are_two_separate_terminations`
       再证两条终止路径互不掩盖。）
-- [ ] **L3 运行时依赖仍为 3 个**（`pydantic` / `anyio` / `httpx`）：token 计数用**可注入估算器 +
+- [x] **L3 运行时依赖仍为 3 个**（`pydantic` / `anyio` / `httpx`）：token 计数用**可注入估算器 +
       启发式默认实现**，不引入 `tiktoken` 等新依赖；真实 token 数只在 Provider 回报 `usage` 时
       做事后校准。验收方式：`python -c "import stableagent"` 在无额外包的环境通过 +
       `pyproject` 的 `dependencies` 条目数不变。
@@ -50,7 +49,7 @@
       （恢复后第一次发给 Provider 的上下文，与不中断跑的那一次完全相同，等于"零重算"）。
       合流性另有 `test_l5_folding_is_confluent_across_segment_boundaries` 兜住分段折叠；
       注入式 LLM 摘要器不满足合流，那正是"必须落盘"的适用场景，测试里写明了这条边界。）
-- [ ] **L6 契约只扩展不推翻**：本阶段预声明的扩展集（逐项进 CHANGELOG）：
+- [x] **L6 契约只扩展不推翻**：本阶段预声明的扩展集（逐项进 CHANGELOG）：
       1. ~~`AgentState.context_summary: str = ""`~~ **实际未加此字段**（D1 收口时删掉）。
          理由：摘要已有唯一载体——`messages` 里那条 `role="system"` + `name="context_summary"`
          标记消息（`fold()` 把它写进快照，`compress()` 把它当既有成果复用）。再加一个
@@ -64,7 +63,7 @@
       （本条待 ADR-03（G5）落笔后勾选：抬版的决策依据是它要求的，不在这里自说自话。
       目前已成立的部分：`CONTRACT_VERSION` 仍为 `1.1.0`（由 L4 金标准里的
       `contract_version` 字段把关，抬版会当场让这条测试红），且未新增 `EventType` 成员。）
-- [ ] **L7 全部验收离线确定性**：压缩/预算/能力视图的测试不得依赖网络、墙钟或随机；
+- [x] **L7 全部验收离线确定性**：压缩/预算/能力视图的测试不得依赖网络、墙钟或随机；
       模型调用一律走脚本 Provider 或注入的摘要器。
       验收方式：CI 无 secrets 也能全绿（沿用现有 workflow，不加任何 env 要求）。
 
@@ -95,7 +94,7 @@
       `test_a4_observed_usage_pairs_with_the_estimate_per_step` 断言三对 `(估算, 真实)`；
       `test_a4_calibration_is_reporting_only_and_never_feeds_back` 让 Provider 谎报 usage，
       断言决策序列逐条不变——校准不回灌判定，否则快照之外的量会左右行为（违反 L5）。）
-- [ ] **A5 估算误差进 benchmark 报告**：`benchmarks` 输出估算相对真实值的 MAE 与偏差方向；
+- [x] **A5 估算误差进 benchmark 报告**：`benchmarks` 输出估算相对真实值的 MAE 与偏差方向；
       README/blog 只引用带误差标注的数字。
 - [x] **A6 单测**：同一输入两次计数相等（确定性）；空消息、超长消息、非 ASCII、
       JSON schema 嵌套这几类边界各 1 条。
@@ -165,7 +164,7 @@
       v1.0.0 fixture 经 `migrate_state()` 仍恢复得到、无折叠前缀。
       **没动 `recovery.py`**：P3 没给 `AgentState` 加字段，迁移函数压根不需要 `setdefault`——
       这条比原计划更省：既没有"迁移函数"和"模型默认值"两处同步的问题，旧快照也没有任何新字段要补。）
-- [ ] **B8 与 checkpoint 的交互**：摘要进快照后 payload 变大，`payload_bytes` 与恢复耗时的
+- [x] **B8 与 checkpoint 的交互**：摘要进快照后 payload 变大，`payload_bytes` 与恢复耗时的
       变化要在 F5 里量化（不许悄悄劣化 P2 已发布的基线）。
       （D1 已把 `fold()` 接到段入口，摘要现在**真的**进快照了，这条测量随之可以做——
       归 F5，与 `benchmarks/recovery_time_benchmark.py` 一起跑。）
@@ -317,13 +316,13 @@
 
 ## E. Evidence 增强与追溯（Roadmap 交付物 `tools/evidence.py`）
 
-- [ ] **E1 位置决策成文**：`Evidence` 现在 `tools/registry.py`。要么按 P1 `ToolCall` 先例
+- [x] **E1 位置决策成文**：`Evidence` 现在 `tools/registry.py`。要么按 P1 `ToolCall` 先例
       移到 `tools/evidence.py` 并在 `registry.py` 保留重导出（导入路径不破），
       要么在 ADR-03 记录"不迁"的理由。**不许默默略过 Roadmap 的交付物清单。**
-- [ ] **E2 增强字段全带默认值**（L6）：可选 `step` / `origin` / 父子调用链字段，
+- [x] **E2 增强字段全带默认值**（L6）：可选 `step` / `origin` / 父子调用链字段，
       用于压缩时判断"哪条证据可折叠"。既有不变式 `ok == (error is not None)` 不得被破坏
       （扩一条 property 测试）。
-- [ ] **E3 压缩以 Evidence 文本为主要目标**：工具结果通常最占 token 且最可摘要；
+- [x] **E3 压缩以 Evidence 文本为主要目标**：工具结果通常最占 token 且最可摘要；
       B3 的顺序必须体现这一点，并有"摘要后 user/assistant 原文未被改写"的断言。
 - [x] **E4 截断安全性**：任何压缩/截断都不得产生"孤儿 `tool_call`"（同 B1 判据），
       把这条列为 `ContextReport` 的自检项，每次组装都验。
@@ -338,39 +337,41 @@
 
 ## F. Benchmark 与对外证据（Roadmap 的量化指标）
 
-- [ ] **F1 `benchmarks/context_compression_benchmark.py`**：固定长任务（离线脚本 Provider），
+- [x] **F1 `benchmarks/context_compression_benchmark.py`**：固定长任务（离线脚本 Provider），
       输出每策略 `估算 token 节省率` + `质量保留率`（B5 的事实命中）+ 真实 `usage` 校准误差（A5）。
       结论句式必须是"hybrid 比 truncation 省 X%，事实保留率从 A 到 B"这种成对表述。
-- [ ] **F2 工具爆炸场景**：注册 ≥200 个工具规格，测能力视图的注入 token 下降幅度（C6）
+- [x] **F2 工具爆炸场景**：注册 ≥200 个工具规格，测能力视图的注入 token 下降幅度（C6）
       与召回护栏（C3）同时成立；这是 Roadmap 点名的独家场景，只对标自家基线。
-- [ ] **F3 变量隔离**：P2 的教训——`--steps` 扫描会同时改变"条数"与"单条大小"两个量。
+- [x] **F3 变量隔离**：P2 的教训——`--steps` 扫描会同时改变"条数"与"单条大小"两个量。
       F1/F2 每项测量只动一个变量，其余钉死；清单里明确写出每档控制了哪些量。
-- [ ] **F4 数字可复现**：benchmark 打印所用参数与命令；README/blog 引用的数字标注
+- [x] **F4 数字可复现**：benchmark 打印所用参数与命令；README/blog 引用的数字标注
       "本机/日期/命令"，并注明波动范围（P2 已出现同配置跨轮次 ±30% 的情况）。
-- [ ] **F5 不劣化 P2 基线**：摘要进快照后重跑 `benchmarks/recovery_time_benchmark.py`，
+- [x] **F5 不劣化 P2 基线**：摘要进快照后重跑 `benchmarks/recovery_time_benchmark.py`，
       `payload_bytes` 与恢复耗时变化量化入档（B8）。
 
 ## G. 零回归与工程门禁
 
-- [ ] **G1** L4 默认配置等价测试绿色；P1/P2 既有测试**一条都不许改断言来迁就 P3**
+- [x] **G1** L4 默认配置等价测试绿色；P1/P2 既有测试**一条都不许改断言来迁就 P3**
       （若必须改，须在 ADR-03 说明为什么那是契约变更而非实现细节）。
-- [ ] **G2 CI 心脏模块扩列**：`.github/workflows/ci.yml` 的 `FOCUS` 增加 `context/` 各模块，
+- [x] **G2 CI 心脏模块扩列**：`.github/workflows/ci.yml` 的 `FOCUS` 增加 `context/` 各模块，
       维持 ≥90% 门槛（心脏代码从严的既有取向）；扩列后本地先跑一遍确认达标。
-- [ ] **G3 门禁**：`ruff check stableagent tests examples benchmarks` /
+- [x] **G3 门禁**：`ruff check stableagent tests examples benchmarks` /
       `ruff format --check ...` / `mypy` / `pytest` 全绿，全库覆盖率 ≥70%（现 98.2% 不得下滑）。
-- [ ] **G4 CHANGELOG**：P3 契约扩展逐条标注非破坏性；`00-contracts.md` 增补"P3 扩展记录"，
+- [x] **G4 CHANGELOG**：P3 契约扩展逐条标注非破坏性；`00-contracts.md` 增补"P3 扩展记录"，
       并更新"组装位点"索引（把 `compression` / `capability` / `budget` / `engine` 的文件路径钉进去）。
-- [ ] **G5 ADR-03** `docs/design-decisions/03-context-engineering.md`：估算 vs 真实 token、
+- [x] **G5 ADR-03** `docs/design-decisions/03-context-engineering.md`：估算 vs 真实 token、
       压缩产物入快照的理由与代价、reject 走外层而非抛异常、能力视图的召回护栏设计、
       与 checkpoint/恢复的交互；含**被否决方案**（至少：在 loop 内联压缩、组装器抛
       `BudgetExceeded`、引入 tiktoken、摘要只放内存、用 LLM 当质量评审）。
-- [ ] **G6 CI 全绿**：3.10/3.12 矩阵 + 心脏闸门（最后一条，需真推送）。
+- [ ] **G6 CI 全绿**：3.10/3.12 矩阵 + 心脏闸门（最后一条，需要将当前变更提交并推送后以 GitHub Actions 验证）。
+      （本地等价预检已在 Python 3.10 / 3.11 / 3.12 通过；远端 workflow 只会运行远端已提交内容，
+      未经维护者授权不得为验证而提交或推送工作区改动。）
 
 ## H. 配套二并行轨道（Roadmap：P3 期间启动）
 
-- [ ] **H1** `docs/blog/02-context-engineering.md` 初稿：《Context Engineering：把 token 效率
+- [x] **H1** `docs/blog/02-context-engineering.md` 初稿：《Context Engineering：把 token 效率
       做成可度量的能力》，素材取 F1/F2 实测与 ADR-03。
-- [ ] **H2** README 更新：Roadmap 表 P3 状态、能力段从"未来"改为"已交付 + 数字"，
+- [x] **H2** README 更新：Roadmap 表 P3 状态、能力段从"未来"改为"已交付 + 数字"，
       且**不得**把未做的能力写进 description/feature 列表（当前 README 已刻意如此，别退步）。
 
 ---
@@ -554,3 +555,31 @@ D 节第一版测试拿 `test_compression.corpus()` 的中文任务跑，`SHARED
 
 仍未勾选的都有归属：**L6/L7** 等 ADR-03（G5）与 CI（G6）；**A5/B8/F1~F5** 是 benchmark 轨道；
 **E1~E3** 是 Evidence 增强；**G/H** 是收口与对外。
+
+
+## 本地收口记录（2026-11-02）
+
+本次补齐了 E1–E3、F1–F5、G2/G4/G5 与 H1/H2，并重新验证既有 P3 实现。验收账本当前为 **51/52**：仅 G6 的远端 GitHub Actions 仍待当前变更被维护者提交并推送后验证。
+
+### 本地验证证据
+
+```bash
+.venv/bin/ruff check stableagent tests examples benchmarks
+.venv/bin/ruff format --check stableagent tests examples benchmarks
+.venv/bin/mypy
+.venv/bin/pytest -q
+/tmp/sa-3.10/bin/python -m pytest -q --no-cov
+/tmp/sa-3.12/bin/python -m pytest -q --no-cov
+```
+
+结果：ruff/format 通过；mypy 在 28 个源文件上通过；Python 3.11 全量测试为 **283 passed, 1 skipped**、全库覆盖率 **98.99%**；Python 3.10 与 3.12 均为 **283 passed, 1 skipped**。扩展后的核心覆盖率闸门通过：`context/{assembly,tokens,compression,capability,budget,engine}.py` 和 `tools/evidence.py` 均为 100%，既有 core 心脏模块为 96.8–100%。
+
+### P3 新增证据
+
+- Evidence canonical 类型位于 `stableagent/tools/evidence.py`；`registry.py` 和顶层包保留同一类对象重导出。P3 决定**不**在 Evidence 添加默认 trace 字段，因为即使值为 `None` 也会改变 P2 默认 `tool_result` 事件的序列化金标准；P4 将在 Ticket/Assignment 记录中承载调用链追溯。
+- [P3 Context Engineering 基准记录](../evidence/p3-context-benchmark-2026-11-02.md) 固定了离线参数、质量/节省成对指标、200 工具 resident 护栏和 summary checkpoint 影响。
+- [ADR-03](../design-decisions/03-context-engineering.md) 已记录 ContextEngine、预算、摘要快照、Evidence 与被否决方案；[P3 对外文章](../blog/02-context-engineering.md) 只引用该离线证据。
+
+### G6 远端验证步骤
+
+维护者确认本工作区中所有改动后，提交并推送包含本次 P3 变更的分支；GitHub Actions 必须在 Python 3.10 / 3.12 均通过 ruff、format、mypy、pytest、全库 ≥70% 覆盖率和扩展后的核心 ≥90% 覆盖率门禁。记录 workflow run URL/ID 后，才可将 G6 勾选并宣布 P3 **52/52 正式收口**。

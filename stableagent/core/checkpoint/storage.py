@@ -1,6 +1,6 @@
 """Checkpoint 存储后端（P2 交付）：Memory / SQLite / Redis 三种实现 + 统一异步协议。
 
-设计约束（docs/p2-dod-checklist.md 第 0 节）：
+设计约束（docs/acceptance/p2-checkpoint-recovery.md 第 0 节）：
 - L5：store 只有 `save/load/records/delete` 四个异步方法，按 `(run_id, step)` 去重覆盖写；
 - Redis 客户端是**注入项**（只需 `get/set/delete` 协程），本包不硬依赖 redis 库；
 - 一致性：写入只发生在步边界（由 `manager.py` 决定），本模块不理解 loop 语义。

@@ -1,11 +1,11 @@
 """Agent 运行时装配（契约 v1.1.0）：三形态 + P2 可靠性外层（loop 零修改）。
 
-P1 语义保持不变（docs/p1-dod-checklist.md 第 0 节）：
+P1 语义保持不变（docs/acceptance/p1-core-runtime.md 第 0 节）：
 - F3：`pause()` 步边界生效；无进行中运行显式 no-op（返回 False）；
   `resume()/aresume()` 无 PAUSED 态抛 ValueError；暂停期间拒绝新任务抛 RuntimeError。
 - F4：`done|error` 每次运行恰好一个且位于流末尾。
 
-P2 新增（全部在本外层，`core/loop.py` 不感知，见 docs/p2-dod-checklist.md L1/L3）：
+P2 新增（全部在本外层，`core/loop.py` 不感知，见 docs/acceptance/p2-checkpoint-recovery.md L1/L3）：
 - checkpoint：消费 `drive()` 的 `(事件, 快照)` 对，在步边界落盘并注入 `checkpoint` 事件；
   终止态只落盘、不发事件（保证 F4）。
 - 失败自愈：错误分类决定 指数退避重试（可轮转 fallback Provider）/ 转人工暂停 / 认失败。

@@ -1,6 +1,6 @@
 """历史压缩三档（P3 B 节）：truncation / summary / hybrid。
 
-契约边界（docs/p3-dod-checklist.md L1/L5）：
+契约边界（docs/acceptance/p3-context-engineering.md L1/L5）：
 - 压缩只经 `ContextAssembler` 位点生效，`core/loop.py` 零修改；
 - 压缩是 **快照的纯函数**：`compress(state.messages)` 的全部内容来自快照，
   进程内不留缓存——崩溃恢复后重跑同一份快照必得同一份上下文（L5 的最强形式：
