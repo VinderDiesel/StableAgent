@@ -187,10 +187,18 @@
 
 ### B. SQLite Store 与迁移（spec WP-4.2）
 
-- [ ] **B1** 独立 schema 与 `schema_migrations`，不复用 P2 checkpoint 表。证据：（待记录）。
-- [ ] **B2** 八张表齐备：tickets、mandates、assignments、inputs、reports、dependencies、effects、schema_migrations。
-- [ ] **B3** `Store.transaction()` 内 domain mutation 与 `enqueue_effect()` 原子；异常时两者都不落库。
-      验证：注入异常的回滚用例。证据：（待记录）。
+- [x] **B1** 独立 schema 与 `schema_migrations`，不复用 P2 checkpoint 表。
+      证据（2026-11-02，Task 4）：`store.py` 的 `_SCHEMA` 自建 8 张表，`schema_migrations` 以
+      `INSERT OR IGNORE` 记 `ORCHESTRATION_SCHEMA_VERSION`；`test_all_eight_tables_exist_with_schema_version`
+      断言 `schema_version() == "0.1.0"`，全库 diff 未触 `core/checkpoint/`。
+- [x] **B2** 八张表齐备：tickets、mandates、assignments、inputs、reports、dependencies、effects、schema_migrations。
+      证据（2026-11-02，Task 4）：`test_all_eight_tables_exist_with_schema_version` 与
+      `test_ddl_is_exposed_for_documentation` 对 `sqlite_master` 与 `ORCHESTRATION_TABLES` 双查一致。
+- [x] **B3** `Store.transaction()` 内 domain mutation 与 `enqueue_effect()` 原子；异常时两者都不落库。
+      验证：注入异常的回滚用例。证据（2026-11-02，Task 4）：`test_transaction_is_atomic_for_both_ticket_and_effect`
+      在同一事务写 tickets+effects 后注入 `Boom`，两表 `COUNT(*)==0`；事务体经 `BEGIN IMMEDIATE`
+      管理，`transaction()` 重入抛 `ReentrantTransactionError`（`test_nested_transaction_is_rejected_and_flag_clears`）。
+      注：`enqueue_effect()` 仓储方法在 Task 5/6 落地，本条以同事务裸 SQL 验证事务原子性本体。
 - [ ] **B4** 三处唯一键生效并给出可分类错误（含 `(ticket_id, attempt)`）。证据：（待记录）。
 - [ ] **B5** `Effect.kind + idempotency_key` 的语义在 docstring 与 ADR 中一致记录。证据：（待记录）。
 - [ ] **B6** 重开数据库、schema 迁移、查询排序、分页、并发读取均有离线测试。证据：（待记录）。
@@ -1154,7 +1162,7 @@ git commit -m "feat: put every P4 state machine behind one pure transition table
   DDL 常量 `_SCHEMA: dict[str, str]`（8 张表）。仓储方法在 Task 5 追加。
 - Consumes: Task 1 errors（`ReentrantTransactionError`）、Task 2 模型。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_store.py
@@ -1256,12 +1264,12 @@ def test_ddl_is_exposed_for_documentation() -> None:
     assert set(ORCHESTRATION_TABLES) == TABLES
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_store.py -v`
 Expected: FAIL —`ModuleNotFoundError: ... orchestration.store`
 
-- [ ] **Step 3: 实现 Store 的 schema 与事务**
+- [x] **Step 3: 实现 Store 的 schema 与事务**
 
 ```python
 # stableagent/orchestration/store.py（Task 4 部分；仓储方法在 Task 5 追加到同一文件）
@@ -1386,12 +1394,12 @@ class Store:
 `json` 与 `Clock` 在 Task 5 的编解码里用到，本步先按上面的最小集合实现即可，mypy 会拒绝未使用导入——
 因此本步不要 import `json`，留到 Task 5。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_store.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/store.py tests/unit/test_orchestration_store.py
