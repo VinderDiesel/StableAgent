@@ -39,10 +39,12 @@ is also a CI test (`tests/integration/test_crash_recovery.py`), so the headline 
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [Add crash recovery to an Agent](#add-crash-recovery-to-an-agent)
+- [Context Engineering](#context-engineering)
 - [Real models](#real-models)
 - [How recovery decides](#how-recovery-decides)
 - [Architecture](#architecture)
 - [Measured overhead](#measured-overhead)
+- [Measured context gains](#measured-context-gains)
 - [Development](#development)
 - [Roadmap](#roadmap)
 - [Design documentation](#design-documentation)
@@ -59,6 +61,7 @@ is also a CI test (`tests/integration/test_crash_recovery.py`), so the headline 
 | **Deterministic event stream** | `thinking` / `tool_call` / `tool_result` / `checkpoint` / `retry` / `paused` / `error` / `done` — exactly one terminal event, always last, even after injected ones. |
 | **Versioned state** | `AgentState` is the only persistence unit and carries a contract version; a migration chain reads old snapshots, unknown or future versions fail loudly. |
 | **Clean pause/resume** | `pause()` takes effect at a step boundary and is a no-op on terminal runs; `resume()` on a non-paused run raises instead of inventing behaviour. |
+| **Measured context governance** | Deterministic history compression, relevance-filtered tool views with resident-tool recall protection, request-level budget actions, and read-only per-step `context_reports`. Default configuration remains pass-through. |
 | **Small core** | 3 runtime dependencies (`pydantic`, `anyio`, `httpx`), ~1.9k lines of runtime, no telemetry framework, no DI container, no plugin registry to learn first. |
 
 ## Install
@@ -182,6 +185,49 @@ concatenation of "crashed segment" + "recovered segment" is asserted event-for-e
 uninterrupted run
 (`tests/unit/test_agent_recovery.py::test_d4_recovered_stream_matches_uninterrupted_stream_event_by_event`).
 
+## Context Engineering
+
+P3 makes long-running Worker context explicit, deterministic, and measurable without changing the
+Agent loop. The default `Config()` keeps the P2 pass-through path. Enable a policy only when the
+run needs it:
+
+```python
+from stableagent import Agent, Config
+
+agent = Agent(
+    name="researcher",
+    provider=my_provider,
+    registry=my_registry,
+    config=Config(
+        context={
+            "compression": "hybrid",          # truncation | summary | hybrid
+            "capability_filter": "relevance", # static | relevance
+            "max_context_tokens": 8_000,
+            "on_budget_exceeded": "degrade",  # compress | degrade | reject
+        }
+    ),
+)
+
+state = await agent.arun("produce a research report")
+for report in agent.context_reports:
+    print(report.action, report.estimated_prompt_tokens, report.observed_prompt_tokens)
+```
+
+- Compression always preserves the initial task and complete tool-call/tool-result pairs.
+- `relevance` narrows the current tool list, but tools already used in this run stay resident even
+  when that exceeds the visible-tool target. An empty match falls back to the full list.
+- `compress` reduces history first. `degrade` reduces tools first. `reject` fails at the next safe
+  entry boundary before calling the Provider; an already executing step finishes before any budget
+  pause is applied.
+- Summary messages are persisted in `AgentState.messages`, so recovery does not regenerate them.
+  `context_reports` are read-only observability data and do not alter recovery decisions.
+
+The fixed offline benchmark reports both cost and quality: `hybrid` saved 51.16% estimated context
+tokens while retaining all required facts; relevance filtering retained 3 of 200 tools while
+preserving the resident tool. See the [benchmark record](docs/evidence/p3-context-benchmark-2026-11-02.md),
+[P3 acceptance](docs/acceptance/p3-context-engineering.md), and
+[ADR-03](docs/design-decisions/03-context-engineering.md) for parameters, limits, and recovery evidence.
+
 ## Real models
 
 ```python
@@ -242,8 +288,8 @@ stableagent/
     checkpoint/      manager.py · storage.py · recovery.py
     errors.py        error taxonomy
   providers/         base.py (3 shapes) · openai.py
-  tools/             registry.py (Tool → ToolResult → Evidence)
-  context/           assembly seam (P3 lives here)
+  tools/             registry.py · evidence.py (Tool → ToolResult → Evidence)
+  context/           tokens.py · assembly.py · compression.py · capability.py · budget.py · engine.py
   planning/ memory/ sandbox/ transport/   (later phases)
 ```
 
@@ -274,6 +320,22 @@ fsync, not the encoding.** Reading the newest snapshot back (`load` → migrate 
 those rows, not how large the restored snapshot is — 40 snapshots of 8 KB pruned to 3 read back in
 46 µs, the same as 5 snapshots of 1 KB (53 µs).
 
+## Measured context gains
+
+P3's benchmark uses a fixed offline corpus and a deterministic reference usage counter. It is a
+regression baseline, not a claim about a particular production tokenizer or model quality.
+
+| Scenario | Result | Quality guard |
+|---|---:|---|
+| Hybrid compression | 51.16% estimated-token reduction | 100% required-fact retention; complete tool pairs |
+| Truncation | 64.29% estimated-token reduction | 25% required-fact retention, so it is not the quality-default claim |
+| 200-tool relevance view | 98.59% tool-token reduction | 3 tools remain; an already-used resident tool is retained |
+| Summary checkpoint | 36.05% smaller latest snapshot in the fixed recovery run | Recovery timing is reported as local noise, not an improvement claim |
+
+Run `python benchmarks/context_compression_benchmark.py --tools 200` to reproduce the fixed
+measurement. The [dated evidence record](docs/evidence/p3-context-benchmark-2026-11-02.md) states
+its corpus, reference-usage limitation, checkpoint scenario, and exact output.
+
 ## Development
 
 ```bash
@@ -283,10 +345,11 @@ mypy                        # config in pyproject, python_version = 3.10
 pytest                      # run the configured suite; acceptance evidence records the dated result
 ```
 
-CI runs that matrix on Python 3.10 and 3.12, plus a stricter gate: the heart modules
-(`core/loop.py`, `core/checkpoint/*`, `core/errors.py`) must stay **≥90%** covered — currently
-96.8–100%. The one skipped test needs a live Redis and only runs when `STABLEAGENT_REDIS_URL` is
-set.
+CI runs that matrix on Python 3.10 and 3.12, plus a stricter gate: the core runtime
+(`core/loop.py`, `core/checkpoint/*`, `core/errors.py`), every P3 context module, and
+`tools/evidence.py` must stay **≥90%** covered. P3's remote closeout run reached 96.8–100%
+for the core files and 100% for the seven P3 focus files. The one skipped test needs a live Redis
+and only runs when `STABLEAGENT_REDIS_URL` is set.
 
 Before opening a PR: keep `core/loop.py` free of persistence concerns, add the contract change to
 `CHANGELOG.md`, and if it touches a public type, follow the freeze rules in
