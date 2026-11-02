@@ -26,12 +26,24 @@ jobs:
         run: mypy
       - name: Tests + coverage (全库门槛 70%，见 pyproject fail_under)
         run: pytest --cov=stableagent --cov-report=xml --cov-report=term-missing
-      - name: 心脏模块覆盖率闸门（loop / checkpoint / errors 单独 ≥90%）
+      - name: 心脏模块覆盖率闸门（loop / checkpoint / errors / context / evidence 单独 ≥90%）
         run: |
           python - <<'PY'
           import sys, xml.etree.ElementTree as ET
-          FOCUS = ("core/loop.py", "core/checkpoint/manager.py", "core/checkpoint/recovery.py",
-                   "core/checkpoint/storage.py", "core/errors.py")
+          FOCUS = (
+              "core/loop.py",
+              "core/checkpoint/manager.py",
+              "core/checkpoint/recovery.py",
+              "core/checkpoint/storage.py",
+              "core/errors.py",
+              "context/assembly.py",
+              "context/tokens.py",
+              "context/compression.py",
+              "context/capability.py",
+              "context/budget.py",
+              "context/engine.py",
+              "tools/evidence.py",
+          )
           rows = [
               (k.get("filename", ""), 100 * float(k.get("line-rate")))
               for k in ET.parse("coverage.xml").getroot().iter("class")
