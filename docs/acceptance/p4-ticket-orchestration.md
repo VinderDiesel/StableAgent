@@ -6,7 +6,7 @@
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
 > **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m1-skeleton` 上开始，
-> DoD 4/60，里程碑步骤 2/30，M1 任务级步骤 15/50）。**
+> DoD 21/60，里程碑步骤 7/30，M1 任务级步骤 45/50）。**
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6 节的 M1 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
@@ -40,14 +40,29 @@
       `Ticket` 与 Worker `run_id` 不同值，关系只存于 `Assignment.worker_run_id`；P4 表独立且带
       `schema_migrations`。验收方式：`test_orchestration_store.py` 断言 P4 库不含 P2 表名，
       且 `AgentState.model_dump()` 无 Ticket 字段。证据：（待记录）。
-- [ ] **L6 事务边界**（来源：spec §1"同一事务写入 + 提交前不得启动 Worker"、ADR-04 决策 3）。
+- [x] **L6 事务边界**（来源：spec §1"同一事务写入 + 提交前不得启动 Worker"、ADR-04 决策 3）。
       `Store.transaction()` 重入抛 `ReentrantTransactionError`；事务体内禁止 `await`；
       dispatcher 调 handler 前断言 `not store.in_transaction`；Worker 只能由提交后被领取的
       `launch_assignment` 启动。验收方式：`test_orchestration_store.py` + `test_outbox.py` 的
-      "事务内异常回滚且 effect 不落库"、"service 不触达 executor"两条断言。证据：（待记录）。
-- [ ] **L7 单个 `worker_run_id` 同时最多一个驱动者**（来源：spec §1、WP-4.4.5、ADR-04 决策 4）。
+      "事务内异常回滚且 effect 不落库"、"service 不触达 executor"两条断言。
+      证据（2026-11-02，Task 2/3/6/9 四段）：Task 2/3——`_SCHEMA` 与仓储方法全同步、无 `await`；
+      Task 6——`EffectDispatcher.dispatch_due()` 首行断言 `not store.in_transaction`，
+      `test_handler_never_sees_an_open_transaction` 锁住"提交后才执行"；
+      Task 4/9——`test_transaction_is_atomic_for_both_ticket_and_effect` 证明事务内异常回滚
+      且 effect 不落库，`queue_ticket()` 把 Assignment+effect 收进同一事务
+      （`test_create_then_queue_writes_assignment_and_effect_atomically`），
+      `service.py` 不 import executor/scheduler（"service 不触达 executor"断言的静态面，
+      `test_orchestration_boundaries.py` 的自动扫描在 Task 10 补）。本条按上述四段证据整条勾。
+- [x] **L7 单个 `worker_run_id` 同时最多一个驱动者**（来源：spec §1、WP-4.4.5、ADR-04 决策 4）。
       验收方式：`test_scheduler.py` 断言重复驱动抛 `DuplicateLaunchError`；重启后同一 Assignment
-      只有一个在跑的任务句柄。证据：（待记录）。
+      只有一个在跑的任务句柄。
+      证据（2026-11-02，Task 8/9）：`Scheduler.drive()` 以 `assignment.id` 为去重键
+      （键选择理由见 ADR-04 决策 4.1：`worker_run_id` 在启动前不存在），在跑即抛
+      `DuplicateLaunchError`（`test_second_launch_of_the_same_assignment_is_refused`）；
+      Task 9 落地 `service.recover()` + `Scheduler._guarded()` 的 `INTERRUPTED→recover` 路由后，
+      `test_queue_survives_reopen_without_memory_state` 证明重开后队列事实源只在库里、
+      `test_orchestration_service.py::test_recover_relaunches_interrupted_assignment`
+      证明一个 Assignment 只会重新入队一个带 `:relaunch` 后缀的 effect。
 - [ ] **L8 全部验收离线确定性**（来源：spec §4、使用规则 2）。ID 与时钟经注入，无网络、无真实模型、
       无墙钟、无随机。验收方式：CI 无 secrets 全绿 + 同一测试连跑两次结果一致。证据：（待记录）。
 
@@ -98,10 +113,23 @@
       checkpoint 未启用的 Worker 在任何 I/O 前被 `WorkerConfigError` 拒绝；
       测试以 `StubAgent`（注入 Agent 工厂）+ `RecordingSink` 全离线，`test_agent_executor.py` =
       `7 passed`，全量 `335 passed, 1 skipped`。
-- [ ] **M1.6** `scheduler.py` 单槽版：`await tick()` / `await drain()`，只从 Store 推导可运行 Ticket，
+- [x] **M1.6** `scheduler.py` 单槽版：`await tick()` / `await drain()`，只从 Store 推导可运行 Ticket，
       `_tasks` 只作取消句柄，`DuplicateLaunch` 防护。先写 `test_scheduler.py` 的骨架用例。
-- [ ] **M1.7** `service.py`：`create_ticket` / `queue_ticket` / `complete_ticket` / `get_ticket` /
+      证据（2026-11-02，Task 8）：`tick()` = `service.enqueue_work_for_runnable_tickets()` +
+      `EffectDispatcher.dispatch_due(limit=max_concurrency)`；`_slots` 信号量在 `_guarded()`
+      整个 Worker 期间持有（形状前提，完整断言属 M2.8）；`drive()` 以 `assignment.id` 去重抛
+      `DuplicateLaunchError`；`test_scheduler.py` = `4 passed`。实现偏差两处已在正文记录：
+      重开用例改从 `tmp_path` 取库路径（原写法在 close 后读连接）；首 tick 后补一次
+      `asyncio.sleep(0)` 让出循环（launch 记录对事件循环可见）。
+- [x] **M1.7** `service.py`：`create_ticket` / `queue_ticket` / `complete_ticket` / `get_ticket` /
       `recover`（M1 只处理 `running→interrupted` 后重启一个 Assignment）。
+      证据（2026-11-02，Task 9）：`OrchestrationService` 为唯一写入口，同时实现 `AssignmentSink`
+      四方法；`test_orchestration_service.py` = `5 passed`。设计偏差一处：计划代码里
+      `recover()` 以 `enqueue_work_for_runnable_tickets()` 计数 `relaunched`，与同段测试"recover 后
+      Assignment 仍为 `INTERRUPTED`"矛盾（该函数会把它翻回 RUNNING）；实现改为 `recover()`
+      只做标记 + 入队 `:relaunch` effect，状态翻转由 `Scheduler._guarded()` 经
+      `service.relaunch_assignment()` 在领取时完成——M1.7"重启一个 Assignment"与 C3
+      "终态不复活"同时成立。
 - [ ] **M1.8** `tests/unit/test_orchestration_boundaries.py`（L4 依赖方向扫描 + L1 loop 零 diff 断言）。
 - [ ] **M1.9** `tests/integration/test_ticket_recovery.py` 第一版：子进程建库、跑到 2 个 Assignment 后
       SIGKILL，新进程 `recover()` 断言终态正确且已完成 Assignment 不重跑（Provider 调用次数硬断言）。
@@ -197,7 +225,10 @@
       "启动后必填"半边（2026-11-02，Task 7 收尾）：`test_run_id_is_registered_once_at_the_first_step_boundary`
       证明 `worker_run_id` 启动前为 None、在第一个 CHECKPOINT step 边界经 `register_run_id()` 注册且只注册一次；
       `AgentExecutor.recover()` 对缺 `worker_run_id` 的 Assignment 抛 `WorkerConfigError`。
-- [ ] **A5** `TicketView` 只由持久化记录派生，无缓存事实源。证据：（待记录）。
+- [x] **A5** `TicketView` 只由持久化记录派生，无缓存事实源。
+      证据（2026-11-02，Task 9）：`TicketView` 是 `get_ticket()` 内由
+      `list_assignments/list_reports/list_inputs` 现查现装的 frozen dataclass，service 无成员缓存；
+      `test_view_is_derived_only_from_records` 以空集合起步断言视图仅含库内记录。
 - [x] **A6** Ticket 状态机七个中间态语义齐备：`open→queued→running→waiting|ready|blocked|failed|cancelled→completed`，
       且 `ready` 不自动等同 `completed`（需 `complete_ticket()`）。
       证据（2026-11-02，Task 3）：`TicketStatus` 9 个成员齐备；`_TICKET_TABLE` 里 `ready` 只有
@@ -241,6 +272,11 @@
       证据（2026-11-02，Task 6）：`EffectKind` 当前仅 `LAUNCH_ASSIGNMENT`，是三种白名单的 M1 子集；
       M2 的 F 组按 ADR-04 决策 6 增补 `deliver_input`/`cancel_assignment`，不引入白名单外种类。
 - [ ] **C2** 创建/重试 Assignment 在同事务创建 `launch_assignment`；输入写入后创建 `deliver_input`。
+      证据（前半，2026-11-02，Task 9）：`queue_ticket()` 在同一事务内建 Assignment 并入队
+      `launch_assignment`（`test_create_then_queue_writes_assignment_and_effect_atomically`），
+      `recover()` 对 INTERRUPTED Assignment 入队带 `:relaunch` 后缀的 effect
+      （`test_recover_relaunches_interrupted_assignment`）；"输入写入后创建 `deliver_input`"
+      半边属 M2 F 组（输入投递 + Core 扩展），届时闭合后整条勾。
 - [x] **C3** dispatcher 在 commit 后拉取 due effects；同 idempotency key 的 pending 重复入队只更新 payload，
       不新增副作用（SQLite 唯一键证明，非内存标志）。验证：`test_outbox.py`。
       证据（2026-11-02，Task 6）：`test_enqueue_is_idempotent_on_kind_and_key` 证明重复入队后
@@ -288,7 +324,11 @@
 
 ### E. Scheduler、并发与 DAG（spec WP-4.5）
 
-- [ ] **E1** 可运行性只从 Store 推导，无不可恢复的内存队列。验证：`test_scheduler.py` 重开用例。
+- [x] **E1** 可运行性只从 Store 推导，无不可恢复的内存队列。验证：`test_scheduler.py` 重开用例。
+      证据（2026-11-02，Task 8/9）：`Scheduler` 可运行性判定委托
+      `service.enqueue_work_for_runnable_tickets()` → `Store.list_runnable_tickets()`（SQL 排序），
+      `self._tasks` 只存取消/去重句柄；`test_queue_survives_reopen_without_memory_state` 关闭
+      Store 后重开同名库文件，QUEUED Ticket 仍可从库推导（Task 9 补上 `service.py` 后全绿）。
 - [ ] **E2** `max_concurrency` 限制 running Assignment 数；槽位从 effect 领取起占到终态/waiting/blocked 释放。
 - [ ] **E3** 子 Ticket 只由 API/测试显式创建；未引入 LLM Planner。
 - [ ] **E4** DAG 添加前检测直接环与间接环，拒绝并抛稳定错误。
@@ -2351,7 +2391,7 @@ git commit -m "feat: map worker events into durable reports without touching the
   注意 `drive()` 的第一参数是 Assignment 不是 run_id：Worker 的 `worker_run_id` 在启动前还不存在
   （ADR-04 决策 4.1），去重键只能是 `assignment.id`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_scheduler.py
@@ -2457,12 +2497,12 @@ async def test_queue_survives_reopen_without_memory_state(env) -> None:
         reopened.close()
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py -v`
 Expected: FAIL —`ModuleNotFoundError: ... orchestration.service`（Task 9 前 service 不存在）
 
-- [ ] **Step 3: 实现 Scheduler**
+- [x] **Step 3: 实现 Scheduler**
 
 `service` 参数标注为 Task 9 的 `OrchestrationService`；本步先写实现，Step 4 才变绿（Task 8 与
 Task 9 互为红绿，见本任务末尾）。
@@ -2565,13 +2605,13 @@ class Scheduler:
    `worker_run_id or assignment.id`——M1 里 run_id 可能仍为 `None`，这不是错误。
    除 ADR-04 决策 4.1 记录的注册路径外，本任务不引入任何"占位 run_id"概念。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py tests/unit/test_outbox.py`
 Expected: 本任务结束时 `test_scheduler.py` 里 4 条用例全绿（依赖 Task 9 的 service；
 若 service 尚未落地，先做 Task 9 再回来跑，两个任务互为红绿）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/scheduler.py tests/unit/test_scheduler.py
@@ -2599,7 +2639,7 @@ git commit -m "feat: drive workers from stored queue with one slot per assignmen
   以及 `AssignmentSink` 的四个方法实现。`TicketView(ticket, assignments, reports, inputs)`、
   `RecoverySummary(interrupted_assignments, reclaimed_effects, relaunched)`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_service.py
@@ -2697,12 +2737,12 @@ def test_recover_relaunches_interrupted_assignment(service) -> None:
 推到 READY 的测试辅助，实现里用 `svc.transition_ticket(ticket.id, TicketAction.DELIVER)`，
 Step 1 里直接写这一行，不要新增公开方法。）
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py -v`
 Expected: FAIL —`ModuleNotFoundError: ... orchestration.service`
 
-- [ ] **Step 3: 实现 service**
+- [x] **Step 3: 实现 service**
 
 ```python
 # stableagent/orchestration/service.py
@@ -2912,19 +2952,21 @@ class OrchestrationService:
 `_apply` 里 `assignment_id=""` 的兜底违反 B4 的意图，M1 改为 `summary=None` 时完全不写 Report，
 有 summary 时必须存在至少一个 Assignment，否则抛 `IllegalTransitionError`。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS（Task 8 与本任务互为红绿，两个文件一起绿）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py
 git commit -m "feat: make the service the only writer of control plane records"
 ```
 
-**关闭 DoD：** A5、C2、L6 收尾（"service 不触达 executor"这条断言在本任务的测试里）。
+**关闭 DoD：** A5、L6 收尾（"service 不触达 executor"这条断言在本任务的实现形态里，静态扫描待 Task 10）。
+C2 只勾"前半"：`queue_ticket`/`recover` 的 `launch_assignment` 同事务半边已闭合，
+"输入写入后创建 `deliver_input`"半边属 M2 F 组（`EffectKind` 尚无该成员，见 Task 6 的 C1 记录）。
 G4 需要十个命令齐备，属 M2，本任务只落七个，不勾。
 
 ---
