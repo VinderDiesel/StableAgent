@@ -441,6 +441,62 @@ class Store:
         )
         return effect
 
+    def _effect_row(self, effect_id: str) -> Effect | None:
+        row = self._conn.execute("SELECT * FROM effects WHERE id = ?", (effect_id,)).fetchone()
+        return _row_to_effect(row) if row else None
+
+    def _effect_by_key(self, kind: EffectKind, idempotency_key: str) -> Effect | None:
+        row = self._conn.execute(
+            "SELECT * FROM effects WHERE kind = ? AND idempotency_key = ?",
+            (kind.value, idempotency_key),
+        ).fetchone()
+        return _row_to_effect(row) if row else None
+
+    def enqueue_effect(self, effect: Effect) -> Effect:
+        """同 (kind, idempotency_key) 的 pending/retry_wait 行只更新 payload/due_at；
+        已进终态的行原样返回，绝不复活——幂等靠唯一键，不靠内存标志（C3）。"""
+        existing = self._effect_by_key(effect.kind, effect.idempotency_key)
+        if existing is not None and existing.state in (
+            EffectState.SUCCEEDED,
+            EffectState.FAILED,
+            EffectState.CANCELLED,
+        ):
+            return existing
+        if existing is not None:
+            self._conn.execute(
+                "UPDATE effects SET payload = ?, due_at = ? WHERE id = ?",
+                (
+                    json.dumps(effect.payload, sort_keys=True, ensure_ascii=False),
+                    effect.due_at,
+                    existing.id,
+                ),
+            )
+            reloaded = self._effect_row(existing.id)
+            assert reloaded is not None
+            return reloaded
+        self._conn.execute(
+            "INSERT INTO effects (id,kind,idempotency_key,payload,state,attempts,due_at,last_error)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (
+                effect.id,
+                effect.kind.value,
+                effect.idempotency_key,
+                json.dumps(effect.payload, sort_keys=True, ensure_ascii=False),
+                effect.state.value,
+                effect.attempts,
+                effect.due_at,
+                effect.last_error,
+            ),
+        )
+        return effect
+
+    def reclaim_running_effects(self, now_ms: int) -> int:
+        """崩溃时正在跑的 effect 退回 pending：幂等键保证不会重复副作用（C5）。"""
+        cursor = self._conn.execute(
+            "UPDATE effects SET state = 'pending', due_at = ? WHERE state = 'running'", (now_ms,)
+        )
+        return int(cursor.rowcount)
+
     def due_effects(self, now_ms: int, *, limit: int = 10) -> list[Effect]:
         rows = self._conn.execute(
             "SELECT * FROM effects WHERE state IN ('pending','retry_wait') AND due_at <= ?"
