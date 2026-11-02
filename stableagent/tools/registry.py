@@ -8,24 +8,13 @@ from typing import Any, ClassVar
 from pydantic import BaseModel
 
 from stableagent.providers.base import ToolCall
+from stableagent.tools.evidence import Evidence  # E1 重导出：旧导入路径不破
 
 
 class ToolResult(BaseModel):
     """工具实现的直接返回。"""
 
     ok: bool = True
-    output: Any = None
-    error: str | None = None
-
-
-class Evidence(BaseModel):
-    """工具调用的归一化可追溯记录——loop 与上下文只消费 Evidence。
-
-    不变式：ok=False 当且仅当 error 非空（含异常被归一化的场景）。
-    """
-
-    tool_call: ToolCall
-    ok: bool
     output: Any = None
     error: str | None = None
 

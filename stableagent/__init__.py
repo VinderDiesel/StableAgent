@@ -33,7 +33,8 @@ from stableagent.core.state import (
 )
 from stableagent.providers.base import Provider, ProviderChunk, ProviderResponse
 from stableagent.providers.openai import OpenAIProvider
-from stableagent.tools.registry import Evidence, Tool, ToolRegistry, ToolResult
+from stableagent.tools.evidence import Evidence
+from stableagent.tools.registry import Tool, ToolRegistry, ToolResult
 
 __version__ = "0.1.0"
 
