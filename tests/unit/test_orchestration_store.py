@@ -11,6 +11,7 @@ from stableagent.orchestration.model import (
     Assignment,
     AssignmentStatus,
     Dependency,
+    EffectState,
     Mandate,
     Report,
     ReportKind,
@@ -192,3 +193,29 @@ def test_mandate_is_its_own_row_and_dependencies_round_trip(store: Store) -> Non
     store.insert_dependency(dep)
     assert store.list_dependencies("tk-2") == [dep]
     assert store.list_dependencies("tk-1") == []
+
+
+def _insert_effect(store: Store, effect_id: str, key: str, *, due: int = 1) -> None:
+    with store.transaction():
+        store._conn.execute(
+            "INSERT INTO effects (id,kind,idempotency_key,payload,state,attempts,due_at)"
+            " VALUES (?, 'launch_assignment', ?, '{}', 'pending', 0, ?)",
+            (effect_id, key, due),
+        )
+
+
+def test_effect_kind_idempotency_key_is_unique(store: Store) -> None:
+    _insert_effect(store, "ef-1", "launch:as-1")
+    with pytest.raises(Exception, match="UNIQUE"):
+        _insert_effect(store, "ef-2", "launch:as-1")
+
+
+def test_due_effects_and_update_effect_round_trip(store: Store) -> None:
+    _insert_effect(store, "ef-1", "launch:as-1", due=5)
+    _insert_effect(store, "ef-2", "launch:as-2", due=50)
+    due = store.due_effects(10)
+    assert [e.id for e in due] == ["ef-1"]
+    claimed = due[0].model_copy(update={"state": EffectState.RUNNING, "attempts": 1})
+    assert store.update_effect(claimed) == claimed
+    assert store.due_effects(10) == []
+    assert store.count_effects("tk-1", EffectState.RUNNING) == 0

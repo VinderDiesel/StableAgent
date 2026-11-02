@@ -72,9 +72,15 @@
       原文"4 枚举"按实际成员数订正）+ `IdFactory`/`Clock` 协议与 `Uuid4Id`/`SystemClock` 默认实现 +
       `next_ticket_status`/`next_assignment_status`/`next_effect_status`/`assert_assignment_belongs_to`；
       `tests/unit/test_orchestration_model.py` = `20 passed`，全量 `309 passed, 1 skipped`。
-- [ ] **M1.3** `store.py`：8 张表 + `schema_migrations` + `transaction()`（重入与 `in_transaction` 守卫）+
+- [x] **M1.3** `store.py`：8 张表 + `schema_migrations` + `transaction()`（重入与 `in_transaction` 守卫）+
       唯一键 `(ticket_id, attempt)` / `worker_run_id` / `kind + idempotency_key`。
       先写 `test_orchestration_store.py`：重开无损、回滚、唯一键冲突、排序分页。
+      证据（2026-11-02，Task 4 + Task 5）：`_SCHEMA` 八表 + `BEGIN IMMEDIATE` 事务 +
+      `ReentrantTransactionError` 重入守卫；仓储方法 20 个（mandate/ticket/assignment/report/input/
+      dependency/effect 的插入、更新、读取），`worker_config`/`details`/`payload` 以
+      `json.dumps(sort_keys=True)` 落 TEXT；`test_orchestration_store.py` = `13 passed`，
+      覆盖重开无损、注入异常回滚、三处唯一键冲突、`list_runnable_tickets` 优先级排序与分页；
+      全量 `322 passed, 1 skipped`。
 - [ ] **M1.4** `outbox.py`（仅 `launch_assignment`）：事务内入队、提交后领取、成功才标 `succeeded`、
       幂等键重复入队只更新 payload。先写 `test_outbox.py` 的"commit 后 crash""重复 dispatch""内存标志不算幂等"。
 - [ ] **M1.5** `executor.py`：`WorkerExecutor` 协议 + `AgentExecutor.launch()`（只调 `stream`）+
@@ -199,9 +205,17 @@
       在同一事务写 tickets+effects 后注入 `Boom`，两表 `COUNT(*)==0`；事务体经 `BEGIN IMMEDIATE`
       管理，`transaction()` 重入抛 `ReentrantTransactionError`（`test_nested_transaction_is_rejected_and_flag_clears`）。
       注：`enqueue_effect()` 仓储方法在 Task 5/6 落地，本条以同事务裸 SQL 验证事务原子性本体。
-- [ ] **B4** 三处唯一键生效并给出可分类错误（含 `(ticket_id, attempt)`）。证据：（待记录）。
+- [x] **B4** 三处唯一键生效并给出可分类错误（含 `(ticket_id, attempt)`）。
+      证据（2026-11-02，Task 4/5）：`test_ticket_and_assignment_round_trip_through_sqlite`
+      拒绝重复 `(ticket_id, attempt)`、`test_worker_run_id_is_unique_across_assignments` 拒绝重复
+      `worker_run_id`、`test_effect_kind_idempotency_key_is_unique` 拒绝重复 `(kind, idempotency_key)`；
+      冲突均为 SQLite `UNIQUE` 约束错误，可由调用方按约束名分类。
 - [ ] **B5** `Effect.kind + idempotency_key` 的语义在 docstring 与 ADR 中一致记录。证据：（待记录）。
-- [ ] **B6** 重开数据库、schema 迁移、查询排序、分页、并发读取均有离线测试。证据：（待记录）。
+- [ ] **B6** 重开数据库、schema 迁移、查询排序、分页、并发读取均有离线测试。
+      证据（前半，2026-11-02，Task 4/5）：`test_reopen_loses_nothing_and_unique_keys_hold`（重开无损）、
+      `test_all_eight_tables_exist_with_schema_version`（schema 迁移版本行）、
+      `test_runnable_order_is_woken_then_queued_then_created` + `test_pagination_is_stable`（排序/分页）。
+      "并发读取"半边到 Task 10 随 L5/边界断言一并闭合后整条勾。
 - [ ] **B7** Store 层不含调度或策略判断（无 import scheduler/executor）。验证：`test_orchestration_boundaries.py`。
 
 ### C. Durable Outbox（spec WP-4.3）
@@ -1429,7 +1443,7 @@ git commit -m "feat: hold ticket state and effects in one sqlite transaction"
   `update_effect(Effect) -> Effect`、`count_effects(str, EffectState) -> int`。
 - Consumes: Task 2/3 模型与枚举。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_store.py 追加
@@ -1508,12 +1522,12 @@ def test_mandate_is_its_own_row_and_dependencies_round_trip(store: Store) -> Non
     assert store.list_dependencies("tk-1") == []
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_store.py -k "round_trip or unique or runnable or pagination or dependencies"`
 Expected: FAIL —`AttributeError: 'Store' object has no attribute 'insert_ticket'`
 
-- [ ] **Step 3: 实现编解码与查询**
+- [x] **Step 3: 实现编解码与查询**
 
 ```python
 # stableagent/orchestration/store.py 追加（模块顶部补 import json 与模型名）
@@ -1584,19 +1598,21 @@ def _row_to_ticket(row: sqlite3.Row) -> Ticket:
 读取时 `json.loads`；写操作全部 `self._conn.execute(...)`，不开事务（由调用方决定边界）。
 枚举列写 `.value`，读时构造枚举。**每个方法都必须实现，不留 `...`。**
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_store.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS（含 `mandate_id` 改造后的全部用例）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ tests/unit/test_orchestration_store.py tests/unit/test_orchestration_model.py
 git commit -m "feat: read and write the control plane with the agreed ticket ordering"
 ```
 
-**关闭 DoD：** B4、B6（三处唯一键、重开/排序/分页）。B5 随 Task 6 的 `enqueue_effect()` docstring 落地。
+**关闭 DoD：** B4（三处唯一键，含补写的 `test_effect_kind_idempotency_key_is_unique`）。
+B6 只勾到"前半"：重开/迁移/排序/分页已有用例，"并发读取"半边按计划留到 Task 10 随边界断言
+闭合后整条勾（与原"Task 5 收尾 B4、B6"的偏差已在此记录）。B5 随 Task 6 的 `enqueue_effect()` docstring 落地。
 E7 的 SQL 落点在 `list_runnable_tickets()` 的 ORDER BY 里，但 E7 属 M2（第 1.4 节），本任务不勾；
 L5 的"P4 库不含 P2 表名"断言到 Task 10 才整条勾。
 
