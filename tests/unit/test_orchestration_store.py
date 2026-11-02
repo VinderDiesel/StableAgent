@@ -7,6 +7,17 @@ from pathlib import Path
 import pytest
 
 from stableagent.orchestration.errors import ReentrantTransactionError
+from stableagent.orchestration.model import (
+    Assignment,
+    AssignmentStatus,
+    Dependency,
+    Mandate,
+    Report,
+    ReportKind,
+    Ticket,
+    TicketInput,
+    TicketStatus,
+)
 from stableagent.orchestration.store import ORCHESTRATION_TABLES, Store
 from tests.support import FixedClock
 
@@ -91,3 +102,93 @@ def test_reopen_loses_nothing_and_unique_keys_hold(store: Store, tmp_path: Path)
 
 def test_ddl_is_exposed_for_documentation() -> None:
     assert set(ORCHESTRATION_TABLES) == TABLES
+
+
+def _ticket(ticket_id: str, **kw) -> Ticket:
+    base = dict(id=ticket_id, title="t", task="x", created_at=1, mandate_id=f"md-{ticket_id}")
+    return Ticket(**{**base, **kw})
+
+
+def _mandate(ticket_id: str) -> Mandate:
+    return Mandate(id=f"md-{ticket_id}", granted_at=1)
+
+
+def test_ticket_and_assignment_round_trip_through_sqlite(store: Store) -> None:
+    ticket = _ticket("tk-1", status=TicketStatus.QUEUED, queued_at=5)
+    store.insert_ticket(ticket)
+    assert store.get_ticket("tk-1") == ticket
+    assignment = Assignment(
+        id="as-1",
+        ticket_id="tk-1",
+        attempt=1,
+        status=AssignmentStatus.PENDING,
+        worker_config={"model": "gpt-4o"},
+    )
+    store.insert_assignment(assignment)
+    assert store.get_assignment("as-1") == assignment
+    assert store.list_assignments("tk-1") == [assignment]
+    with pytest.raises(Exception, match="UNIQUE"):
+        store.insert_assignment(assignment.model_copy(update={"id": "as-2"}))
+
+
+def test_worker_run_id_is_unique_across_assignments(store: Store) -> None:
+    store.insert_ticket(_ticket("tk-1"))
+    store.insert_ticket(_ticket("tk-2"))
+    store.insert_assignment(Assignment(id="as-1", ticket_id="tk-1", worker_run_id="r1"))
+    with pytest.raises(Exception, match="UNIQUE"):
+        store.insert_assignment(Assignment(id="as-2", ticket_id="tk-2", worker_run_id="r1"))
+
+
+def test_reports_inputs_and_dependencies_round_trip(store: Store) -> None:
+    store.insert_ticket(_ticket("tk-1"))
+    report = Report(
+        id="rp-1",
+        ticket_id="tk-1",
+        assignment_id="as-1",
+        kind=ReportKind.PROGRESS,
+        summary="第 2 步",
+        created_at=2,
+        event_step=2,
+        details={"tool": "echo"},
+    )
+    store.insert_report(report)
+    assert store.list_reports("tk-1") == [report]
+    ticket_input = TicketInput(
+        id="in-1", ticket_id="tk-1", sequence=1, payload="追加线索", created_at=2
+    )
+    store.insert_input(ticket_input)
+    assert store.list_inputs("tk-1", pending_only=True) == [ticket_input]
+
+
+def test_runnable_order_is_woken_then_queued_then_created(store: Store) -> None:
+    store.insert_ticket(_ticket("tk-old", status=TicketStatus.QUEUED, queued_at=100, created_at=1))
+    store.insert_ticket(_ticket("tk-new", status=TicketStatus.QUEUED, queued_at=200, created_at=2))
+    store.insert_ticket(
+        _ticket(
+            "tk-woken",
+            status=TicketStatus.QUEUED,
+            queued_at=300,
+            created_at=3,
+            woken_at=900,
+        )
+    )
+    assert [t.id for t in store.list_runnable_tickets(1000)] == ["tk-woken", "tk-old", "tk-new"]
+
+
+def test_pagination_is_stable(store: Store) -> None:
+    for index in range(5):
+        store.insert_ticket(_ticket(f"tk-{index}", status=TicketStatus.QUEUED, queued_at=index))
+    page = store.list_tickets(status=TicketStatus.QUEUED, limit=2, offset=1)
+    assert [t.id for t in page] == ["tk-1", "tk-2"]
+
+
+def test_mandate_is_its_own_row_and_dependencies_round_trip(store: Store) -> None:
+    store.insert_mandate(_mandate("tk-1"))
+    assert store.get_mandate("md-tk-1") == _mandate("tk-1")
+    store.insert_mandate(_mandate("tk-1"))  # INSERT OR IGNORE：重复写不报错也不改行
+    store.insert_ticket(_ticket("tk-1"))
+    store.insert_ticket(_ticket("tk-2"))
+    dep = Dependency(ticket_id="tk-2", depends_on_ticket_id="tk-1", on_failure="continue")
+    store.insert_dependency(dep)
+    assert store.list_dependencies("tk-2") == [dep]
+    assert store.list_dependencies("tk-1") == []

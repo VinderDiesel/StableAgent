@@ -7,6 +7,7 @@ COMMIT / ROLLBACK 管理。事务体内禁止 await——驱动循环是单线�
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,7 +15,21 @@ from pathlib import Path
 
 from stableagent.orchestration import ORCHESTRATION_SCHEMA_VERSION
 from stableagent.orchestration.errors import ReentrantTransactionError
-from stableagent.orchestration.model import Clock
+from stableagent.orchestration.model import (
+    Assignment,
+    AssignmentStatus,
+    Clock,
+    Dependency,
+    Effect,
+    EffectKind,
+    EffectState,
+    Mandate,
+    Report,
+    ReportKind,
+    Ticket,
+    TicketInput,
+    TicketStatus,
+)
 
 _SCHEMA: dict[str, str] = {
     "schema_migrations": (
@@ -70,6 +85,95 @@ _SCHEMA: dict[str, str] = {
 ORCHESTRATION_TABLES = tuple(_SCHEMA)
 
 
+def _row_to_mandate(row: sqlite3.Row) -> Mandate:
+    return Mandate(
+        id=row["id"],
+        origin_kind=row["origin_kind"],
+        requester=row["requester"],
+        scope=row["scope"],
+        policy_version=row["policy_version"],
+        granted_at=row["granted_at"],
+    )
+
+
+def _row_to_ticket(row: sqlite3.Row) -> Ticket:
+    return Ticket(
+        id=row["id"],
+        title=row["title"],
+        task=row["task"],
+        created_at=row["created_at"],
+        status=TicketStatus(row["status"]),
+        mandate_id=row["mandate_id"],
+        parent_id=row["parent_id"],
+        ended_at=row["ended_at"],
+        queued_at=row["queued_at"],
+        woken_at=row["woken_at"],
+    )
+
+
+def _row_to_assignment(row: sqlite3.Row) -> Assignment:
+    return Assignment(
+        id=row["id"],
+        ticket_id=row["ticket_id"],
+        attempt=row["attempt"],
+        status=AssignmentStatus(row["status"]),
+        worker_run_id=row["worker_run_id"],
+        started_at=row["started_at"],
+        ended_at=row["ended_at"],
+        checkpoint_run_id=row["checkpoint_run_id"],
+        failure=row["failure"],
+        worker_config_version=row["worker_config_version"],
+        worker_config=json.loads(row["worker_config"]),
+    )
+
+
+def _row_to_input(row: sqlite3.Row) -> TicketInput:
+    return TicketInput(
+        id=row["id"],
+        ticket_id=row["ticket_id"],
+        sequence=row["sequence"],
+        kind=row["kind"],
+        payload=row["payload"],
+        created_at=row["created_at"],
+        delivered_at=row["delivered_at"],
+        consumed_at=row["consumed_at"],
+    )
+
+
+def _row_to_report(row: sqlite3.Row) -> Report:
+    return Report(
+        id=row["id"],
+        ticket_id=row["ticket_id"],
+        assignment_id=row["assignment_id"],
+        kind=ReportKind(row["kind"]),
+        summary=row["summary"],
+        created_at=row["created_at"],
+        event_step=row["event_step"],
+        details=json.loads(row["details"]),
+    )
+
+
+def _row_to_dependency(row: sqlite3.Row) -> Dependency:
+    return Dependency(
+        ticket_id=row["ticket_id"],
+        depends_on_ticket_id=row["depends_on_ticket_id"],
+        on_failure=row["on_failure"],
+    )
+
+
+def _row_to_effect(row: sqlite3.Row) -> Effect:
+    return Effect(
+        id=row["id"],
+        kind=EffectKind(row["kind"]),
+        idempotency_key=row["idempotency_key"],
+        payload=json.loads(row["payload"]),
+        state=EffectState(row["state"]),
+        attempts=row["attempts"],
+        due_at=row["due_at"],
+        last_error=row["last_error"],
+    )
+
+
 class Store:
     def __init__(self, db_path: str | Path, *, clock: Clock) -> None:
         self._clock = clock
@@ -111,6 +215,248 @@ class Store:
             "SELECT version FROM schema_migrations ORDER BY applied_at DESC LIMIT 1"
         ).fetchone()
         return row[0] if row else "0"
+
+    # 仓储方法：全部同步，假定已在调用方事务内或走 sqlite3 自动提交（Task 5）。
+
+    def insert_mandate(self, mandate: Mandate) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO mandates"
+            " (id, origin_kind, requester, scope, policy_version, granted_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                mandate.id,
+                mandate.origin_kind,
+                mandate.requester,
+                mandate.scope,
+                mandate.policy_version,
+                mandate.granted_at,
+            ),
+        )
+
+    def get_mandate(self, mandate_id: str) -> Mandate | None:
+        row = self._conn.execute("SELECT * FROM mandates WHERE id = ?", (mandate_id,)).fetchone()
+        return _row_to_mandate(row) if row else None
+
+    def insert_ticket(self, ticket: Ticket) -> None:
+        self._conn.execute(
+            "INSERT INTO tickets"
+            " (id, title, task, created_at, status, mandate_id, parent_id,"
+            " ended_at, queued_at, woken_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ticket.id,
+                ticket.title,
+                ticket.task,
+                ticket.created_at,
+                ticket.status.value,
+                ticket.mandate_id,
+                ticket.parent_id,
+                ticket.ended_at,
+                ticket.queued_at,
+                ticket.woken_at,
+            ),
+        )
+
+    def update_ticket(self, ticket: Ticket) -> None:
+        self._conn.execute(
+            "UPDATE tickets SET title = ?, task = ?, created_at = ?, status = ?,"
+            " mandate_id = ?, parent_id = ?, ended_at = ?, queued_at = ?, woken_at = ?"
+            " WHERE id = ?",
+            (
+                ticket.title,
+                ticket.task,
+                ticket.created_at,
+                ticket.status.value,
+                ticket.mandate_id,
+                ticket.parent_id,
+                ticket.ended_at,
+                ticket.queued_at,
+                ticket.woken_at,
+                ticket.id,
+            ),
+        )
+
+    def get_ticket(self, ticket_id: str) -> Ticket | None:
+        row = self._conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+        return _row_to_ticket(row) if row else None
+
+    def list_tickets(
+        self,
+        *,
+        status: TicketStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Ticket]:
+        clauses, params = [], []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status.value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM tickets {where} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+        return [_row_to_ticket(row) for row in rows]
+
+    def list_runnable_tickets(self, now_ms: int) -> list[Ticket]:
+        """优先级：被唤醒过的 > 已排队 > 新建（ADR-04 决策 7；E7 的 SQL 落点）。"""
+        rows = self._conn.execute(
+            "SELECT * FROM tickets WHERE status = 'queued'"
+            " ORDER BY (woken_at IS NULL) ASC, queued_at ASC, created_at ASC"
+        ).fetchall()
+        return [_row_to_ticket(row) for row in rows]
+
+    def insert_assignment(self, assignment: Assignment) -> None:
+        self._conn.execute(
+            "INSERT INTO assignments"
+            " (id, ticket_id, attempt, status, worker_run_id, started_at, ended_at,"
+            " checkpoint_run_id, failure, worker_config_version, worker_config)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                assignment.id,
+                assignment.ticket_id,
+                assignment.attempt,
+                assignment.status.value,
+                assignment.worker_run_id,
+                assignment.started_at,
+                assignment.ended_at,
+                assignment.checkpoint_run_id,
+                assignment.failure,
+                assignment.worker_config_version,
+                json.dumps(assignment.worker_config, sort_keys=True, ensure_ascii=False),
+            ),
+        )
+
+    def update_assignment(self, assignment: Assignment) -> None:
+        self._conn.execute(
+            "UPDATE assignments SET ticket_id = ?, attempt = ?, status = ?,"
+            " worker_run_id = ?, started_at = ?, ended_at = ?, checkpoint_run_id = ?,"
+            " failure = ?, worker_config_version = ?, worker_config = ? WHERE id = ?",
+            (
+                assignment.ticket_id,
+                assignment.attempt,
+                assignment.status.value,
+                assignment.worker_run_id,
+                assignment.started_at,
+                assignment.ended_at,
+                assignment.checkpoint_run_id,
+                assignment.failure,
+                assignment.worker_config_version,
+                json.dumps(assignment.worker_config, sort_keys=True, ensure_ascii=False),
+                assignment.id,
+            ),
+        )
+
+    def get_assignment(self, assignment_id: str) -> Assignment | None:
+        row = self._conn.execute(
+            "SELECT * FROM assignments WHERE id = ?", (assignment_id,)
+        ).fetchone()
+        return _row_to_assignment(row) if row else None
+
+    def list_assignments(self, ticket_id: str) -> list[Assignment]:
+        rows = self._conn.execute(
+            "SELECT * FROM assignments WHERE ticket_id = ? ORDER BY attempt ASC", (ticket_id,)
+        ).fetchall()
+        return [_row_to_assignment(row) for row in rows]
+
+    def insert_report(self, report: Report) -> None:
+        self._conn.execute(
+            "INSERT INTO reports"
+            " (id, ticket_id, assignment_id, kind, summary, created_at, event_step, details)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                report.id,
+                report.ticket_id,
+                report.assignment_id,
+                report.kind.value,
+                report.summary,
+                report.created_at,
+                report.event_step,
+                json.dumps(report.details, sort_keys=True, ensure_ascii=False),
+            ),
+        )
+
+    def list_reports(self, ticket_id: str) -> list[Report]:
+        rows = self._conn.execute(
+            "SELECT * FROM reports WHERE ticket_id = ? ORDER BY created_at ASC, id ASC",
+            (ticket_id,),
+        ).fetchall()
+        return [_row_to_report(row) for row in rows]
+
+    def insert_input(self, ticket_input: TicketInput) -> None:
+        self._conn.execute(
+            "INSERT INTO inputs"
+            " (id, ticket_id, sequence, kind, payload, created_at, delivered_at, consumed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ticket_input.id,
+                ticket_input.ticket_id,
+                ticket_input.sequence,
+                ticket_input.kind,
+                ticket_input.payload,
+                ticket_input.created_at,
+                ticket_input.delivered_at,
+                ticket_input.consumed_at,
+            ),
+        )
+
+    def list_inputs(self, ticket_id: str, *, pending_only: bool = False) -> list[TicketInput]:
+        where = "ticket_id = ? AND delivered_at IS NULL" if pending_only else "ticket_id = ?"
+        rows = self._conn.execute(
+            f"SELECT * FROM inputs WHERE {where} ORDER BY sequence ASC", (ticket_id,)
+        ).fetchall()
+        return [_row_to_input(row) for row in rows]
+
+    def insert_dependency(self, dependency: Dependency) -> None:
+        self._conn.execute(
+            "INSERT INTO dependencies (ticket_id, depends_on_ticket_id, on_failure)"
+            " VALUES (?, ?, ?)",
+            (
+                dependency.ticket_id,
+                dependency.depends_on_ticket_id,
+                dependency.on_failure,
+            ),
+        )
+
+    def list_dependencies(self, ticket_id: str) -> list[Dependency]:
+        rows = self._conn.execute(
+            "SELECT * FROM dependencies WHERE ticket_id = ? ORDER BY depends_on_ticket_id ASC",
+            (ticket_id,),
+        ).fetchall()
+        return [_row_to_dependency(row) for row in rows]
+
+    def update_effect(self, effect: Effect) -> Effect:
+        self._conn.execute(
+            "UPDATE effects SET kind = ?, idempotency_key = ?, payload = ?, state = ?,"
+            " attempts = ?, due_at = ?, last_error = ? WHERE id = ?",
+            (
+                effect.kind.value,
+                effect.idempotency_key,
+                json.dumps(effect.payload, sort_keys=True, ensure_ascii=False),
+                effect.state.value,
+                effect.attempts,
+                effect.due_at,
+                effect.last_error,
+                effect.id,
+            ),
+        )
+        return effect
+
+    def due_effects(self, now_ms: int, *, limit: int = 10) -> list[Effect]:
+        rows = self._conn.execute(
+            "SELECT * FROM effects WHERE state IN ('pending','retry_wait') AND due_at <= ?"
+            " ORDER BY due_at ASC, id ASC LIMIT ?",
+            (now_ms, limit),
+        ).fetchall()
+        return [_row_to_effect(row) for row in rows]
+
+    def count_effects(self, ticket_id: str, state: EffectState) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM effects e"
+            " JOIN assignments a ON json_extract(e.payload, '$.assignment_id') = a.id"
+            " WHERE a.ticket_id = ? AND e.state = ?",
+            (ticket_id, state.value),
+        ).fetchone()
+        return int(row[0])
 
     def close(self) -> None:
         self._conn.close()
