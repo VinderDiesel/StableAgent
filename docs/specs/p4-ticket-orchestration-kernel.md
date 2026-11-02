@@ -254,7 +254,7 @@ P5 开始前必须保存 P4 的 SQLite recovery 集成基线和 Worker Event→R
 
 ## 6. 决策补充（2026-11-02，[ADR-04](../design-decisions/04-ticket-orchestration.md)）
 
-启动 P4 前，规格有四处留白会直接改变实现形状。以下补充是已接受的决策，不改动上文任何原始要求：
+启动 P4 前，规格有六处留白会直接改变实现形状。以下补充是已接受的决策，不改动上文任何原始要求：
 
 1. **驱动模型**：Scheduler 运行在单一 asyncio 事件循环内，用 `asyncio.Semaphore(max_concurrency)`
    驱动 `AgentExecutor`；`OrchestrationService` 的领域命令保持同步（只写记录与入队 effect）。
@@ -274,6 +274,12 @@ P5 开始前必须保存 P4 的 SQLite recovery 集成基线和 Worker Event→R
    （P6 Beta 前不承诺编排记录稳定）。`planning/` 保留为 P6+ LLM Planner 占位，docstring 改指新包。
 5. **调度优先级**：WP-4.5.6 的"若不实现优先级则明确 FIFO"择一为**实现三维排序键**
    `(被唤醒过的优先, queued_at, created_at)`，并由测试锁死顺序；排序键一经锁死视同契约。
+6. **deadline 的分层归属**：[ADR-02 后果 4](../design-decisions/02-checkpoint.md) 把"Provider 调用整体
+   硬超时"交给"P4 的预算治理"。本阶段只承接**外层 Assignment deadline**：`deadline_at` 超时由
+   Scheduler 以 `asyncio.timeout` 包住 executor 任务，写 `cancel_assignment` effect 并把 Ticket 置
+   `blocked`（带结构化原因），对应账本项 E9。**内层 Provider 单次调用硬超时不在 P4**：它需要改动
+   `stableagent/core/` 的调用点，与 ADR-04 决策 6"P4 只允许一处 Core 兼容扩展"冲突，改归
+   P7 [WP-7.2](p7-production-hardening-ecosystem.md)。
 
 实施顺序按"走骨架优先"切分为 M1（端到端骨架，Core 零改动）/ M2（输入投递、取消、DAG、真并发、
 Core 扩展）/ M3（示例、CI 扩容、收口），步骤与验证命令见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)

@@ -143,6 +143,10 @@ Roadmap 的差异化卖点是"执行可靠性"，P2 的硬指标是招牌动作�
   4. 超时控制的"贯通"目前只到 `ProviderConfig.request_timeout_seconds → httpx 超时`
      这一层；Provider 调用整体的硬超时（`asyncio.timeout` 包裹）留待 P4 的预算治理
      一并设计，因为二者共享同一个 deadline 模型。
+     **（2026-11-02 处置：本条已拆分——外层 Assignment deadline 归 P4，内层 Provider 单次调用
+     硬超时改归 P7 WP-7.2，理由与边界见
+     [ADR-04 的"前置 ADR 遗留项的处置"](04-ticket-orchestration.md)；
+     原文结论保留不重写。）**
   5. 回看式落盘的时序对**外部观察者**有一个反直觉后果：第 k 步快照与第 k+1 步首个事件
      同时出现，若 k+1 就是终止步，快照到达和进程退出只差调度级几毫秒。演示脚本
      `examples/03_checkpoint_resume.py` 首轮在 CI 矩阵 3.10 上因此偶发失败（父进程

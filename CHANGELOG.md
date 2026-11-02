@@ -15,11 +15,17 @@
   暂停边界投递 `TicketInput`。`core/loop.py` 仍保持零 diff，默认 `None` 时要求 L4 金标准重新 dump
   逐字节相等。**该扩展尚未实现**，排在里程碑 M2
 - 新建 [P4 验收账本](docs/acceptance/p4-ticket-orchestration.md)：按维护者确认，实施计划（M1 走骨架 /
-  M2 宽度 / M3 收口共 29 个步骤与验证命令）与 DoD（心脏边界 L1~L8 + 分组 A~H，共 59 项，含里程碑
-  归属表）同处一文件，当前 **0/59**，状态 Active
+  M2 宽度 / M3 收口共 30 个步骤与验证命令）与 DoD（心脏边界 L1~L8 + 分组 A~H，共 60 项，含
+  里程碑归属表）同处一文件，当前 **0/60**，状态 Active
+- 处置 [ADR-02 后果 4](docs/design-decisions/02-checkpoint.md) 交给"P4 预算治理"的 deadline 遗留项：
+  外层 Assignment deadline（超时 → `cancel_assignment` effect → Ticket `blocked`）归 P4（账本 E9）；
+  内层 Provider 单次调用硬超时因需要改 Core 调用点、与 P4 的"唯一 Core 扩展"约束冲突，改归
+  P7 [WP-7.2](docs/specs/p7-production-hardening-ecosystem.md)。ADR-02 原文只追加日期说明、不重写结论；
+  [P4 规格](docs/specs/p4-ticket-orchestration-kernel.md) 与
+  [P7 规格](docs/specs/p7-production-hardening-ecosystem.md) 同步该归属
 - [P4 规格](docs/specs/p4-ticket-orchestration-kernel.md) 增加第 6 节"决策补充（2026-11-02，ADR-04）"，
-  以追加方式消解四处留白（驱动模型、事务不变式、暂停中投递输入的实现口径、公开契约与包名），
-  不改写原文要求；首屏状态标签改为 Active
+  以追加方式消解六处留白（驱动模型、事务不变式、暂停中投递输入的实现口径、公开契约与包名、
+  调度优先级、deadline 分层归属），不改写原文要求；首屏状态标签改为 Active
 - `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 阶段表的 P4 行同步为
   Active；无任何文档把 P4 能力描述为已交付
 

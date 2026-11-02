@@ -86,6 +86,11 @@ Tenant-scoped Supervisor Runtime
 4. Token/cost 以 Provider 实际 usage 优先，P3 估算为预估与缺失 usage 的降级；货币、时区、计费版本和估算误差必须明确。
 5. `max_total_tokens` 和成本上限在 Core 外层/Assignment policy 强制。达到软阈值可请求审批，达到硬阈值必须暂停或失败，不能静默超支。
 6. Provider 故障转移遵循 P2 retry 语义，但 Router/Assignment 记录选择，不把租户成本规则塞进 `AgentLoop`。
+7. 承接 [ADR-02 后果 4](../design-decisions/02-checkpoint.md) 与
+   [ADR-04 的处置](../design-decisions/04-ticket-orchestration.md)：实现 **Provider 单次调用的内层硬超时**
+   （在 Core 调用点以 `asyncio.timeout` 包裹，覆盖"排队 + 建连 + 流式返回"整段，而不只是
+   `request_timeout_seconds → httpx` 一层）。P4 只有外层 Assignment deadline
+   （超时 → `cancel_assignment` effect → Ticket `blocked`）；两层必须分别可观测、分别可配。
 
 **验收**：相同 Assignment 的模型选择可重放解释；超预算不调用 Provider；fallback 不丢失 run/Ticket 关联；每 Provider 的工具/流式协议兼容测试完整。
 

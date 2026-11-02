@@ -182,10 +182,13 @@ P3 已正式收口：变更提交并推送 `main` 后，GitHub Actions run 41384
 **实施入口**：执行顺序（M1 端到端骨架 → M2 宽度 → M3 收口）、心脏边界 L1~L8 与逐项验收写在
 [P4 验收账本](acceptance/p4-ticket-orchestration.md)；设计取舍与否决方案写在
 [ADR-04](design-decisions/04-ticket-orchestration.md)。2026-11-02 计划经维护者确认，尚未提交任何
-P4 实现代码，因此本节全部交付物仍为待建。已确认的四处口径：单一 asyncio 循环加信号量驱动 Worker、
+P4 实现代码，因此本节全部交付物仍为待建。已确认的六处口径（完整清单见
+[P4 规格第 6 节](specs/p4-ticket-orchestration-kernel.md)）：单一 asyncio 循环加信号量驱动 Worker、
 `Store.transaction()` 内禁止 `await`（由此"状态与 effect 同事务、提交前不启动 Worker"成为可测性质）、
 `Agent.aresume(extra_input=None)` 作为唯一被批准的 Core 兼容扩展（`core/loop.py` 仍零 diff）、
-编排层自带 `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 且顶层暂不重导出。
+编排层自带 `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 且顶层暂不重导出、
+调度优先级实现为三维排序键 `(唤醒过的优先, queued_at, created_at)` 而非 FIFO、
+ADR-02 遗留的 deadline 拆两层（外层 Assignment deadline 归 P4，内层 Provider 单次调用硬超时归 P7）。
 
 **目标**：将“任务”建模为可持久化、可授权、可恢复、可调度的领域对象；在不接入外部消息系统的前提下，可靠管理多个 Core Worker。
 

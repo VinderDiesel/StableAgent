@@ -154,6 +154,27 @@ Report 判定只读结构化字段（`Event.type`、`AgentStatus`、`PauseReason
   已完成 Assignment 不重跑、pending/retry_wait effect 继续执行。
 - L4 复验（M2）：`tests/l4_default_stream_dump.py` 重新 dump 与既有 fixture 逐字节相等。
 
+## 前置 ADR 遗留项的处置（2026-11-02 补充）
+
+[ADR-02 的"代价与遗留"](02-checkpoint.md) 有两条把责任交给 P4。原文保留，这里只做日期明确的处置：
+
+1. **后果 1（"幂等性检查留给 P4"）**：P4 关闭其中"重复启动 / 重复投递"这一层——由
+   `Effect.kind + idempotency_key` 的 SQLite 唯一键、`(ticket_id, attempt)` 唯一键和
+   `DuplicateLaunchError` 三处实现（账本 B4、B5、C3、L7）。**工具自身副作用的可重入审计不在 P4**：
+   P4 的 Worker 只跑离线脚本 Provider，没有外部写操作，该审计随 P5 的真实仓库写操作一并设计。
+2. **后果 4（"Provider 调用整体的硬超时留待 P4 的预算治理，因为二者共享同一个 deadline 模型"）**：
+   拆成两层归属。
+   - **外层 Assignment deadline 归 P4**（M2 新增账本项 E9）：`deadline_at` 超时由 Scheduler 用
+     `asyncio.timeout` 包住 executor 任务，写 `cancel_assignment` effect 并把 Ticket 置 `blocked`
+     带结构化原因。它只依赖本 ADR 决策 2 的单循环模型，不动 Core。
+   - **内层 Provider 单次调用硬超时不属于 P4**：它要在 `stableagent/core/` 的调用点包裹
+     `asyncio.timeout`，与决策 6 锁定的"P4 只允许一处 Core 兼容扩展"直接冲突，因此改归
+     P7 [WP-7.2 多 Provider 与成本路由](../specs/p7-production-hardening-ecosystem.md)。
+     deadline 模型不再"共享一个入口"：P4 管任务级，P7 管单次调用级，两者以
+     `cancel_assignment` effect 与 `ProviderConfig.request_timeout_seconds` 分别可观测。
+
+本处置不改写 ADR-02 的结论；在 ADR-02 原条目处只追加了指向本文的日期说明。
+
 ## 阶段交接
 
 P5 开始前必须保存：P4 的 SQLite recovery 集成基线、Worker `Event`→Report 映射契约、

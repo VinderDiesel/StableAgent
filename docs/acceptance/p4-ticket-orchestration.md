@@ -5,14 +5,14 @@
 > + [ADR-02 Checkpoint](../design-decisions/02-checkpoint.md)（`stream_recover` 语义与单快照源）
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
-> **状态：Active（2026-11-02 计划经维护者确认，实现尚未开始；DoD 0/59，里程碑步骤 0/29）。**
+> **状态：Active（2026-11-02 计划经维护者确认，实现尚未开始；DoD 0/60，里程碑步骤 0/30）。**
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤），也是 P4 的验收账本（第 0、2 节）。
 > 每个可勾选事项都写明需求来源、可执行验证方法、对应测试或命令、证据占位；全部勾选且第 3 节命令
 > 在 CI 复现后 P4 才算收口。计划推进时把实际输出追加到对应条目，不重写已记录的历史输出。
 >
-> **计数口径**：DoD = 第 0 节 L1~L8（8 项）+ 第 2 节 A~H（51 项）= 59 项；
-> 里程碑步骤 = M1 的 10 项 + M2 的 11 项 + M3 的 8 项 = 29 项。里程碑与 DoD 的归属见第 1.4 节。
+> **计数口径**：DoD = 第 0 节 L1~L8（8 项）+ 第 2 节 A~H（52 项）= 60 项；
+> 里程碑步骤 = M1 的 10 项 + M2 的 12 项 + M3 的 8 项 = 30 项。里程碑与 DoD 的归属见第 1.4 节。
 
 ---
 
@@ -102,6 +102,9 @@
 - [ ] **M2.9** 全 5 种 `Report.kind` 与 `list_tickets` 过滤/排序/分页；`RecoverySummary` 字段定稿。
 - [ ] **M2.10** `recover()` 全语义：running→interrupted、pending/retry_wait effect 续跑、
       已 `ended` 不重跑、幂等规则新旧 effect 共用。
+- [ ] **M2.11** Assignment deadline（E9）：`deadline_at` → `asyncio.timeout` 包住 executor 任务 →
+      超时写 `cancel_assignment` effect 并派生 `blocked` Report。先写注入 clock 的超时用例，
+      确认 Core 调用点未被改动（`git diff --stat -- stableagent/core/` 仍只出现 `agent.py`）。
 - [ ] **M2 出口**：M1 出口命令全集 + `pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py tests/unit/test_scheduler.py`
       + L4 dump 比对结果记进 L2 条目。
 
@@ -130,11 +133,11 @@
 | 里程碑 | 该里程碑内可勾选的 DoD 项 | 项数 |
 |---|---|---|
 | M1 | L1、L3、L4、L5、L6、L7、L8；A1~A6；B1~B7；C1~C3；D1、D2、D3、D5、D7；E1；G2（第一版） | 30 |
-| M2 | L2；C4~C7；D4、D6；E2~E8；F1~F4；G4、G5 | 20 |
+| M2 | L2；C4~C7；D4、D6；E2~E9；F1~F4；G4、G5 | 21 |
 | M3 | G1、G3；H1~H7 | 9 |
 
 三个里程碑的出口命令都必须复核 L1（`loop.py` 零 diff）；L2/F3 只有在 M2 的 Core 扩展落地后才可勾选。
-合计 59 项，与首屏计数一致。
+合计 60 项，与首屏计数一致。
 
 ---
 
@@ -201,6 +204,12 @@
 - [ ] **E6** `block` 使下游 `blocked` 且写结构化原因；`continue` 允许下游运行并把失败依赖作为 Input/metadata。
 - [ ] **E7** 优先级 `(唤醒过的优先, queued_at, created_at)` 实现并被顺序测试锁死（ADR-04 决策 7）。
 - [ ] **E8** `recover()` 覆盖 spec WP-4.5.7 全部语义：running→interrupted、幂等重启、旧新 effect 同规则。
+- [ ] **E9** 外层 Assignment deadline（来源：[ADR-02 后果 4](../design-decisions/02-checkpoint.md) 中属于 P4 的那一半，
+      处置见 [ADR-04](../design-decisions/04-ticket-orchestration.md)）：`deadline_at` 超时由 Scheduler 以
+      `asyncio.timeout` 包住 executor 任务，写 `cancel_assignment` effect，Assignment 进 `cancelled`、
+      Ticket 进 `blocked` 并带结构化原因；不触碰 Core 调用点。
+      验证：`test_scheduler.py` 用注入式 clock 触发超时，断言无墙钟等待。
+      **不在本项范围**：Provider 单次调用的内层硬超时，归 P7 WP-7.2。证据：（待记录）。
 
 ### F. 输入投递与 Core 扩展（ADR-04 决策 6）
 
