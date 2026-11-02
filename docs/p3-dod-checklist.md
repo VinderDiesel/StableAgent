@@ -4,7 +4,7 @@
 > P3 接入点预留）+ `docs/design-decisions/01-loop-runtime.md`（ADR-01 loop 契约）
 > + `docs/design-decisions/02-checkpoint.md`（ADR-02，压缩产物与快照/恢复的交互必须遵守其结论）。
 > 使用方式：每条都有"怎么验"，全部勾选即 P3 收口；未达 DoD 不进 P4。
-> **状态：11/52 进行中（A 节度量地基 + B 节历史压缩已落，L1 复核 0 diff，见文末进度记录）。**
+> **状态：17/52 进行中（A 度量地基 + B 历史压缩 + C 能力视图已落，L1 复核 0 diff，见文末进度记录）。**
 
 ---
 
@@ -132,18 +132,41 @@
 
 ## C. 动态能力视图（`context/capability.py`）
 
-- [ ] **C1 `CAPABILITY_FILTERS` 注册表**：键为 `ContextConfig.capability_filter`，
+- [x] **C1 `CAPABILITY_FILTERS` 注册表**：键为 `ContextConfig.capability_filter`，
       `static`（全量，默认，行为不变）之外至少 1 个真筛选器（任务相关性：关键词/最近使用/
       工具族前缀，任选实现但须确定性排序）。
-- [ ] **C2 经 `tool_selector` 位点接入**，不改 loop、不在 loop 内联判据（L1）。
-- [ ] **C3 召回护栏（本节的硬指标）**：筛选**永不**丢掉本次运行里模型实际要调的工具。
+      （`static` + `relevance`。相关性 = 任务实词对 `name + description` 的命中计数，
+      分词只做"拉丁词跑 + CJK 单字"，不引第三方分词器（L3）。
+      两处判据是踩出来的，写死在测试里：`_MIN_TERM_LENGTH=3`（"on/an" 做子串会命中
+      content、analytics，筛选退化成噪声）、虚词表（the/for/and… 让每个英文描述都满分）。
+      `list_runs` 会因名字里含 "run" 被召回——**同族工具一起召回是有意的**。）
+- [x] **C2 经 `tool_selector` 位点接入**，不改 loop、不在 loop 内联判据（L1）。
+      （`Agent.__init__` 里按配置装配选择器：`capability_filter="static"` 或调用方自带
+      `tool_selector` 时**根本不建筛选器**（`_capability=None`），默认路径零开销；
+      显式选择器优先，且此时 `agent.capability_report` 为 None——不报一份"其实没生效"的结果。
+      `test_c2_*` 两条：配置真的到达 Provider（发出去的工具列表从 10 缩到 2）、显式传入的赢。）
+- [x] **C3 召回护栏（本节的硬指标）**：筛选**永不**丢掉本次运行里模型实际要调的工具。
       做法：已调用过的工具名进常驻集合（resident set），断言筛选结果 ⊇ resident set；
       违反即 reject 该策略，不允许"平均召回率"糊过去。
-- [ ] **C4 兜底**：筛选结果为空时回退全量并计数（空工具列表 = 直接废掉 Agent）。
-- [ ] **C5 排序稳定**：输出顺序由名称字典序决定，不依赖 dict 插入序或集合哈希
+      （常驻集合取自 `assistant.tool_calls` 与 `tool` 消息的 name 两处。
+      `test_c3_guard_holds_for_every_state_and_every_cap` 跑 3 任务 × 3 常驻组合的笛卡儿积；
+      `test_c3_resident_beats_the_visible_cap` 断言 **常驻优先于 `max_visible_tools`**——
+      上限与护栏冲突时让位的是上限，因为裁掉一个正在用的工具比多花 token 贵得多。）
+- [x] **C4 兜底**：筛选结果为空时回退全量并计数（空工具列表 = 直接废掉 Agent）。
+      （`fallback=True` 进 `CapabilityReport`；`test_c4_*` 覆盖"词面全不命中"与"空注册表"两种空。）
+- [x] **C5 排序稳定**：输出顺序由名称字典序决定，不依赖 dict 插入序或集合哈希
       （否则 prompt 变化会污染 benchmark 复现）。
-- [ ] **C6 计量闭环**：被裁掉的工具 token 数记进 `state.usage`（如 `tools_tokens_dropped`），
+      （`test_c5_output_order_is_lexicographic_not_insertion_or_hash`：同一份规格正反两种插入序
+      喂进去，输出逐条相等且等于名称字典序。`static` 例外——它保持原序，因为"默认行为不变"
+      包含顺序，见 `test_c1_static_filter_returns_everything_in_original_order`。）
+- [x] **C6 计量闭环**：被裁掉的工具 token 数记进 `state.usage`（如 `tools_tokens_dropped`），
       让"省了多少"可被断言，而不是只由脚本作者口头声明。
+      （已落：`CapabilityReport.dropped_tokens` 用 A 节的 `count_context` 对**实际被裁掉的那批规格**
+      算出，测试里独立重算一遍对比（`test_c6_dropped_tokens_are_measured_not_declared`），
+      并断言 `0 < dropped_tokens < 全量`（`test_c6_saving_never_exceeds_the_full_tool_list`）。
+      **"记进 `state.usage`" 的写入点归 D1**：`tool_selector(specs, state)` 只能返回规格，
+      写快照要改 loop（L1 禁止），改 `state.usage` 更是会污染已经 yield 出去的快照。
+      所以计量的落点是外层持有的引擎 → 快照，与 B2 的"摘要进快照"同一半在 D1 收口。）
 
 ## D. 预算治理（`context/budget.py` + `context/engine.py`）
 
@@ -309,3 +332,34 @@ $ /tmp/sa-3.12/bin/python -m pytest -q                         → 197 passed, 1
 
 未勾选的两项各有归属：**B8**（摘要进快照后 `payload_bytes` / 恢复耗时对 P2 基线的影响）
 等 D1 接线后与 F5 一并测；**B2 的"摘要进快照"那一半**同样落在 D1 的边界压缩上。
+
+### 2026-11-02 · C 节动态能力视图（C1 / C2 / C3 / C4 / C5 / C6 勾选）
+
+新增 `stableagent/context/capability.py`（`CapabilityFilter` / `StaticFilter` /
+`RelevanceFilter` / `CapabilityReport` / `CAPABILITY_FILTERS` / `as_tool_selector`）、
+`tests/unit/test_capability.py`（23 条）；`core/agent.py` 按配置装配选择器并加只读
+`capability_report`；`ContextConfig` 加 `max_visible_tools: int = 8`。
+
+```
+$ git diff 46441f0 -- stableagent/core/loop.py                 → 0 行（L1 复核）
+$ .venv/bin/ruff check stableagent tests examples benchmarks   → All checks passed!
+$ .venv/bin/mypy                                               → Success: no issues found in 25 source files
+$ .venv/bin/pytest -q                                          → 220 passed, 1 skipped / 98.61%
+$ .venv/bin/pytest --cov=stableagent/context                   → capability.py 81 stmts 0 miss 100%
+$ /tmp/sa-3.10/bin/python -m pytest -q                         → 220 passed, 1 skipped
+$ /tmp/sa-3.12/bin/python -m pytest -q                         → 220 passed, 1 skipped
+```
+
+三处判断：
+
+1. **相关性判据的词面要做减法，不是加法**。第一版把 user/assistant 文本里所有
+   `[a-z0-9_]+` 与 CJK 单字都当任务词，结果 10 个工具里选出 6 个——因为 "a"、"on"、"the"
+   这类词做**子串**命中：`on` 命中 `content`，`an` 命中 `analytics`。
+   改成"拉丁词取 3 字母起 + 虚词表"，同一任务收敛到 2 个工具。
+   这类退化不会报错，只会让"筛选"悄悄变成"没筛"，所以用 `test_c1_two_letter_words_are_not_task_terms`
+   把判据本身钉住，而不是只钉结果。
+2. **护栏优先于上限**。`max_visible_tools` 与常驻集合冲突时按常驻走（可以超上限）：
+   上限是省 token 的旋钮，护栏是正确性的地板，两者不是一个量级。
+3. **`static` 不排序**。默认路径连工具顺序都不动（P2 的事件流一致性包含发给 Provider 的
+   tools 列表形状），要动态视图就得显式改名——但配置项 `compression` 那种"单一开关"
+   的坑在这里不存在，因为 `capability_filter` 本身就是开关。

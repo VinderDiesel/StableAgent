@@ -114,6 +114,8 @@ class ContextConfig(BaseModel):
     keep_recent_messages: int = 8
     max_summary_chars: int = 1200
     tool_result_excerpt_chars: int = 200
+    max_visible_tools: int = 8
+    """能力视图上限（C 节）；常驻集合（本次已用过的工具）优先于此上限，见 C3。"""
 
 
 class CheckpointConfig(BaseModel):

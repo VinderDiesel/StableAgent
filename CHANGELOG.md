@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+### 契约扩展（P3 进行中，全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
+- `AgentState.context_summary: str = ""`：新增带默认值字段，旧快照缺字段即取空串，
+  `AgentState.loads` 的严格性与往返无损不变式不受影响（v1.0.0 fixture 已回归验证）
+- `ContextConfig` 新增 4 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /
+  `tool_result_excerpt_chars=200` / `max_visible_tools=8`。既有 `Config()` 的
+  `compression="none"` + `capability_filter="static"` 组合下这些字段不参与任何代码路径
+- 新模块 `stableagent/context/{tokens,compression,capability}.py`：三张注册表
+  （`ASSEMBLERS` / `COMPRESSIONS` / `CAPABILITY_FILTERS`）+ `resolve_*` 工厂，
+  与 P1 的组装位点同构；未知名一律 `KeyError` 带出已注册清单
+- `resolve_assembler(config, summariser=None)`：新增第二个可选参数（位置参数量不变，
+  旧的单参调用形状完全兼容）。`compression != "none"` 时返回 `CompressedAssembler` 包装，
+  `== "none"` 时返回的对象与类型都与 P2 一致
+- `Agent` 新增只读属性 `capability_report`（未启用动态视图时为 `None`）；
+  构造时若显式传入 `tool_selector`，配置项 `capability_filter` 不参与——显式优先，
+  且此时 `capability_report` 为 `None`，不报一份"其实没生效"的结果
+- 运行时依赖仍为 3 个（`pydantic` / `anyio` / `httpx`）：token 估算为内置启发式，
+  未引入 `tiktoken`
+
 ### P2 收口
 - DoD **34/34**：最后一项 F5（CI 3.10/3.12 矩阵全绿）由 run 41032998523 关闭，
   两个 job 均为 `126 passed, 1 skipped` / 覆盖率 98.20% / 心脏模块 96.8–100%，

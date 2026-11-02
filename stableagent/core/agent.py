@@ -19,6 +19,11 @@ import uuid
 from collections.abc import AsyncIterator
 
 from stableagent.context.assembly import ContextAssembler
+from stableagent.context.capability import (
+    CapabilityReport,
+    as_tool_selector,
+    resolve_capability_filter,
+)
 from stableagent.core.checkpoint.manager import CheckpointManager
 from stableagent.core.checkpoint.recovery import (
     RecoveryDirector,
@@ -67,7 +72,15 @@ class Agent:
         self.config = config if config is not None else Config()
         self._registry = registry if registry is not None else ToolRegistry()
         self._assembler = assembler
-        self._tool_selector = tool_selector
+        self._capability = (
+            None
+            if tool_selector is not None  # 显式传入的选择器优先，配置项此时不参与（不建双层覆盖）
+            or self.config.context.capability_filter == "static"  # L4：默认路径短路，零开销
+            else resolve_capability_filter(self.config.context)
+        )
+        self._tool_selector = tool_selector or (
+            as_tool_selector(self._capability) if self._capability is not None else None
+        )
         self._providers: list[Provider | str | None] = [provider, fallback]
         self._sleep = sleep or asyncio.sleep
         self._loop: AgentLoop | None = None
@@ -100,6 +113,11 @@ class Agent:
     def checkpoints(self) -> CheckpointManager | None:
         """P2 落盘入口；未启用持久化时为 None（P1 默认行为不变）。"""
         return self._checkpointer
+
+    @property
+    def capability_report(self) -> CapabilityReport | None:
+        """最近一次能力视图筛选的产出（只读）；未启用动态视图时为 None。"""
+        return self._capability.last_report if self._capability is not None else None
 
     def _engine(self, provider_index: int = 0) -> AgentLoop:
         target = self._providers[min(provider_index, len(self._providers) - 1)]
