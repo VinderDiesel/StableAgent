@@ -7,6 +7,7 @@
 | P1 | [Core Runtime](p1-core-runtime.md) | Completed evidence | 追溯 AgentLoop、事件、暂停和 P3 接缝契约 |
 | P2 | [Checkpoint & Recovery](p2-checkpoint-recovery.md) | Completed evidence | 追溯 checkpoint、恢复、重试、CI 和恢复性能基线 |
 | P3 | [Context Engineering](p3-context-engineering.md) | Completed evidence | 追溯压缩/能力视图/预算治理、Evidence 位置决策、benchmark 与 CI 收口记录 |
+| P4 | [Ticket Orchestration](p4-ticket-orchestration.md) | Active（含实施计划） | 跟踪 M1/M2/M3 里程碑步骤、心脏边界 L1~L8 与逐项验收证据 |
 
 使用规则：
 

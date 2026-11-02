@@ -364,12 +364,12 @@ enum members, new config sections).
 | P1 | Worker runtime: loop, OpenAI provider, tool loop, pause/resume | ✅ done |
 | P2 | Checkpoint & recovery: 3 backends, self-healing, snapshot versioning | ✅ done — 34/34, CI matrix green on 3.10 & 3.12 |
 | P3 | Worker context runtime: compression, capability view, budget, evidence | ✅ done — 52/52, CI matrix green on 3.10 & 3.12 (run 41384598912) |
-| P4 | Ticket orchestration: Ticket, Assignment, Scheduler, DAG, Durable Outbox | ⏳ next |
+| P4 | Ticket orchestration: Ticket, Assignment, Scheduler, DAG, Durable Outbox | 🟡 active — plan agreed on 2026-11-02 (ADR-04 accepted), no P4 code committed yet |
 | P5 | Guarded execution and repository integration | ⏳ |
 | P6 | Single-repository Super-Agent Beta | ⏳ |
 | P7 | Production hardening and ecosystem | ⏳ |
 
-Implementation contracts and acceptance evidence: [`docs/README.md`](docs/README.md), [P3 Spec](docs/specs/p3-worker-context-runtime.md), and [P3 Acceptance](docs/acceptance/p3-context-engineering.md).
+Implementation contracts and acceptance evidence: [`docs/README.md`](docs/README.md), [P4 Spec](docs/specs/p4-ticket-orchestration-kernel.md) with its [plan & ledger](docs/acceptance/p4-ticket-orchestration.md) and [ADR-04](docs/design-decisions/04-ticket-orchestration.md), and the closed [P3 Spec](docs/specs/p3-worker-context-runtime.md) with its [acceptance ledger](docs/acceptance/p3-context-engineering.md).
 
 ## Design documentation
 

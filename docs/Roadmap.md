@@ -86,7 +86,8 @@ StableAgent Core（P0–P3）
 
 - [文档中心](README.md) 是全部设计、规格、验收与历史资料的导航入口。
 - P3 的实现合同是 [Worker Context Runtime Spec](specs/p3-worker-context-runtime.md)，完成状态和验证证据以 [P3 Context Engineering Acceptance](acceptance/p3-context-engineering.md) 为准。
-- P4–P7 的未来实施合同由 [阶段规格索引](specs/README.md) 统一维护。
+- 当前阶段 P4 的实现合同是 [Ticket 编排内核 Spec](specs/p4-ticket-orchestration-kernel.md)，实施顺序与验收证据写在 [P4 Ticket Orchestration Acceptance](acceptance/p4-ticket-orchestration.md)，驱动模型与事务边界的设计取舍见 [ADR-04](design-decisions/04-ticket-orchestration.md)。
+- P5–P7 的未来实施合同由 [阶段规格索引](specs/README.md) 统一维护。
 - P1/P2 的完成证据在 [Acceptance](acceptance/README.md)；公共契约与已接受设计见 [Design Decisions](design-decisions/)。
 
 ---
@@ -176,7 +177,15 @@ P3 已正式收口：变更提交并推送 `main` 后，GitHub Actions run 41384
 
 ---
 
-## P4：Ticket 编排内核（Ticket Orchestration Kernel）
+## P4：Ticket 编排内核（Ticket Orchestration Kernel）— Active（计划已确认，实现未开始）
+
+**实施入口**：执行顺序（M1 端到端骨架 → M2 宽度 → M3 收口）、心脏边界 L1~L8 与逐项验收写在
+[P4 验收账本](acceptance/p4-ticket-orchestration.md)；设计取舍与否决方案写在
+[ADR-04](design-decisions/04-ticket-orchestration.md)。2026-11-02 计划经维护者确认，尚未提交任何
+P4 实现代码，因此本节全部交付物仍为待建。已确认的四处口径：单一 asyncio 循环加信号量驱动 Worker、
+`Store.transaction()` 内禁止 `await`（由此"状态与 effect 同事务、提交前不启动 Worker"成为可测性质）、
+`Agent.aresume(extra_input=None)` 作为唯一被批准的 Core 兼容扩展（`core/loop.py` 仍零 diff）、
+编排层自带 `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 且顶层暂不重导出。
 
 **目标**：将“任务”建模为可持久化、可授权、可恢复、可调度的领域对象；在不接入外部消息系统的前提下，可靠管理多个 Core Worker。
 
@@ -218,6 +227,10 @@ Assignment
 - 失败的 Worker 不影响不相关 Ticket。
 - 同一 effect 重放不产生重复启动、重复通知或重复状态写入。
 - 测试完全离线，无 GitHub、飞书或真实模型依赖。
+- `core/loop.py` 相对 `46441f0` 零 diff，Core 只允许 `aresume(extra_input=None)` 一处兼容扩展且 L4
+  默认事件流重新 dump 后与既有 fixture 逐字节相等。
+- orchestration 六个心脏文件每文件覆盖率 ≥90%，Python 3.10 / 3.12 远端 CI 全绿并把 run URL/ID
+  记入 [P4 验收账本](acceptance/p4-ticket-orchestration.md)，才算正式收口。
 
 ---
 

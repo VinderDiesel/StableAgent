@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+### 规划与决策（P4 启动，2026-11-02；未提交任何 P4 实现代码）
+- 新增 [ADR-04](docs/design-decisions/04-ticket-orchestration.md)（Accepted）：P4 的驱动模型（单一 asyncio
+  事件循环 + `asyncio.Semaphore`）、事务不变式（`Store.transaction()` 内禁止 `await`，提交前不得启动
+  Worker）、恢复所有权（`_tasks` 只作取消句柄，单个 `worker_run_id` 同时最多一个驱动者）、
+  Event→Report 映射的默认噪音口径（`progress` 默认只在 `TOOL_RESULT` 落一条）、编排层独立版本
+  `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 且不进顶层重导出（`CONTRACT_VERSION` 仍为 `1.1.0`），
+  并记录 10 项被否决方案
+- 唯一被批准的 Core 兼容扩展：`Agent.resume()/aresume()` 增加 `extra_input: str | None = None`，用于在
+  暂停边界投递 `TicketInput`。`core/loop.py` 仍保持零 diff，默认 `None` 时要求 L4 金标准重新 dump
+  逐字节相等。**该扩展尚未实现**，排在里程碑 M2
+- 新建 [P4 验收账本](docs/acceptance/p4-ticket-orchestration.md)：按维护者确认，实施计划（M1 走骨架 /
+  M2 宽度 / M3 收口共 29 个步骤与验证命令）与 DoD（心脏边界 L1~L8 + 分组 A~H，共 59 项，含里程碑
+  归属表）同处一文件，当前 **0/59**，状态 Active
+- [P4 规格](docs/specs/p4-ticket-orchestration-kernel.md) 增加第 6 节"决策补充（2026-11-02，ADR-04）"，
+  以追加方式消解四处留白（驱动模型、事务不变式、暂停中投递输入的实现口径、公开契约与包名），
+  不改写原文要求；首屏状态标签改为 Active
+- `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 阶段表的 P4 行同步为
+  Active；无任何文档把 P4 能力描述为已交付
+
 ### 契约扩展（P3 已收口，run 41384598912；全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
 - `ContextConfig` 新增 5 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /
   `tool_result_excerpt_chars=200` / `max_visible_tools=8`；`on_budget_exceeded` 的

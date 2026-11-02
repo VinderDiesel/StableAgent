@@ -2,7 +2,9 @@
 
 > **阶段定位**：在不接入 GitHub、飞书、MCP、Docker 或长期外部 Source 的前提下，将一次性 Worker run 组织为可持久化、可恢复、可并发调度的长期工作系统。P4 的工作单位是 `Ticket`，执行单位是 `Assignment`，执行内核仍是既有 `stableagent.Agent`。
 >
-> **开始条件**：P3 已满足其全部退出条件，并记录最终验证和 benchmark 基线。
+> **状态：Active**（2026-11-02 实施计划经维护者确认，实现尚未开始；执行顺序与逐项证据见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)）。
+>
+> **开始条件**：P3 已满足其全部退出条件，并记录最终验证和 benchmark 基线。（已满足：P3 52/52，CI run 41384598912。）
 >
 > **完成条件**：本阶段全部状态机、仓储、调度和 durable outbox 用例可以在离线 SQLite 环境中恢复和验证，且没有将控制平面逻辑加入 `core/loop.py`。
 
@@ -246,4 +248,33 @@ P5 复用 P4 的 Ticket、Assignment、Report、Effect、Scheduler 和 Store，�
 - 新的 effect handler，用于安全的 GitHub 评论和 PR 创建；
 - 输入来源元数据，仍通过 TicketInput 而不是直接写入 AgentState。
 
-P5 开始前必须保存 P4 的 SQLite recovery 集成基线和 Worker Event→Report 映射契约。 
+P5 开始前必须保存 P4 的 SQLite recovery 集成基线和 Worker Event→Report 映射契约。
+
+---
+
+## 6. 决策补充（2026-11-02，[ADR-04](../design-decisions/04-ticket-orchestration.md)）
+
+启动 P4 前，规格有四处留白会直接改变实现形状。以下补充是已接受的决策，不改动上文任何原始要求：
+
+1. **驱动模型**：Scheduler 运行在单一 asyncio 事件循环内，用 `asyncio.Semaphore(max_concurrency)`
+   驱动 `AgentExecutor`；`OrchestrationService` 的领域命令保持同步（只写记录与入队 effect）。
+   原因是 `Agent.run()` 内部即 `asyncio.run`，线程方案要为每个 Assignment 起独立循环且取消语义退化。
+   代价（同步 `sqlite3` 调用短暂阻塞循环）与备选方案记在 ADR-04。
+2. **事务不变式**：`Store.transaction()` 重入抛错、**事务体内禁止 `await`**，dispatcher 调用 handler 前
+   断言当前不在事务内。因为循环单线程，同步 Store 方法对协程不可分割，这让 §1 的
+   "状态与 effect 同事务、提交前不启动 Worker"成为可测试性质而非约定（对应 WP-4.2.3、WP-4.3.5）。
+3. **暂停中投递输入的实现口径**：WP-4.4.6 要求"后续输入只能在空闲/暂停边界投递"，而 Core 的
+   `aresume()` 不接受新输入。已批准的唯一解决方式是给 `Agent.resume()/aresume()` 增加带默认值的可选
+   参数 `extra_input: str | None = None`，在进入 `_continue_pairs` 前追加
+   `Message(role="user")` 到 state 副本。`core/loop.py` 仍零修改；`extra_input=None` 时默认路径必须由
+   L4 金标准重新 dump 证明逐字节不变。这使本阶段的 Core 边界从"Core 零改动"精确为
+   "`loop.py` 零 diff + 一处向后兼容扩展"，且该扩展排在里程碑 M2。
+4. **公开契约与包名**：按第 2 节建议采用 `stableagent/orchestration/`，`CONTRACT_VERSION` 保持 `1.1.0`，
+   编排层另立 `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 且顶层 `stableagent/__init__.py` 不重导出
+   （P6 Beta 前不承诺编排记录稳定）。`planning/` 保留为 P6+ LLM Planner 占位，docstring 改指新包。
+5. **调度优先级**：WP-4.5.6 的"若不实现优先级则明确 FIFO"择一为**实现三维排序键**
+   `(被唤醒过的优先, queued_at, created_at)`，并由测试锁死顺序；排序键一经锁死视同契约。
+
+实施顺序按"走骨架优先"切分为 M1（端到端骨架，Core 零改动）/ M2（输入投递、取消、DAG、真并发、
+Core 扩展）/ M3（示例、CI 扩容、收口），步骤与验证命令见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)
+的第 1 节"实施顺序"。 

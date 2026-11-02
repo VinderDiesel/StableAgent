@@ -1,0 +1,162 @@
+# ADR-04：Ticket 编排内核与 Durable Outbox（P4）
+
+- 状态：Accepted（决策已接受，实现尚未开始；证据条目在 [P4 验收账本](../acceptance/p4-ticket-orchestration.md) 逐条落地）
+- 日期：2026-11-02
+- 关联：[公共契约](00-contracts.md)、[ADR-01 Loop](01-loop-runtime.md)、[ADR-02 Checkpoint](02-checkpoint.md)、[ADR-03 Context](03-context-engineering.md)、[P4 实施规格](../specs/p4-ticket-orchestration-kernel.md)、[P4 验收账本](../acceptance/p4-ticket-orchestration.md)
+- 代码入口（计划）：`stableagent/orchestration/{model,store,outbox,executor,scheduler,service,errors}.py`、`stableagent/core/agent.py`
+
+## 背景
+
+P0–P3 把"一次 Worker run"做成了可度量、可恢复的单元：`AgentLoop` 是纯函数式的步转移，
+`AgentState` 是唯一快照，`ContextEngine` 治理历史与工具预算。但一次 run 仍然是短命的：
+它没有身份、没有队列、没有依赖、没有外部副作用的可靠投递，也无法在编排进程崩溃后继续。
+
+P4 要回答的是"多个长期任务如何被组织"：创建 `Ticket`、派生 `Assignment`、有限并发调度、
+按依赖推进、把 Worker 的 `Event`/`AgentState` 映射成长期 `Report`，并且保证"启动 Worker、
+投递输入、取消运行"这些副作用既不丢也不重。P4 明确不接 GitHub/飞书/MCP/Docker（P5/P6 范围）。
+
+关键难点不在模型类，而在三处接缝：编排层与 Core 的驱动接缝、SQLite 事务与副作用的提交接缝、
+以及崩溃重启后"谁有权继续驱动同一个 run"的所有权接缝。本 ADR 记录这三处接缝的取舍。
+
+## 约束
+
+1. `core/loop.py` 相对 P2 收口基线 `46441f0` 保持零 diff；Scheduler/Ticket/Outbox/权限逻辑一律不得进 loop。
+2. Worker 的 `Event` 协议、F4"恰一个终止事件居尾"、`AgentState` 单快照源不变。
+3. 运行时依赖仍为 3 个（`pydantic` / `anyio` / `httpx`）；编排层使用 stdlib `sqlite3`，不引入 `aiosqlite`/ORM。
+4. P0–P3 既有测试（含 L4 默认流金标准 `tests/fixtures/l4_p2_default_stream.json`）必须继续全绿。
+5. 全部验收离线确定性：无网络、无真实模型、无墙钟、无随机（ID 与时钟注入）。
+6. `Ticket` 状态不得依赖自然语言文本判定；`Report` 是领域接口，Worker `Event` 只作诊断载荷。
+
+## 决策
+
+### 1. 包边界：`stableagent/orchestration/`，编排层自带版本，顶层不重导出
+
+新增 `stableagent/orchestration/`，含 `model / store / outbox / executor / scheduler / service / errors`
+七个模块与一个 `__init__.py`。依赖方向单向：`model` ← `store` ← (`outbox`, `scheduler`, `service`)，
+`executor` 只依赖 `model` 与 Core 公开入口。`planning/` 保留为 P6+ LLM Planner 占位，其 docstring
+改指 `orchestration/`，避免"Phase 4 交付 planner"的旧说明与实际包名混淆。
+
+公开契约口径：`CONTRACT_VERSION` 保持 `1.1.0`（Core 的公共 payload 未被 P4 改变），
+编排层另立 `ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 定义在 `stableagent/orchestration/__init__.py`，
+并在 SQLite 里落 `schema_migrations` 表。P6 Beta 之前不承诺编排层记录结构稳定，因此顶层
+`stableagent/__init__.py` 不重导出 Ticket/Assignment/Report（P7 再决定是否升为公共面）。
+这样 P5/P6 兼容扩展编排字段时不需要动 Core 的冻结契约，也不需要把 Core 版本号拖进编排层的迭代。
+
+### 2. 驱动模型：单一 asyncio 事件循环 + 信号量
+
+`Scheduler` 在一个事件循环里运行。它每轮从 Store 推导可运行 Ticket，在事务内入队
+`launch_assignment` effect，提交后由 `EffectDispatcher` 领取 due effect，用
+`asyncio.Semaphore(max_concurrency)` 取槽并 `asyncio.create_task(executor.launch(...))` 驱动 Worker。
+`OrchestrationService` 的领域命令保持同步：只写记录与入队 effect，绝不直接调用 executor。
+
+这个选择同时解决了三件事，代价是接受"同步 SQLite 调用会短暂阻塞事件循环"——在 P4 的
+离线规模下不成立为问题，并且写进下面的原子性不变式后它反而成了工具。
+
+### 3. 事务原子性：事务体内禁止 await，同步段天然不可分割
+
+`Store.transaction()` 是上下文管理器，进入时置 `_in_tx`，重入抛 `ReentrantTransactionError`；
+在事务体内 `await` 被禁止（异步 handler 只能在提交之后由 dispatcher 调用）。由于驱动循环是单线程，
+任何同步的 Store 方法对其它协程而言不可分割，因此"Ticket 状态变更与 effect 入队在同一事务"
+是可证明的，而不是靠约定。
+
+由此得出两条硬规则，测试各自把守：**提交前不得启动 Worker**（启动只由被领取的 effect 触发）；
+**effect handler 的 I/O 不持有事务**（dispatcher 调用 handler 前断言 `not store.in_transaction`）。
+
+### 4. 恢复所有权：内存句柄不是事实源
+
+`Scheduler._tasks: dict[worker_run_id, asyncio.Task]` 只作取消句柄；一切可运行性从 Store 推导
+（规格 WP-4.5.1）。同一 `worker_run_id` 已在 `_tasks` 中时拒绝第二次驱动并抛 `DuplicateLaunchError`，
+因此 Scheduler 重启不会并发恢复同一 Assignment。
+
+`recover()` 把崩溃时为 `running` 的 Assignment 标 `interrupted`，以含 `attempt` 的幂等键重新入队
+`launch_assignment`，executor 走 `Agent.stream_recover(worker_run_id)`——不重放 Event、不复制 state，
+沿用 ADR-02 的快照恢复语义。已 `ended` 的 Assignment 不得被再次启动，测试以 Provider 调用次数断言。
+
+### 5. Event→Report 映射与默认噪音
+
+映射固定：`DONE→ready`、`ERROR→failed`、`PAUSED(needs_human)→waiting_for_human`、
+`PAUSED(budget_exceeded)→blocked`；`progress` 默认只在 `TOOL_RESULT` 落一条，
+放开到 `THINKING`/`TOOL_CALL` 由配置决定。这是 ADR-03 "默认不增加事件噪音"结论在编排层的延续：
+Report 一旦默认高频，长期存储与 `list_tickets` 的信噪比就垮了。
+
+Report 判定只读结构化字段（`Event.type`、`AgentStatus`、`PauseReason`、`ErrorRecord`），
+不从消息文本猜状态；`TicketInput`/`Report.details` 承载原因。
+
+### 6. 唯一被批准的 Core 扩展：`aresume(extra_input=...)`
+
+规格要求"后续输入只能在 Worker 空闲/暂停边界投递，不抢占正在执行的 `advance()`"，而 Core 现状是
+`Agent.stream/arun(task)` 只在开始时接一次任务、`aresume()` 不接受新输入。为编排层打开的第二条路
+（直接改 checkpoint 快照）会摧毁 ADR-02 的单快照源审计性。
+
+因此 P4 引入一个带默认值的兼容扩展：`Agent.resume(...)` / `Agent.aresume(...)` 接受
+`extra_input: str | None = None`，在进入 `_continue_pairs` 之前把 `Message(role="user", content=extra_input)`
+追加到 state 的副本上。`core/loop.py` 一行不动；`extra_input=None` 时行为与现在逐字节一致，
+由 L4 金标准重新 dump 比对把关（重新生成流程见 `tests/l4_default_stream_dump.py`）。
+`deliver_input` effect handler 是它唯一的调用方。
+
+该扩展排在 M2，使 M1 的走骨架阶段保持 Core 零改动，把"Core 是否被动过"这个风险隔离在单一里程碑里。
+
+### 7. 状态机集中与优先级
+
+状态只能由 `model.py` 的三个纯转换函数（`next_ticket_status` / `next_assignment_status` /
+`next_effect_status`）或 `service` 命令推进，Repository 不提供任意字段更新。非法转换、未知 ID、
+环状依赖、已结束 Ticket 写入、跨 Ticket 报告一律抛带稳定 `code` 的 `OrchestrationError` 子类。
+
+调度优先级直接实现为可测的排序键 `(被唤醒过的优先, queued_at, created_at)`，
+对应规格 WP-4.5.6 的"人工唤醒 > 已排队 > 新建"，不写成待办。
+
+## 被否决方案
+
+| 方案 | 拒绝原因 |
+|---|---|
+| 线程池 + `Agent.run()` 同步 API 驱动 Worker | `Agent.run()` 内部是 `asyncio.run`，不能在被运行的循环里调用；线程方案要为每个 Assignment 起独立循环，取消与背压退化成标志位轮询，SQLite 单写者与线程亲和性另需约束，测试时序不确定。 |
+| 子进程 per Assignment | 隔离最强，但需要 IPC 与进程生命周期管理；规格把执行环境/sandbox 推到 P5，P4 引入会撑大范围。P4 的子进程只用于崩溃演练（整个编排进程被 SIGKILL）。 |
+| 编排层把 user 消息直接写进 P2 `CheckpointStore` 最新快照再 `stream_recover` | 绕过"AgentState 是快照唯一来源"与版本化迁移契约，恢复语义不可审计，违反规格第 1 节边界的精神。 |
+| 为投递新输入新增 `EventType` 或给 `AgentState` 加输入字段 | 改变公共事件/快照 payload，直接撞 L4 金标准；一个默认 `None` 的可选参数兼容面最小。 |
+| P4 不支持暂停中注入，输入只在下个 Assignment 边界生效 | 会让 `deliver_input` effect 基本空转，规格目标 4/5 名存实亡；真要降级就得先改规格并记 ADR，代价高于一个可选参数。 |
+| `Ticket`/`Assignment`/`Report` 现在纳入 `CONTRACT_VERSION` 并 bump 1.2.0 | 顶层重导出后 P5/P6 的字段扩展都成了破坏性变更风险；规格第 2 节要求先保持内部 API 明确。 |
+| 内存队列承载待调度 Assignment | 崩溃即丢；规格 WP-4.5.1 要求可运行性只从 Store 推导。 |
+| 用内存标志实现 effect 幂等 | 重启后失效，无法满足"任意崩溃不重复已确认副作用"的退出条件；幂等必须是 SQLite 唯一键。 |
+| 在 `Store.transaction()` 内 `await` executor | 事务持有时长的下限变成"一次模型往返"，重启窗口内既没提交也没法判定 effect 是否该重放，直接丢副作用。 |
+| 让 Scheduler 判断是否值得重试真实模型错误 | 重试策略属于 Core 的 provider 层与 P5 的授权层；P4 只对 effect 做注入式 backoff。 |
+
+## 后果与代价
+
+- 事件循环单线程 + 同步 sqlite：`tick()` 期间存在短暂阻塞，编排规模变大后需要换成 WAL/连接池或独立写线程，
+  届时本 ADR 需 superseding 记录。P4 以 `benchmarks/` 脚本在固定规模下复跑单轮 `tick()` 与 `recover()` 耗时，
+  结果记入 `docs/evidence/p4-orchestration-benchmark-<yyyy-mm-dd>.md`（账本 H7），只验证该代价的量级，
+  不外推为性能承诺。
+- `ORCHESTRATION_SCHEMA_VERSION` 独立意味着使用者要显式选择编排层；顶层导入面在 P6 之前不承诺。
+- 走骨架优先（M1 只有 `launch_assignment`）会让 M2 引入 `deliver_input`/`cancel` 时重构 dispatcher 的
+  handler 注册与保序逻辑一次；这是为了让集成风险在第一个里程碑暴露而接受的代价。
+- `Agent` 恢复入口多一个可选参数，Core 的"零改动"退出条件在 P4 表述为"`loop.py` 零 diff + 一处向后兼容扩展"，
+  必须在账本里以 L4 dump 结果证明默认路径未变。
+- 优先级三维排序键一旦测试锁死，改动会牵动既有调度测试，视同契约。
+
+## 迁移与兼容
+
+- 编排层使用独立 SQLite 文件或同文件的独立表集与 `schema_migrations`，**不复用** P2 checkpoint 表；
+  旧库无需迁移（P4 是新表）。
+- `Mandate.policy_version = "p4-local-v1"`，字段集最小；P5 只能以带默认值的兼容扩展加入授权字段并升版本号。
+- P5 复用 P4 的 `WorkerExecutor` 协议：协议签名变化必须走新 ADR，P5 只提供新实现。
+- 旧快照与旧事件流不受影响：P4 不写 `AgentState`，只读 Worker 产出并映射为 Report。
+
+## 测试与证据（计划，逐条在账本落地）
+
+- `tests/unit/test_orchestration_model.py`：全部合法/非法转换、序列化 round-trip、注入 ID/clock 的确定性。
+- `tests/unit/test_orchestration_store.py`：事务回滚、重入与"事务内不得 await"守卫、重开无损、唯一键、迁移、排序分页。
+- `tests/unit/test_outbox.py`：commit 后执行、重复 dispatch、幂等键、失败耗尽、同 Assignment 保序、不同 Ticket 并发。
+- `tests/unit/test_agent_executor.py`：Event→Report 映射、`stream_recover` 恢复、取消、重复 launch 防护。
+- `tests/unit/test_scheduler.py`：并发上限、依赖两策略、环拒绝、优先级顺序、隔离、重试、`recover()`、单 run 单驱动。
+- `tests/unit/test_orchestration_boundaries.py`：`core/**` 与 `context/**` 不 import `orchestration`（AST 扫描）、
+  `git diff 46441f0 -- stableagent/core/loop.py` 为空。
+- `tests/integration/test_ticket_recovery.py`：子进程建库跑到两个 Assignment 后 SIGKILL，新进程 `recover()` 后终态正确、
+  已完成 Assignment 不重跑、pending/retry_wait effect 继续执行。
+- L4 复验（M2）：`tests/l4_default_stream_dump.py` 重新 dump 与既有 fixture 逐字节相等。
+
+## 阶段交接
+
+P5 开始前必须保存：P4 的 SQLite recovery 集成基线、Worker `Event`→Report 映射契约、
+`WorkerExecutor` 协议签名、`ORCHESTRATION_SCHEMA_VERSION` 与 `schema_migrations` 现状。
+P5 只扩展 Mandate 授权字段、`WorkerExecutor` 实现（worktree/sandbox）、新 effect handler 与输入来源元数据，
+不得替换 P4 的 ID、状态机或 outbox 语义。
