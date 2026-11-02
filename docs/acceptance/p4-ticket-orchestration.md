@@ -90,9 +90,14 @@
       的孤儿回收用例 `test_orphan_running_effects_are_reclaimed` 覆盖，进程级演练归 Task 10）；
       重复 dispatch 由领取即置 `running` 保证不再入 due 集。`test_outbox.py` = `6 passed`，
       全量 `328 passed, 1 skipped`。
-- [ ] **M1.5** `executor.py`：`WorkerExecutor` 协议 + `AgentExecutor.launch()`（只调 `stream`）+
+- [x] **M1.5** `executor.py`：`WorkerExecutor` 协议 + `AgentExecutor.launch()`（只调 `stream`）+
       `DONE→ready` / `ERROR→failed` / `PAUSED→waiting|blocked` 映射，progress 默认只在 `TOOL_RESULT` 落一条。
       先写 `test_agent_executor.py`（`FakeProvider` + 注入 Agent 工厂）。
+      证据（2026-11-02，Task 7）：`WorkerExecutor`/`AssignmentSink` 双协议 + `AgentExecutor`
+      （launch/recover 走 `stream`/`stream_recover`，deliver/cancel 显式 `NotImplementedError`）；
+      checkpoint 未启用的 Worker 在任何 I/O 前被 `WorkerConfigError` 拒绝；
+      测试以 `StubAgent`（注入 Agent 工厂）+ `RecordingSink` 全离线，`test_agent_executor.py` =
+      `7 passed`，全量 `335 passed, 1 skipped`。
 - [ ] **M1.6** `scheduler.py` 单槽版：`await tick()` / `await drain()`，只从 Store 推导可运行 Ticket，
       `_tasks` 只作取消句柄，`DuplicateLaunch` 防护。先写 `test_scheduler.py` 的骨架用例。
 - [ ] **M1.7** `service.py`：`create_ticket` / `queue_ticket` / `complete_ticket` / `get_ticket` /
@@ -184,12 +189,14 @@
       `IllegalTransitionError`，`test_legal_ticket_transitions` 9 条参数化 + 3 条非法路径用例全绿；
       "Store 无状态更新入口"的后半在 Task 4/5 建 `store.py` 后由
       `test_orchestration_boundaries.py` 补断言（Task 10 收口）。
-- [ ] **A4** 模型级校验：Ticket 不得依赖自身、Assignment 必属某 Ticket、`attempt >= 1`、
+- [x] **A4** 模型级校验：Ticket 不得依赖自身、Assignment 必属某 Ticket、`attempt >= 1`、
       `worker_run_id` 启动前可空启动后必填。验证：`test_orchestration_model.py` 的拒绝用例。
       证据（前半，2026-11-02 Task 2/3）：自指依赖被 `Dependency` 的 `model_validator` 拒绝、
       `attempt=0` 被 `ge=1` 拒绝、缺 `ticket_id` 构造不出 `Assignment`、
-      `assert_assignment_belongs_to()` 拒绝跨 Ticket 挂载；"启动后必填"半边等 Task 7 的
-      `test_run_id_is_registered_once_at_the_first_step_boundary`（见 ADR-04 决策 4.1）闭合后才勾。
+      `assert_assignment_belongs_to()` 拒绝跨 Ticket 挂载；
+      "启动后必填"半边（2026-11-02，Task 7 收尾）：`test_run_id_is_registered_once_at_the_first_step_boundary`
+      证明 `worker_run_id` 启动前为 None、在第一个 CHECKPOINT step 边界经 `register_run_id()` 注册且只注册一次；
+      `AgentExecutor.recover()` 对缺 `worker_run_id` 的 Assignment 抛 `WorkerConfigError`。
 - [ ] **A5** `TicketView` 只由持久化记录派生，无缓存事实源。证据：（待记录）。
 - [x] **A6** Ticket 状态机七个中间态语义齐备：`open→queued→running→waiting|ready|blocked|failed|cancelled→completed`，
       且 `ready` 不自动等同 `completed`（需 `complete_ticket()`）。
@@ -249,16 +256,35 @@
 
 ### D. WorkerExecutor 与 Event→Report（spec WP-4.4）
 
-- [ ] **D1** `WorkerExecutor` 协议四方法签名与 spec 一致，测试桩可实现（P5 可替换）。
-- [ ] **D2** `AgentExecutor` 由 Assignment 保存 Agent 配置版本与 `worker_run_id`；首次 `stream()`，
-      恢复 `stream_recover()`，绝不手工重放 Event 或复制 state。证据：（待记录）。
-- [ ] **D3** Event→Report 映射：`THINKING`/`TOOL_CALL`/`TOOL_RESULT`→可选 progress，`PAUSED`→waiting/blocked，
-      `DONE`→ready，`ERROR`→failed；默认只在 `TOOL_RESULT` 落 progress。证据：（待记录）。
+- [x] **D1** `WorkerExecutor` 协议四方法签名与 spec 一致，测试桩可实现（P5 可替换）。
+      证据（2026-11-02，Task 7）：`executor.py` 的 `WorkerExecutor` Protocol 含
+      `launch/deliver/cancel/recover` 四方法；`AgentExecutor` 为其实现，`M1` 中后两者显式抛
+      `NotImplementedError`（`test_protocol_methods_not_in_scope_raise_clearly`）；
+      Task 8 的 `StubExecutor` 即"测试桩可实现"的证。
+- [x] **D2** `AgentExecutor` 由 Assignment 保存 Agent 配置版本与 `worker_run_id`；首次 `stream()`，
+      恢复 `stream_recover()`，绝不手工重放 Event 或复制 state。
+      证据（2026-11-02，Task 7）：`launch()` 走 `agent.stream(task)`、`recover()` 以
+      `assignment.worker_run_id` 走 `agent.stream_recover(run_id)`，
+      `test_recover_uses_stream_recover_and_never_replays_events` 断言 `recovered_with == ["r-7"]`
+      且无任何事件重放接口可用；`worker_config_version`/`worker_run_id` 列在 assignments 表，
+      写入方在 Task 9 的 service（executor 只经 `register_run_id` 上报）。
+- [x] **D3** Event→Report 映射：`THINKING`/`TOOL_CALL`/`TOOL_RESULT`→可选 progress，`PAUSED`→waiting/blocked，
+      `DONE`→ready，`ERROR`→failed；默认只在 `TOOL_RESULT` 落 progress。
+      证据（2026-11-02，Task 7）：`_TERMINAL_ACTION` 映射 `DONE→(END,DELIVER)`（Ticket 经状态机
+      `DELIVER→ready`）、`ERROR→(FAIL,FAIL)`；PAUSED 按 reason 分派 `WAIT`/`BLOCK`；
+      `emit_progress_on` 默认 `frozenset({TOOL_RESULT})`，
+      `test_thinking_and_tool_call_do_not_emit_reports_by_default` 证明默认零 progress。
 - [ ] **D4** Worker Event 原样保留为诊断载荷，但 Ticket 状态判定不读自然语言文本。
       验证：断言映射输入为 `EventType`/`AgentStatus`/reason 字段。证据：（待记录）。
-- [ ] **D5** 启动前注册 `worker_run_id`，同 run 禁止两个 executor 并行驱动（L7 同源）。
+- [x] **D5** 启动前注册 `worker_run_id`，同 run 禁止两个 executor 并行驱动（L7 同源）。
+      证据（2026-11-02，Task 7）：`_drive()` 在进入事件流后于第一个 step 边界注册（ADR-04 决策 4.1，
+      `test_run_id_is_registered_once_at_the_first_step_boundary` 断言只注册一次）；
+      "同 run 单驱动"的 DuplicateLaunch 防护落点在 Task 8 `Scheduler._tasks`。
 - [ ] **D6** 初始输入作为 task 进入 Worker；后续输入只在空闲/暂停边界投递，不抢占执行中的 `advance()`。
-- [ ] **D7** 核心测试不需要真实 LLM：FakeExecutor + FakeProvider 覆盖映射、恢复、取消、重复 launch 防护。
+- [x] **D7** 核心测试不需要真实 LLM：FakeExecutor + FakeProvider 覆盖映射、恢复、取消、重复 launch 防护。
+      证据（2026-11-02，Task 7）：`test_agent_executor.py` 7 条全离线（`StubAgent` + `RecordingSink`，
+      无 Provider 实例）；"取消/重复 launch 防护"两半在 Task 8（`StubExecutor` + DuplicateLaunch 用例）
+      闭合，M2 补 `cancel_assignment` 真实现。
 
 ### E. Scheduler、并发与 DAG（spec WP-4.5）
 
@@ -1929,7 +1955,7 @@ C2（Assignment 与 launch effect 同事务）要等 Task 9 的 `queue_ticket()`
   `AgentExecutor(store=..., sink=..., agent_factory=..., clock=..., *, emit_progress_on=frozenset({EventType.TOOL_RESULT}))`
   实现 `async def launch(self, assignment, ticket, inputs)` 与 `async def recover(self, assignment)`。
 
-- [ ] **Step 1: 写测试资产与失败的测试**
+- [x] **Step 1: 写测试资产与失败的测试**
 
 ```python
 # tests/support.py 追加
@@ -2101,12 +2127,12 @@ async def test_protocol_methods_not_in_scope_raise_clearly() -> None:
 （测试里 `AssignmentStatus` 需要从 `orchestration.model` 一并导入；`ValidationError` 断言在
 Task 8 的 scheduler 用例里用到时可删除本行的未使用导入。）
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_agent_executor.py -v`
 Expected: FAIL —`ModuleNotFoundError: ... orchestration.executor`
 
-- [ ] **Step 3: 实现协议与适配器**
+- [x] **Step 3: 实现协议与适配器**
 
 ```python
 # stableagent/orchestration/executor.py
@@ -2292,12 +2318,12 @@ def _run_id_of(agent: Agent, event: Event) -> str | None:
 注意：PAUSED 也 `finish_assignment(END)`——Assignment 结束但 Ticket 进 `waiting`/`blocked`，
 恢复由 `retry_ticket`/`submit_input`（M2）创建新 Assignment。这条语义要在 docstring 里写明。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_agent_executor.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS（7 条全绿）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/executor.py tests/support.py tests/unit/test_agent_executor.py
