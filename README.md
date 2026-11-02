@@ -9,7 +9,7 @@ survives a crash) and *context engineering* (token efficiency you can measure, n
 ![Contract](https://img.shields.io/badge/public_contract-v1.1.0-orange)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Dependencies](https://img.shields.io/badge/runtime%20deps-3-green)
-![Coverage](https://img.shields.io/badge/coverage-98.2%25-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-98.99%25-brightgreen)
 
 A demo proves an Agent *can run*. Production needs an Agent that *finishes* — after a rate limit,
 after a pod eviction, after `kill -9`. StableAgent makes that a property of the runtime instead of
