@@ -6,7 +6,7 @@
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
 > **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m1-skeleton` 上开始，
-> DoD 21/60，里程碑步骤 7/30，M1 任务级步骤 45/50）。**
+> DoD 29/60，里程碑步骤 10/30，M1 任务级步骤 50/50——M1 出口命令全绿，M2 待开工）。**
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6 节的 M1 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
@@ -22,24 +22,38 @@
 
 ## 0. 前置硬边界（违反任一条即不算完成）
 
-- [ ] **L1 `core/loop.py` 零修改**（来源：spec 完成条件、§1 必须保持的边界）。
+- [x] **L1 `core/loop.py` 零修改**（来源：spec 完成条件、§1 必须保持的边界）。
       验收方式：`git diff 46441f0..HEAD -- stableagent/core/loop.py` 输出 0 行，结果记进本条。
-      证据：（待记录）。未满足归属：视为架构越界，回到 ADR-04 重议接缝，不改 loop。
+      证据（2026-11-02，Task 10）：出口实测 0 行输出；另在 `test_orchestration_boundaries.py`
+      落一条离线口径 `test_loop_py_is_byte_identical_to_p4_base`——loop.py 的 sha256
+      （`27b71b61…cfc6299`）与 46441f0 版本逐字节相等，不依赖 CI 里的 git 区间。
+      未满足归属：视为架构越界，回到 ADR-04 重议接缝，不改 loop。
 - [ ] **L2 Core 只允许一处兼容扩展**（来源：ADR-04 决策 6）。
       即 `Agent.resume()/aresume()` 新增 `extra_input: str | None = None`，其余 Core 公共 payload 不变。
       验收方式：`git diff 46441f0..HEAD --stat -- stableagent/core/` 仅出现 `agent.py`；
       `tests/l4_default_stream_dump.py` 重新 dump 与 `tests/fixtures/l4_p2_default_stream.json` 逐字节相等。
       证据：（待记录）。未满足归属：任何额外 Core 改动须先写 superseding ADR。
-- [ ] **L3 运行时依赖仍为 3 个**（`pydantic` / `anyio` / `httpx`）：编排层用 stdlib `sqlite3`，
+- [x] **L3 运行时依赖仍为 3 个**（`pydantic` / `anyio` / `httpx`）：编排层用 stdlib `sqlite3`，
       不引入 `aiosqlite`、ORM 或调度库。验收方式：`pyproject.toml` 的 `dependencies` 条目数不变 +
-      `tests/unit/test_p3_contract.py` 的 L3 断言仍绿。证据：（待记录）。
-- [ ] **L4 依赖方向单向**（来源：spec §1 边界、ADR-04 决策 1）。
+      `tests/unit/test_p3_contract.py` 的 L3 断言仍绿。
+      证据（2026-11-02，Task 10 复核）：`pyproject.toml` `dependencies` 仍为 3 条；编排层只 import
+      stdlib `sqlite3`/`json`（无 `aiosqlite`/ORM/调度库，`store.py` 顶部 import 清单可查）；
+      `test_p3_contract.py` = `2 passed`。
+- [x] **L4 依赖方向单向**（来源：spec §1 边界、ADR-04 决策 1）。
       验收方式：新增 `tests/unit/test_orchestration_boundaries.py`，AST 扫描 `stableagent/core/**`
-      与 `stableagent/context/**`，断言无任何 `orchestration` 导入。证据：（待记录）。
-- [ ] **L5 `AgentState` 与 checkpoint 表不被编排层污染**（来源：spec §1）。
+      与 `stableagent/context/**`，断言无任何 `orchestration` 导入。
+      证据（2026-11-02，Task 1/10 收尾）：`test_core_layers_never_import_orchestration` 按
+      core/context/providers/tools 四包参数化 AST 扫描（比验收面更宽），`test_orchestration_version_is_independent_and_not_reexported`
+      锁版本口径，M1.8 收尾又补了 B7 方向锁与 L1/L5 断言——`test_orchestration_boundaries.py` 共
+      `10 passed`。
+- [x] **L5 `AgentState` 与 checkpoint 表不被编排层污染**（来源：spec §1）。
       `Ticket` 与 Worker `run_id` 不同值，关系只存于 `Assignment.worker_run_id`；P4 表独立且带
       `schema_migrations`。验收方式：`test_orchestration_store.py` 断言 P4 库不含 P2 表名，
-      且 `AgentState.model_dump()` 无 Ticket 字段。证据：（待记录）。
+      且 `AgentState.model_dump()` 无 Ticket 字段。
+      证据（2026-11-02，Task 10）：`test_p4_database_keeps_p2_checkpoint_tables_out`——P4 库用户表
+      恰为约定 8 张、不含 P2 的 `checkpoints`；`test_agent_state_dump_has_no_ticket_fields`——
+      `AgentState.model_dump()` 无任何 Ticket/Mandate 字段；两者连接仅在
+      `Assignment.worker_run_id`（executor 只在 step 边界经 sink 注册它，core 不反向引用）。
 - [x] **L6 事务边界**（来源：spec §1"同一事务写入 + 提交前不得启动 Worker"、ADR-04 决策 3）。
       `Store.transaction()` 重入抛 `ReentrantTransactionError`；事务体内禁止 `await`；
       dispatcher 调 handler 前断言 `not store.in_transaction`；Worker 只能由提交后被领取的
@@ -53,6 +67,8 @@
       （`test_create_then_queue_writes_assignment_and_effect_atomically`），
       `service.py` 不 import executor/scheduler（"service 不触达 executor"断言的静态面，
       `test_orchestration_boundaries.py` 的自动扫描在 Task 10 补）。本条按上述四段证据整条勾。
+      补记（2026-11-02，Task 10）：静态面自动扫描已落 `test_state_side_modules_never_import_scheduler_or_executor`
+      （store/service/outbox 参数化，`3 passed`），同时闭合 B7。
 - [x] **L7 单个 `worker_run_id` 同时最多一个驱动者**（来源：spec §1、WP-4.4.5、ADR-04 决策 4）。
       验收方式：`test_scheduler.py` 断言重复驱动抛 `DuplicateLaunchError`；重启后同一 Assignment
       只有一个在跑的任务句柄。
@@ -63,8 +79,13 @@
       `test_queue_survives_reopen_without_memory_state` 证明重开后队列事实源只在库里、
       `test_orchestration_service.py::test_recover_relaunches_interrupted_assignment`
       证明一个 Assignment 只会重新入队一个带 `:relaunch` 后缀的 effect。
-- [ ] **L8 全部验收离线确定性**（来源：spec §4、使用规则 2）。ID 与时钟经注入，无网络、无真实模型、
-      无墙钟、无随机。验收方式：CI 无 secrets 全绿 + 同一测试连跑两次结果一致。证据：（待记录）。
+- [x] **L8 全部验收离线确定性**（来源：spec §4、使用规则 2）。ID 与时钟经注入，无网络、无真实模型、
+      无墙钟、无随机。验收方式：CI 无 secrets 全绿 + 同一测试连跑两次结果一致。
+      证据（2026-11-02，Task 10）：全量 `.venv/bin/pytest -q` 连跑两次均为
+      `355 passed, 1 skipped`，除耗时外逐字一致；ID/时钟一律注入（单测 FixedClock/SequenceIds，
+      演练子进程 _AdvanceClock/_PrefixedIds）；演练击杀点由"第 2 个报告"这一确定性 stdout 事件
+      触发而非墙钟赌时序。本会话无 secrets 环境全绿即"CI 无 secrets 全绿"的本地等价面，
+      CI 平台复现属 H2（第 1.4 节归 M3）。
 
 ---
 
@@ -130,14 +151,33 @@
       只做标记 + 入队 `:relaunch` effect，状态翻转由 `Scheduler._guarded()` 经
       `service.relaunch_assignment()` 在领取时完成——M1.7"重启一个 Assignment"与 C3
       "终态不复活"同时成立。
-- [ ] **M1.8** `tests/unit/test_orchestration_boundaries.py`（L4 依赖方向扫描 + L1 loop 零 diff 断言）。
-- [ ] **M1.9** `tests/integration/test_ticket_recovery.py` 第一版：子进程建库、跑到 2 个 Assignment 后
+- [x] **M1.8** `tests/unit/test_orchestration_boundaries.py`（L4 依赖方向扫描 + L1 loop 零 diff 断言）。
+      证据（2026-11-02，Task 10）：文件在 Task 1 建立第一版（方向扫描 + 版本口径），Task 10 补
+      `test_loop_py_is_byte_identical_to_p4_base`（L1 哈希口径）、
+      `test_agent_state_dump_has_no_ticket_fields`（L5）与
+      `test_state_side_modules_never_import_scheduler_or_executor`（B7）——整文件 `10 passed`。
+- [x] **M1.9** `tests/integration/test_ticket_recovery.py` 第一版：子进程建库、跑到 2 个 Assignment 后
       SIGKILL，新进程 `recover()` 断言终态正确且已完成 Assignment 不重跑（Provider 调用次数硬断言）。
       沿用 P2 `test_crash_recovery.py` 的"只在编排侧改步数"做法，避免击杀时序竞态。
-- [ ] **M1 出口**：`.venv/bin/pytest -q`（P0–M1 全绿）+ `.venv/bin/mypy` +
+      证据（2026-11-02，Task 10）：见 G2 条目——击杀点由"第 2 个报告行"确定性事件触发；
+      "改步数在编排侧"落实为 Ticket A 无工具步（0 报告、直接 ended，对照不重跑）、B 双工具步
+      （第 2 个报告落库时 Core 已惰性写入 step-1 快照，恢复可续）；provider_calls=[3] 硬断言
+      锁死"恢复只重放 B、A 没有被重启"。
+- [x] **M1 出口**：`.venv/bin/pytest -q`（P0–M1 全绿）+ `.venv/bin/mypy` +
       `.venv/bin/ruff check stableagent tests examples benchmarks` +
       `.venv/bin/ruff format --check stableagent tests examples benchmarks` +
       `git diff 46441f0..HEAD -- stableagent/core/loop.py`（应为空）。
+      证据（2026-11-02，Task 10 实测）：`355 passed, 1 skipped in 7.79s`（含默认 coverage
+      addopts：`TOTAL 99%`，orchestration 各文件 `__init__ 100 / errors 100 / executor 97 /
+      model 98 / outbox 98 / scheduler 100 / service 97 / store 100`，全部 ≥90%）；
+      `Success: no issues found in 36 source files`；`All checks passed!`；
+      `82 files already formatted`；`git diff 46441f0..HEAD -- stableagent/core/loop.py` = 0 行输出。
+      偏差一处：出口还列了 `git diff 46441f0..HEAD --stat -- stableagent/core/` 应为空，但 46441f0
+      是 P2 收口点，P3 允许的 Core 改动（5c57bb3/764c8ee/acdc779 等）都排在它之后，该区间必然非空——
+      "M1 不动 Core"的正确口径改为从 M1 首个提交起算：`git diff 2eaea4f^..HEAD --stat --
+      stableagent/core/` = 空输出，实测通过；L1 另有哈希测试兜底。
+      M1 提交面：`fc1e055`（演练）+ `9ea0c2c`（M1.8/M1.9 收尾件）+ `2a2ca2e`（L5/B6/B7 边界件）——
+      计划写的是单条提交，实测覆盖闸（scheduler 81%→100%）与账本点名断言的补齐使其拆成三条。
 
 ### M2：宽度（输入投递、取消、DAG、真并发、优先级、Core 扩展）
 
@@ -259,12 +299,16 @@
       证据（2026-11-02，Task 6）：`Store.enqueue_effect()` docstring 写明"同 `(kind, idempotency_key)`
       的 pending/retry_wait 只更新 payload/due_at、终态不复活、幂等靠唯一键不靠内存标志"，
       与 ADR-04 第 180 行附近"SQLite 唯一键……非内存标志"的记录一致，无第二处相异表述。
-- [ ] **B6** 重开数据库、schema 迁移、查询排序、分页、并发读取均有离线测试。
-      证据（前半，2026-11-02，Task 4/5）：`test_reopen_loses_nothing_and_unique_keys_hold`（重开无损）、
+- [x] **B6** 重开数据库、schema 迁移、查询排序、分页、并发读取均有离线测试。
+      证据（2026-11-02，Task 4/5/10 合账整条勾）：`test_reopen_loses_nothing_and_unique_keys_hold`（重开无损）、
       `test_all_eight_tables_exist_with_schema_version`（schema 迁移版本行）、
-      `test_runnable_order_is_woken_then_queued_then_created` + `test_pagination_is_stable`（排序/分页）。
-      "并发读取"半边到 Task 10 随 L5/边界断言一并闭合后整条勾。
-- [ ] **B7** Store 层不含调度或策略判断（无 import scheduler/executor）。验证：`test_orchestration_boundaries.py`。
+      `test_runnable_order_is_woken_then_queued_then_created` + `test_pagination_is_stable`（排序/分页）；
+      后半"并发读取"由 `test_concurrent_reader_only_sees_committed_state` 闭合——独立 sqlite 连接
+      与写事务并发，事务内未提交的行读不到、COMMIT 后立即可见。
+- [x] **B7** Store 层不含调度或策略判断（无 import scheduler/executor）。验证：`test_orchestration_boundaries.py`。
+      证据（2026-11-02，Task 10）：`test_state_side_modules_never_import_scheduler_or_executor`
+      以 AST 参数化扫描 `store/service/outbox` 三个状态侧模块，断言 import 面不含
+      `scheduler/executor`——`3 passed`。
 
 ### C. Durable Outbox（spec WP-4.3）
 
@@ -355,8 +399,13 @@
 ### G. 本地接口、示例与故障演练（spec WP-4.6）
 
 - [ ] **G1** `examples/04_ticket_orchestration.py` 可离线运行并打印时间线（父/子 Ticket + 依赖 + 两个脚本 Worker）。
-- [ ] **G2** 集成测试：子进程 + SIGKILL + 新进程 `recover()`，终态正确、已完成 Assignment 不重复启动。
-      证据：（待记录测试名与运行输出）。
+- [x] **G2** 集成测试：子进程 + SIGKILL + 新进程 `recover()`，终态正确、已完成 Assignment 不重复启动。
+      证据（2026-11-02，Task 10）：`tests/integration/test_ticket_recovery.py::test_crash_mid_flight_then_recover_finishes`
+      通过（`1 passed in 3.29s`，连跑两次一致）。子进程 `ticket_recovery_child.py` 双 Ticket 入队，
+      父进程读到第 2 个 `{"report": ...}` 行即 SIGKILL；新进程 `recover()` 打印
+      `{"interrupted_assignments": 1, "reclaimed_effects": 0, "relaunched": 1}`，DB 断言：先 ended 的
+      Assignment 保持 ended、无 running 残留、恢复进程只建 1 个 Worker 且 Provider 调用次数恰为
+      `[3]`（从 step-1 快照续放的确定性步数——M1.9 的"调用次数硬断言"）。
 - [ ] **G3** ADR-04 记录 Ticket/AgentState 边界、状态机、outbox 事务、幂等键、输入投递语义、
       单驱动规则与被否决方案（已成文，实现后把"计划"字样改为实际证据）。
 - [ ] **G4** `OrchestrationService` 十个命令全部可用且非法输入抛稳定 `OrchestrationError` 子类
@@ -2983,7 +3032,7 @@ G4 需要十个命令齐备，属 M2，本任务只落七个，不勾。
   便于测试读到第 2 个 Assignment 报告就击杀）；`test_ticket_recovery.py` 断言恢复后终态与
   "已完成 Assignment 不重跑"。
 
-- [ ] **Step 1: 写子进程入口**
+- [x] **Step 1: 写子进程入口**
 
 ```python
 # tests/integration/ticket_recovery_child.py
@@ -3057,7 +3106,20 @@ async def run(phase: str, db: Path) -> None:
 `_AdvanceClock` 是本文件内的 8 行小类（`now_ms()` 每次调用 +1000ms），让 `due_at` 判定与
 backoff 在单进程内确定性推进；不用 `time`。
 
-- [ ] **Step 2: 写失败的测试**
+落地偏差（2026-11-02，Task 10；均在演练侧，未动生产代码）：
+(1) `SlowProvider` 覆写的是 `acomplete` 而非 `stream`——loop.py:63 走 `acomplete`，覆写 `stream`
+的 sleep 根本不会被触达（首版实测 0.12s 跑完暴露了这点）；
+(2) ID 工厂用文件内 `_PrefixedIds(tag)` 替换 `SequenceIds`——新进程序号从头开始，`recover` 进程
+给 effect/report 发的 id 与旧行撞主键（实测 `sqlite3.IntegrityError: UNIQUE constraint failed:
+effects.id`），带进程标签后确定性且不重演；
+(3) 加 `_drain_to_idle()`——`drain()` 的 `sleep(0)` 推不动真实 sleep 的 Worker，主体会在
+B 挂起时退出、第 2 个报告永远打不出来；轮询到"无在途任务"才继续；
+(4) Worker 脚本：A=`[终答]`（0 报告、直接 ended），B=`[工具, 工具, 终答]`——Core 的惰性落盘在
+"下一个 step 变化"时才写 pending 快照，TOOL_CALL 与 TOOL_RESULT 同属一个 step，B 若只有一轮工具，
+在第 2 个报告上击杀时快照还不存在，recover 实测报"存储中没有 run_id=… 的快照"；
+(5) `Agent` 挂 `EchoTool` registry（示例代码没挂，`tool_response` 找不到工具会走 ERROR 分支）。
+
+- [x] **Step 2: 写失败的测试**
 
 ```python
 # tests/integration/test_ticket_recovery.py
@@ -3134,12 +3196,17 @@ async def test_crash_mid_flight_then_recover_finishes(tmp_path: Path) -> None:
 （测试文件顶部需要 `import sys`；击杀时机由"第 2 个报告"这一确定性事件触发，不用 `sleep` 赌时序——
 这正是 ADR-02 后果 5 的教训。）
 
-- [ ] **Step 3: 跑到红**
+落地偏差（2026-11-02，Task 10）：`seen := seen + [...]` 的 walrus 触发式改写成平铺计数；
+`ended_before` 加了非空守卫（否则"已完成不重跑"在空集上恒真）；按 M1.9 要求补了
+provider_calls=[3] 的调用次数硬断言（数据由子进程 recover 分支打印）。
+
+- [x] **Step 3: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/integration/test_ticket_recovery.py -v`
 Expected: FAIL（子进程入口的 report 行尚未按测试约定输出 JSON `{"report": ...}`）
+实测（2026-11-02）：`1 failed`，正是预期红灯 `AssertionError: 子进程没有产出两个 Assignment 报告就结束了`。
 
-- [ ] **Step 4: 补齐子进程的报告输出**
+- [x] **Step 4: 补齐子进程的报告输出**
 
 在 `ticket_recovery_child.py` 的 `run` 分支里，`service` 与 `store` 之外包一层打印：
 每次 `add_report` 之后（用 `service` 的 `store.list_reports()` 轮询即可，或让 executor 的 sink
@@ -3151,7 +3218,14 @@ Expected: FAIL（子进程入口的 report 行尚未按测试约定输出 JSON `
 Run: `.venv/bin/pytest -q tests/integration/test_ticket_recovery.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 跑 M1 出口命令并提交**
+证据（2026-11-02）：`PrintingSink` 按计划的 8 行装饰器落地——四个方法逐一委托 `service`，
+`add_report` 在其事务提交后打印 `{"report": id, "assignment": ..., "kind": ...}`（flush=True），
+report id 从 `store.list_reports(ticket_id)[-1]` 读回；传给 `AgentExecutor`，生产代码零改动。
+首版脚本（A/B 各一轮工具步）在 recover 段**确定性**失败："存储中没有 run_id=… 的快照"——Core
+惰性落盘在单工具步的进程里还没产生可恢复快照就到了击杀点，按 Step 1 偏差 (4) 改脚本后解决。
+终版实测 `1 passed in 3.29s`，连跑两次除耗时外结果一致。
+
+- [x] **Step 5: 跑 M1 出口命令并提交**
 
 ```bash
 .venv/bin/pytest -q
@@ -3170,6 +3244,19 @@ git commit -m "test: prove the control plane survives a kill mid-flight"
 
 **关闭 DoD：** G2、L1、L3、L4 收尾、L5、L8、B7（M1 出口复核）。H2 的本地门禁每次出口都跑，
 但 H2 属 M3（第 1.4 节），本任务不勾。
+
+实测与偏差（2026-11-02）：
+(1) 出口命令的实际输出已贴进第 1 节 M1 出口条目；`git diff 46441f0..HEAD --stat -- stableagent/core/`
+按"M1 不动 Core"的正确区间 `2eaea4f^..HEAD` 复核为空，已在该条目记偏差。
+(2) 覆盖闸首测 `scheduler.py 81%` 不足 90%——子进程代码不计入 coverage，`drain()`、
+`_guarded()` 的 INTERRUPTED→recover 分支与 ghost effect 只能靠进程内单测覆盖：
+`test_scheduler.py` 增补 3 条用例（drain 跑空、INTERRUPTED 驱动走 recover、未知 Assignment 抛
+`UnknownAssignmentError`）后 `scheduler.py 100%`、全文件 `7 passed`。
+(3) DoD 关闭面里 C2 的 `deliver_input` 半边按计划留 M2；D4、E7、G4、G5、L2 按第 1.4 节本就
+归属 M2（"L2/F3 只有在 M2 的 Core 扩展落地后才可勾选"），均不勾——Step 5"勾为已完成"清单
+与账本实际差集即上述几项。
+(4) 提交按账本口径拆成三条（fc1e055 演练主体 → 9ea0c2c M1.8/M1.9 收尾件 → 2a2ca2e L5/B6/B7 边界件），
+原因见 M1 出口条目。
 
 ---
 
