@@ -631,6 +631,15 @@ checkpoint payload 4,056 → 2,594 字节。恢复耗时本轮为 0.250 / 0.427 
 - 唯一标注是 Actions runner 层面的弃用提示（checkout@v4 / setup-python@v5 的 Node 20、
   ubuntu-latest 迁移到 Ubuntu 26），与 P3 判定无关
 
+### 收口文档提交的第二轮远端验证
+
+回填本记录后，`main` 的顶端是纯文档提交 `92f7ed4`（"docs: close P3 at 52/52 on the remote CI run"）。
+它同样跑完了矩阵：Run <https://github.com/VinderDiesel/StableAgent/actions/runs/41385209888>
+（ID 41385209888，head SHA `92f7ed466b5635b9d2046095cdf458bd1334306e`），
+`quality (3.12)` 与 `quality (3.10)` 两个 job 的全部步骤含心脏闸门均为 success。
+因此本记录描述的 52/52 状态与 `origin/main` 顶端提交是可对照的，不存在"文档宣称已收口、
+而该提交从未被 CI 覆盖"的缝隙。P3 的判定证据仍是 `707dff2` 那一次（代码与测试的最后一次变更）。
+
 ### 收口后的状态
 
 L1~L7、A~H 全部勾选，52/52。P4 的进入条件（`specs/README.md` 规则 4：仅当阶段全部退出条件具备
