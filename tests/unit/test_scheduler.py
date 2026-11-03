@@ -6,7 +6,11 @@ import asyncio
 
 import pytest
 
-from stableagent.orchestration.errors import DuplicateLaunchError, UnknownAssignmentError
+from stableagent.orchestration.errors import (
+    DeferrableEffectError,
+    DuplicateLaunchError,
+    UnknownAssignmentError,
+)
 from stableagent.orchestration.model import (
     AssignmentAction,
     AssignmentStatus,
@@ -449,3 +453,157 @@ async def test_negative_remaining_budget_clamps_to_zero(env) -> None:
     await scheduler.tick()
     await _wait_until_idle(scheduler)
     assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED
+
+
+async def test_inflight_launch_effect_is_not_redispatched(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "在途去重")
+    assignment = store.list_assignments(ticket.id)[0]
+    await scheduler.tick()
+    await asyncio.sleep(0)  # Worker 已起跑并卡在 gate
+    duplicate = store.enqueue_effect(
+        Effect(
+            id="ef-dupe",
+            kind=EffectKind.LAUNCH_ASSIGNMENT,
+            idempotency_key=f"launch:{assignment.id}:1:manual",
+            payload={"assignment_id": assignment.id, "ticket_id": ticket.id},
+            due_at=clock.now_ms(),
+        )
+    )
+    result = await scheduler.tick()
+    assert result.dispatched == 0  # L7：在途不重领
+    assert store.get_effect(duplicate.id).attempts == 0
+    executor.gate.set()
+    await _wait_until_idle(scheduler)
+
+
+async def test_deliver_effect_for_missing_ticket_is_voided(env) -> None:
+    store, _, executor, scheduler, clock = env
+    ghost = store.enqueue_effect(
+        Effect(
+            id="ef-ghost-input",
+            kind=EffectKind.DELIVER_INPUT,
+            idempotency_key="deliver:tk-ghost:1",
+            payload={"ticket_id": "tk-ghost", "input_id": "in-ghost", "sequence": 1},
+            due_at=clock.now_ms(),
+        )
+    )
+    result = await scheduler.tick()
+    assert result.dispatched == 1  # 门控放行、handler 空转领掉
+    assert executor.delivered == []
+    assert store.get_effect(ghost.id).state is EffectState.SUCCEEDED
+
+
+async def test_deliver_waits_while_ticket_has_not_started(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("还没排队")
+    service.submit_input(ticket.id, "太早了")  # OPEN 状态下先落 Input
+    effect = next(e for e in store.due_effects(clock.now_ms()))
+    result = await scheduler.tick()
+    assert result.dispatched == 0  # open/queued：随 launch 一并进 task
+    assert executor.delivered == []
+    assert store.get_effect(effect.id).attempts == 0
+
+
+async def test_cancel_interrupts_a_deadline_bounded_worker(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("有预算也要能取消")
+    service.queue_ticket(ticket.id, deadline_at=clock.now_ms() + 600_000)
+    assignment = store.list_assignments(ticket.id)[0]
+    await scheduler.tick()
+    await asyncio.sleep(0)  # Worker 卡在 gate，等待里带着 deadline 预算
+    service.cancel_ticket(ticket.id)
+    await scheduler.tick()
+    assert executor.cancelled == [assignment.id]
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
+    assert store.get_ticket(ticket.id).status is TicketStatus.CANCELLED
+
+
+async def test_launch_effect_for_cancelled_assignment_is_voided(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "先取消再启动")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.cancel_ticket(ticket.id)
+    service.closeout_cancelled_assignment(assignment.id)
+    launch = next(
+        e for e in store.due_effects(clock.now_ms()) if e.kind is EffectKind.LAUNCH_ASSIGNMENT
+    )
+    await scheduler._handle_launch(launch)
+    assert executor.launched == []  # 已收口：领掉 effect，不再冷启动
+
+
+async def test_cancel_effect_for_missing_assignment_raises(env) -> None:
+    _, _, _, scheduler, clock = env
+    effect = Effect(
+        id="ef-ghost-cancel",
+        kind=EffectKind.CANCEL_ASSIGNMENT,
+        idempotency_key="cancel:as-ghost",
+        payload={"assignment_id": "as-ghost", "ticket_id": "tk-ghost"},
+        due_at=clock.now_ms(),
+    )
+    with pytest.raises(UnknownAssignmentError):
+        await scheduler._handle_cancel(effect)
+
+
+async def test_deliver_without_pending_input_is_a_noop(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "没有待投")
+    effect = Effect(
+        id="ef-empty-deliver",
+        kind=EffectKind.DELIVER_INPUT,
+        idempotency_key=f"deliver:{ticket.id}:99",
+        payload={"ticket_id": ticket.id, "input_id": "in-none", "sequence": 99},
+        due_at=clock.now_ms(),
+    )
+    await scheduler._handle_deliver(effect)  # 被相邻 effect 配对消费
+    assert executor.delivered == []
+
+
+async def test_deliver_without_live_assignment_defers(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "驻留丢了")
+    service.transition_ticket(ticket.id, TicketAction.START)  # queued->running（无 Worker）
+    service.transition_ticket(ticket.id, TicketAction.WAIT)  # running->waiting
+    item = service.submit_input(ticket.id, "找不到 Worker")
+    effect = Effect(
+        id="ef-orphan-deliver",
+        kind=EffectKind.DELIVER_INPUT,
+        idempotency_key=f"deliver:{ticket.id}:{item.sequence}",
+        payload={"ticket_id": ticket.id, "input_id": item.id, "sequence": item.sequence},
+        due_at=clock.now_ms(),
+    )
+    # WAITING 且没有 RUNNING Assignment 的驻留形状不成立：现在不能消费 ≠ 失败
+    with pytest.raises(DeferrableEffectError):
+        await scheduler._handle_deliver(effect)
+
+
+async def test_exhausted_launch_and_cancel_effects_derive_structured_records(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "打满重试")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    service.transition_ticket(ticket.id, TicketAction.START)
+    launch = Effect(
+        id="ef-dead-launch",
+        kind=EffectKind.LAUNCH_ASSIGNMENT,
+        idempotency_key=f"launch:{assignment.id}:1",
+        payload={"assignment_id": assignment.id, "ticket_id": ticket.id},
+        due_at=clock.now_ms(),
+        attempts=3,
+    )
+    scheduler._handle_exhausted(launch, "boom")
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.FAILED
+    assert store.get_ticket(ticket.id).status is TicketStatus.FAILED
+
+    other = _queued(service, "取消也打满")
+    cancel = Effect(
+        id="ef-dead-cancel",
+        kind=EffectKind.CANCEL_ASSIGNMENT,
+        idempotency_key="cancel:as-missing",
+        payload={"assignment_id": "as-missing", "ticket_id": other.id},
+        due_at=clock.now_ms(),
+        attempts=3,
+    )
+    scheduler._handle_exhausted(cancel, "cancel boom")
+    blocked = [r for r in store.list_reports(other.id) if r.kind is ReportKind.BLOCKED]
+    assert blocked and blocked[0].details["effect_id"] == "ef-dead-cancel"
