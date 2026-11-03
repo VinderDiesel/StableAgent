@@ -78,7 +78,10 @@ async def test_run_id_is_registered_once_at_the_first_step_boundary() -> None:
     executor, _ = _executor(events, sink)
     await executor.launch(_assignment(), _ticket(), [])
     assert sink.run_ids == [("as-1", "r-9")]  # 只注册一次
-    assert sink.reports == [("tk-1", "as-1", ReportKind.PROGRESS.value, 1)]
+    assert sink.reports == [
+        ("tk-1", "as-1", ReportKind.PROGRESS.value, 1),
+        ("tk-1", "as-1", ReportKind.READY.value, 2),  # Task 19：终态 ready 报告
+    ]
     assert sink.finished == [("as-1", AssignmentAction.END.value, None)]
     assert sink.ticket_actions == [("tk-1", TicketAction.DELIVER.value)]
 
@@ -125,7 +128,7 @@ async def test_thinking_and_tool_call_do_not_emit_reports_by_default() -> None:
     ]
     executor, _ = _executor(events, sink)
     await executor.launch(_assignment(), _ticket(), [])
-    assert sink.reports == []  # D3：默认零噪音
+    assert [r[2] for r in sink.reports] == [ReportKind.READY.value]  # 中间事件零噪音，只留终态
 
 
 async def test_paused_assignment_parks_instead_of_ending() -> None:
@@ -205,3 +208,23 @@ async def test_cancel_clears_park_without_touching_store() -> None:
     await executor.cancel(_assignment())
     assert executor.parked_assignments() == set()  # executor 只丢驻留，状态写回在 service
     assert sink.finished == []
+
+
+async def test_done_emits_ready_report_with_verbatim_diagnostic_payload() -> None:
+    sink = RecordingSink()
+    done = Event(type=EventType.DONE, data={"status": "succeeded", "text": "全部失败了"}, step=3)
+    executor, _ = _executor([done], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert sink.reports == [("tk-1", "as-1", ReportKind.READY.value, 3)]
+    assert sink.ticket_actions == [("tk-1", TicketAction.DELIVER.value)]  # D4：文本不参与判定
+    assert sink.finished == [("as-1", AssignmentAction.END.value, None)]
+
+
+async def test_error_emits_failed_report_keyed_on_reason_field() -> None:
+    sink = RecordingSink()
+    error = Event(type=EventType.ERROR, data={"reason": "provider_unavailable"}, step=2)
+    executor, _ = _executor([error], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert [r[2] for r in sink.reports] == [ReportKind.FAILED.value]
+    assert sink.finished[0][1] == AssignmentAction.FAIL.value
+    assert sink.finished[0][2] == "provider_unavailable"  # 只读 data.reason，不读正文文本

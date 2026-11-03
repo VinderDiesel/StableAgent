@@ -177,6 +177,17 @@ class AgentExecutor:
                     failure = str(
                         event.data.get("reason") or event.data.get("detail") or "worker_error"
                     )
+                # Report 先于状态转换：sink 顺序即事件顺序（D4：只认结构化字段）
+                self._sink.add_report(
+                    ticket_id=ticket.id,
+                    assignment_id=assignment.id,
+                    kind=ReportKind.READY if event.type is EventType.DONE else ReportKind.FAILED,
+                    summary="worker delivered"
+                    if event.type is EventType.DONE
+                    else f"worker failed: {failure}",
+                    event_step=event.step,
+                    details=dict(event.data),
+                )
                 self._agents.pop(assignment.id, None)
                 self._sink.finish_assignment(assignment.id, assignment_action, failure=failure)
                 self._sink.transition_ticket(ticket.id, ticket_action)

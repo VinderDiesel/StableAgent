@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from stableagent.orchestration.errors import (
@@ -17,7 +19,7 @@ from stableagent.orchestration.model import (
     TicketAction,
     TicketStatus,
 )
-from stableagent.orchestration.service import OrchestrationService
+from stableagent.orchestration.service import OrchestrationService, RecoverySummary, TicketView
 from stableagent.orchestration.store import Store
 from tests.support import FixedClock, SequenceIds
 
@@ -272,3 +274,18 @@ def test_child_tickets_come_only_from_explicit_calls(service) -> None:
     parent = svc.create_ticket("父")
     child = svc.create_ticket("子", parent_id=parent.id)
     assert child.parent_id == parent.id
+
+
+def test_recovery_summary_fields_are_final() -> None:
+    names = [f.name for f in dataclasses.fields(RecoverySummary)]
+    assert names == ["interrupted_assignments", "reclaimed_effects", "relaunched"]
+
+
+def test_list_tickets_filters_pages_and_carries_views(service) -> None:
+    svc, _, _ = service
+    ids = [svc.create_ticket(f"任务{i}") for i in range(6)]
+    for ticket in ids[:4]:
+        svc.queue_ticket(ticket.id)
+    queued = svc.list_tickets(status=TicketStatus.QUEUED, limit=2, offset=2)
+    assert [v.ticket.id for v in queued] == [ids[2].id, ids[3].id]
+    assert all(isinstance(view, TicketView) for view in queued)

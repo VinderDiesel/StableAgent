@@ -351,3 +351,66 @@ async def test_woken_ticket_precedes_older_queued_ones(env) -> None:
     await asyncio.sleep(0)  # 让 create_task 的 Worker 起跑，launch 记录可见
     launched = [store.get_assignment(a).ticket_id for a in executor.launched]
     assert launched == [newer.id]  # E7：唤醒优先，不是 FIFO
+
+
+async def test_committed_effect_survives_reopen_and_dispatches(env, tmp_path) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "提交后崩")
+    assignment = store.list_assignments(ticket.id)[0]
+    effect = store.due_effects(clock.now_ms())[0]
+    store.close()
+    reopened = Store(tmp_path / "sched.db", clock=clock)  # 新"进程"：只重开库
+    try:
+        executor2 = StubExecutor(None)
+        executor2.gate.set()
+        service2 = OrchestrationService(reopened, clock=clock, ids=SequenceIds())
+        scheduler2 = Scheduler(
+            store=reopened, service=service2, executor=executor2, clock=clock, max_concurrency=1
+        )
+        result = await scheduler2.tick()
+        await _wait_until_idle(scheduler2)
+        assert result.dispatched == 1 and executor2.launched == [assignment.id]
+        assert reopened.get_effect(effect.id).state is EffectState.SUCCEEDED
+    finally:
+        reopened.close()
+
+
+async def test_orphan_running_effect_is_reclaimed_then_driven_once(env, tmp_path) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "handler 前崩")
+    assignment = store.list_assignments(ticket.id)[0]
+    effect = store.due_effects(clock.now_ms())[0]
+    with store.transaction():
+        store.update_effect(
+            effect.model_copy(update={"state": EffectState.RUNNING, "attempts": 1})
+        )  # 模拟领取后崩溃
+    store.close()
+    reopened = Store(tmp_path / "sched.db", clock=clock)
+    try:
+        service2 = OrchestrationService(reopened, clock=clock, ids=SequenceIds())
+        summary = service2.recover()  # reclaim 把它放回 pending
+        assert summary.reclaimed_effects == 1
+        executor2 = StubExecutor(service2)
+        executor2.gate.set()
+        scheduler2 = Scheduler(
+            store=reopened, service=service2, executor=executor2, clock=clock, max_concurrency=1
+        )
+        await scheduler2.tick()
+        await _wait_until_idle(scheduler2)
+        assert executor2.launched.count(assignment.id) == 1  # 只重放一次（幂等键兜底）
+    finally:
+        reopened.close()
+
+
+async def test_recover_leaves_ended_tickets_alone(env, tmp_path) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "已完成")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    service.finish_assignment(assignment.id, AssignmentAction.END)
+    service.transition_ticket(ticket.id, TicketAction.START)  # queued->running
+    service.transition_ticket(ticket.id, TicketAction.DELIVER)
+    service.transition_ticket(ticket.id, TicketAction.COMPLETE)
+    summary = service.recover()
+    assert (summary.interrupted_assignments, summary.relaunched) == (0, 0)
+    assert executor.launched == []  # E8：终态不复活

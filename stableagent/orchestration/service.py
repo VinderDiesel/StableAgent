@@ -56,6 +56,8 @@ class TicketView:
 
 @dataclass(frozen=True)
 class RecoverySummary:
+    """字段清单即契约（ADR-04 决策 4）：增删字段都是破坏性变更，测试钉死三项。"""
+
     interrupted_assignments: int
     reclaimed_effects: int
     relaunched: int

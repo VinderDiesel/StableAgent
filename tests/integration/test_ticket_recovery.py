@@ -1,6 +1,7 @@
 """G2：SIGKILL 后新进程 recover() 终态正确，且已完成 Assignment 不重跑。
 
-击杀时机由"第 2 个报告"这一确定性 stdout 事件触发，不用 sleep 赌时序（ADR-02 后果 5）。
+击杀时机由"第 2 个 progress 报告"这一确定性 stdout 事件触发，不用 sleep 赌时序
+（ADR-02 后果 5）。Task 19 起终态也会出报告（A 的 ready），所以只数 progress。
 """
 
 from __future__ import annotations
@@ -41,13 +42,13 @@ async def _run_then_kill(db: Path) -> None:
         if not line.startswith("{"):
             continue
         payload = json.loads(line)
-        if payload.get("report"):
+        if payload.get("report") and payload.get("kind") == "progress":
             reports.append(payload["report"])
             if len(reports) == 2:
-                os.kill(proc.pid, signal.SIGKILL)  # 第 2 个 Assignment 报告之后立即杀
+                os.kill(proc.pid, signal.SIGKILL)  # B 的第 2 个工具步报告之后立即杀
                 assert await proc.wait() != 0
                 return
-    raise AssertionError("子进程没有产出两个 Assignment 报告就结束了")
+    raise AssertionError("子进程没有产出两个 progress 报告就结束了")
 
 
 def _assignment_rows(db: Path) -> list[tuple[str, str]]:

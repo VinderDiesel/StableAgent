@@ -139,8 +139,9 @@ def _build(db: Path, clock: _AdvanceClock, tag: str, built: list[SlowProvider]):
 
     def factory(ticket: Ticket, assignment: Assignment) -> Agent:
         # Core 的惰性落盘在"下一个 step 变化"时才把 pending 状态写快照，TOOL_CALL 与 TOOL_RESULT
-        # 同属一个 step——所以在第 2 个报告上击杀时，被杀 Worker 必须已经跨过两个工具步，
-        # 第一个步的快照才存在。A 没有工具步：不出报告、直接 ended，用作"已完成不重跑"的对照。
+        # 同属一个 step——所以在 B 的第 2 个 progress 报告上击杀时，被杀 Worker 必须已经跨过两个
+        # 工具步，第一个步的快照才存在。A 没有工具步：只出一个终态 ready 报告、直接 ended，
+        # 用作"已完成不重跑"的对照。
         responses = (
             [_final("完成：见报告")]
             if ticket.task.endswith("A")
