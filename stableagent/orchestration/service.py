@@ -33,6 +33,7 @@ from stableagent.orchestration.model import (
     TicketAction,
     TicketInput,
     TicketStatus,
+    assert_assignment_belongs_to,
     next_assignment_status,
     next_ticket_status,
 )
@@ -409,6 +410,9 @@ class OrchestrationService:
         details: dict[str, Any] | None = None,
     ) -> None:
         with self._store.transaction():
+            assert_assignment_belongs_to(
+                self._require(ticket_id), self._require_assignment(assignment_id)
+            )
             self._store.insert_report(
                 Report(
                     id=self._ids.new_id("rp"),

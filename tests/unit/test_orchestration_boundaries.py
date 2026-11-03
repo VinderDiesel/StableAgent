@@ -8,6 +8,7 @@ import pytest
 
 import stableagent
 from stableagent.orchestration import ORCHESTRATION_SCHEMA_VERSION
+from stableagent.orchestration import errors as error_module
 from stableagent.orchestration.errors import IdempotencyConflictError, OrchestrationError
 
 ROOT = pathlib.Path(stableagent.__file__).parent
@@ -72,3 +73,34 @@ def test_scheduler_and_service_never_import_planning() -> None:
     for module in ("service", "scheduler"):
         imports = _imports_of(ROOT / "orchestration" / f"{module}.py")
         assert not any("planning" in item for item in imports)  # E3：无 LLM Planner
+
+
+def _all_error_classes() -> list[type]:
+    return [
+        obj
+        for _, obj in vars(error_module).items()
+        if isinstance(obj, type) and issubclass(obj, OrchestrationError)
+    ]
+
+
+def test_error_code_inventory_is_unique_and_prefixed() -> None:
+    probes = {
+        "IllegalTransitionError": ("m", "c", "a"),
+        "UnknownTicketError": ("x",),
+        "UnknownAssignmentError": ("x",),
+        "ReentrantTransactionError": (),
+        "DuplicateLaunchError": ("x",),
+        "WorkerConfigError": ("x",),
+        "IdempotencyConflictError": ("x", "y"),
+        "CyclicDependencyError": ("x", ["a", "b"]),
+        "DeferrableEffectError": ("x",),
+    }
+    codes = {}
+    for name, args in probes.items():
+        error = getattr(error_module, name)(*args)
+        assert error.code.startswith("orchestration.")
+        tail = error.code.split(".", 1)[1]
+        assert tail.replace("_", "").isalnum() and tail == tail.lower()  # snake_case
+        codes[name] = error.code
+    assert len(set(codes.values())) == len(codes)  # 唯一
+    assert {c.__name__ for c in _all_error_classes()} == {"OrchestrationError", *probes}

@@ -289,3 +289,57 @@ def test_list_tickets_filters_pages_and_carries_views(service) -> None:
     queued = svc.list_tickets(status=TicketStatus.QUEUED, limit=2, offset=2)
     assert [v.ticket.id for v in queued] == [ids[2].id, ids[3].id]
     assert all(isinstance(view, TicketView) for view in queued)
+
+
+def test_all_ten_commands_exist(service) -> None:
+    svc, _, _ = service
+    commands = {
+        "create_ticket",
+        "add_dependency",
+        "queue_ticket",
+        "submit_input",
+        "retry_ticket",
+        "cancel_ticket",
+        "complete_ticket",
+        "recover",
+        "get_ticket",
+        "list_tickets",
+    }
+    assert commands <= {n for n in dir(svc)}
+
+
+def test_cross_ticket_report_is_refused(service) -> None:
+    svc, store, _ = service
+    a = svc.create_ticket("甲")
+    b = svc.create_ticket("乙")
+    svc.queue_ticket(a.id)
+    assignment = store.list_assignments(a.id)[0]
+    with pytest.raises(IllegalTransitionError):
+        svc.add_report(
+            ticket_id=b.id,
+            assignment_id=assignment.id,
+            kind=ReportKind.PROGRESS,
+            summary="挂错了",
+            event_step=1,
+        )
+
+
+def test_stable_error_matrix(service) -> None:
+    svc, _, _ = service
+    cases = [
+        (lambda: svc.queue_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.get_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.submit_input("tk-none", "x"), UnknownTicketError),
+        (lambda: svc.retry_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.cancel_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.add_dependency("tk-none", "tk-none2"), UnknownTicketError),
+    ]
+    for invoke, expected in cases:
+        with pytest.raises(expected):
+            invoke()
+    ticket = svc.create_ticket("排队")
+    svc.queue_ticket(ticket.id)
+    with pytest.raises(IllegalTransitionError):
+        svc.queue_ticket(ticket.id)  # queued 再 queue 非法
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(ticket.id)  # queued 不可 retry
