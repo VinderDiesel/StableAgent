@@ -370,16 +370,21 @@ class Agent:
         finally:
             self._running = False
 
-    async def aresume(self) -> AgentState:
-        return await self._continue(self._resume_state())
+    async def aresume(self, extra_input: str | None = None) -> AgentState:
+        return await self._continue(self._resume_state(extra_input))
 
-    def resume(self) -> AgentState:
-        return asyncio.run(self.aresume())
+    def resume(self, extra_input: str | None = None) -> AgentState:
+        return asyncio.run(self.aresume(extra_input))
 
-    def _resume_state(self) -> AgentState:
+    def _resume_state(self, extra_input: str | None = None) -> AgentState:
         if self._last_state is None or self._last_state.status is not AgentStatus.PAUSED:
             raise ValueError("没有可恢复的 PAUSED 状态")
-        return self._last_state.model_copy(update={"status": AgentStatus.RUNNING})
+        state = self._last_state.model_copy(update={"status": AgentStatus.RUNNING})
+        if extra_input is not None:  # 追加到副本（ADR-04 决策 6：绝不回写 _last_state）
+            state = state.model_copy(
+                update={"messages": [*state.messages, Message(role="user", content=extra_input)]}
+            )
+        return state
 
     # ------------------------------------------------------------------ 崩溃恢复
 

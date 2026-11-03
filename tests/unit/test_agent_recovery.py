@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from stableagent import Agent
 from stableagent.core.checkpoint.storage import MemoryCheckpointStore
 from stableagent.core.state import (
@@ -13,6 +14,7 @@ from stableagent.core.state import (
     Config,
     Event,
     EventType,
+    Message,
 )
 from stableagent.tools.registry import ToolRegistry
 from tests.support import (
@@ -379,3 +381,32 @@ async def test_b5_checkpoint_store_outage_does_not_break_the_run() -> None:
     assert types_of(events)[-1] is EventType.DONE
     assert EventType.CHECKPOINT not in types_of(events)
     assert agent.last_state.status is AgentStatus.SUCCEEDED
+
+
+async def test_aresume_extra_input_appends_user_message_to_state_copy() -> None:
+    provider = FakeProvider([final_response("追加线索后的终答")])
+    agent = Agent(name="extra", provider=provider, config=Config())
+    snapshot = AgentState(
+        run_id="r-extra",
+        agent_name="extra",
+        status=AgentStatus.PAUSED,
+        messages=[Message(role="user", content="原任务")],
+    )
+    agent._last_state = snapshot  # 白盒：构造"已在内存里暂停"的既有形状（与 d1 用例同构）
+    final = await agent.aresume(extra_input="追加线索")
+    assert final.status is AgentStatus.SUCCEEDED
+    sent = provider.calls[-1][0]
+    assert sent[-1] == Message(role="user", content="追加线索")  # 追加在副本末尾
+    assert snapshot.messages[-1].content == "原任务"  # 原快照对象未被就地改写
+
+
+async def test_aresume_without_paused_rejects_extra_input_too() -> None:
+    agent = Agent(name="x", provider=FakeProvider([final_response("用不到")]))
+    with pytest.raises(ValueError, match="没有可恢复的 PAUSED 状态"):
+        await agent.aresume(extra_input="追加线索")
+
+
+def test_resume_sync_signature_accepts_extra_input() -> None:
+    agent = Agent(name="x", provider=FakeProvider([]))
+    with pytest.raises(ValueError, match="没有可恢复的 PAUSED 状态"):
+        agent.resume(extra_input="追加线索")
