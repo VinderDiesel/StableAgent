@@ -66,3 +66,9 @@ def test_agent_state_dump_has_no_ticket_fields() -> None:
 
     dumped = AgentState(run_id="r", agent_name="a", messages=[]).model_dump()
     assert not [key for key in dumped if "ticket" in key.lower() or "mandate" in key.lower()]
+
+
+def test_scheduler_and_service_never_import_planning() -> None:
+    for module in ("service", "scheduler"):
+        imports = _imports_of(ROOT / "orchestration" / f"{module}.py")
+        assert not any("planning" in item for item in imports)  # E3：无 LLM Planner

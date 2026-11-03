@@ -475,6 +475,12 @@ class Store:
         ).fetchall()
         return [_row_to_dependency(row) for row in rows]
 
+    def list_all_dependencies(self) -> list[Dependency]:
+        rows = self._conn.execute(
+            "SELECT * FROM dependencies ORDER BY ticket_id ASC, depends_on_ticket_id ASC"
+        ).fetchall()
+        return [_row_to_dependency(row) for row in rows]
+
     def update_effect(self, effect: Effect) -> Effect:
         self._conn.execute(
             "UPDATE effects SET kind = ?, idempotency_key = ?, payload = ?, state = ?,"

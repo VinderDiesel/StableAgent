@@ -170,3 +170,7 @@ def test_failed_can_retry_but_cancelled_never() -> None:
         next_ticket_status(TicketStatus.CANCELLED, TicketAction.RETRY)
     with pytest.raises(IllegalTransitionError):
         next_ticket_status(TicketStatus.COMPLETED, TicketAction.RETRY)
+
+
+def test_queued_can_be_blocked_by_dependency_policy() -> None:
+    assert next_ticket_status(TicketStatus.QUEUED, TicketAction.BLOCK) is TicketStatus.BLOCKED

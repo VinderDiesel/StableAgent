@@ -298,3 +298,13 @@ def test_update_input_and_get_effect_are_public(store: Store) -> None:
     store.update_input(item.model_copy(update={"state": "consumed", "consumed_at": 2}))
     assert store.list_inputs("tk-1", pending_only=True) == []
     assert store.get_effect("ef-missing") is None
+
+
+def test_list_all_dependencies_is_globally_ordered(store: Store) -> None:
+    store.insert_dependency(Dependency(ticket_id="tk-2", depends_on_ticket_id="tk-1"))
+    store.insert_dependency(Dependency(ticket_id="tk-1", depends_on_ticket_id="tk-0"))
+    listed = store.list_all_dependencies()
+    assert [(d.ticket_id, d.depends_on_ticket_id) for d in listed] == [
+        ("tk-1", "tk-0"),
+        ("tk-2", "tk-1"),
+    ]

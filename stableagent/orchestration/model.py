@@ -193,6 +193,7 @@ _TICKET_TABLE: dict[tuple[TicketStatus, TicketAction], TicketStatus] = {
     (TicketStatus.OPEN, TicketAction.CANCEL): TicketStatus.CANCELLED,
     (TicketStatus.QUEUED, TicketAction.START): TicketStatus.RUNNING,
     (TicketStatus.QUEUED, TicketAction.FAIL): TicketStatus.FAILED,  # 启动前就炸：没有 START 可走
+    (TicketStatus.QUEUED, TicketAction.BLOCK): TicketStatus.BLOCKED,  # 依赖失败策略（E6）
     (TicketStatus.QUEUED, TicketAction.CANCEL): TicketStatus.CANCELLED,
     (TicketStatus.RUNNING, TicketAction.WAIT): TicketStatus.WAITING,
     (TicketStatus.RUNNING, TicketAction.DELIVER): TicketStatus.READY,

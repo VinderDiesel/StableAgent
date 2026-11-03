@@ -69,3 +69,11 @@ class DeferrableEffectError(OrchestrationError):
 
     def __init__(self, reason: str) -> None:
         super().__init__("orchestration.effect_deferred", f"effect 此刻顺延，不是失败：{reason}")
+
+
+class CyclicDependencyError(OrchestrationError):
+    def __init__(self, ticket_id: str, path: list[str]) -> None:
+        super().__init__(
+            "orchestration.cyclic_dependency",
+            f"为 {ticket_id} 添加依赖将成环：{' -> '.join(path)}",
+        )

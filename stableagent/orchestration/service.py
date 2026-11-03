@@ -7,15 +7,20 @@ service 不触达 executor/scheduler（L6 后半）；executor 经 AssignmentSin
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-from stableagent.orchestration.errors import UnknownAssignmentError, UnknownTicketError
+from stableagent.orchestration.errors import (
+    CyclicDependencyError,
+    UnknownAssignmentError,
+    UnknownTicketError,
+)
 from stableagent.orchestration.model import (
     TERMINAL_TICKET_STATUSES,
     Assignment,
     AssignmentAction,
     AssignmentStatus,
     Clock,
+    Dependency,
     Effect,
     EffectKind,
     IdFactory,
@@ -187,6 +192,28 @@ class OrchestrationService:
                     }
                 )
             )
+
+    def add_dependency(
+        self,
+        ticket_id: str,
+        depends_on: str,
+        *,
+        on_failure: Literal["block", "continue"] = "block",
+    ) -> None:
+        """E4：新边并入既有边表后自 depends_on BFS；能回到 ticket_id 即成环（直接/间接同码）。"""
+        dependency = Dependency(
+            ticket_id=ticket_id, depends_on_ticket_id=depends_on, on_failure=on_failure
+        )
+        with self._store.transaction():
+            self._require(ticket_id)
+            self._require(depends_on)
+            edges: dict[str, list[str]] = {}
+            for dep in [*self._store.list_all_dependencies(), dependency]:
+                edges.setdefault(dep.ticket_id, []).append(dep.depends_on_ticket_id)
+            cycle = self._path_to(edges, depends_on, ticket_id)
+            if cycle is not None:
+                raise CyclicDependencyError(ticket_id, [ticket_id, *cycle])
+            self._store.insert_dependency(dependency)
 
     def submit_input(self, ticket_id: str, text: str) -> TicketInput:
         """落库未消费 Input 并入队 deliver_input effect（C2 后半：输入写入后建投递）。"""
@@ -399,9 +426,15 @@ class OrchestrationService:
 
     # ------------------------------------------------------------------ 调度支撑
     def enqueue_work_for_runnable_tickets(self, now_ms: int) -> int:
-        """QUEUED 且有 PENDING Assignment 才算可运行；启动即 Assignment/Ticket -> RUNNING。"""
+        """QUEUED + PENDING Assignment + 依赖全过才可运行；启动即 Assignment/Ticket -> RUNNING。"""
         started = 0
         for ticket in self._store.list_runnable_tickets(now_ms):
+            gate = self._dependency_gate(ticket)
+            if gate == "unmet":
+                continue
+            if gate.startswith("broken:"):
+                self._block_for_dependency(ticket, gate.split(":", 1)[1])
+                continue
             pending = [
                 a
                 for a in self._store.list_assignments(ticket.id)
@@ -527,6 +560,81 @@ class OrchestrationService:
         if not assignments:
             raise UnknownAssignmentError(ticket_id)
         return assignments[-1].id
+
+    @staticmethod
+    def _path_to(edges: dict[str, list[str]], start: str, target: str) -> list[str] | None:
+        """BFS + 父指针：edges[A]=[B] 表示 A 依赖 B。返回 start..target 的链，找不到即 None。"""
+        parents: dict[str, str | None] = {start: None}
+        queue = [start]
+        while queue:
+            node = queue.pop(0)
+            for nxt in edges.get(node, ()):
+                if nxt in parents:
+                    continue
+                parents[nxt] = node
+                if nxt == target:
+                    chain = [nxt]
+                    while parents[chain[-1]] is not None:
+                        chain.append(parents[chain[-1]])  # type: ignore[arg-type]
+                    return list(reversed(chain))
+                queue.append(nxt)
+        return None
+
+    def _dependency_gate(self, ticket: Ticket) -> str:
+        """E5/E6：依赖全 completed 才 ready；上游失败按 on_failure 落 block 或 continue。"""
+        for dep in self._store.list_dependencies(ticket.id):
+            upstream = self._store.get_ticket(dep.depends_on_ticket_id)
+            if upstream is None:
+                return "unmet"
+            if upstream.status is TicketStatus.COMPLETED:
+                continue
+            if upstream.status in TERMINAL_TICKET_STATUSES:
+                if dep.on_failure == "block":
+                    return f"broken:{upstream.id}"
+                self._inject_dependency_failure_input(ticket.id, upstream)
+                continue
+            return "unmet"
+        return "ready"
+
+    def _inject_dependency_failure_input(self, ticket_id: str, upstream: Ticket) -> None:
+        prefix = f"[依赖失败:{upstream.id}]"
+        if any(item.payload.startswith(prefix) for item in self._store.list_inputs(ticket_id)):
+            return  # 同一上游只注入一次：后续轮次直接放行
+        with self._store.transaction():
+            self._store.insert_input(
+                TicketInput(
+                    id=self._ids.new_id("in"),
+                    ticket_id=ticket_id,
+                    sequence=len(self._store.list_inputs(ticket_id)) + 1,
+                    kind="text",
+                    payload=f"{prefix} 上游 {upstream.status.value}",
+                    created_at=self._clock.now_ms(),
+                )
+            )
+
+    def _block_for_dependency(self, ticket: Ticket, dependency_id: str) -> None:
+        with self._store.transaction():
+            now = self._clock.now_ms()
+            if ticket.status is TicketStatus.QUEUED:
+                self._store.update_ticket(
+                    ticket.model_copy(
+                        update={
+                            "status": next_ticket_status(ticket.status, TicketAction.BLOCK),
+                            "ended_at": now,
+                        }
+                    )
+                )
+            self._store.insert_report(
+                Report(
+                    id=self._ids.new_id("rp"),
+                    ticket_id=ticket.id,
+                    assignment_id=self._latest_assignment_id(ticket.id),
+                    kind=ReportKind.BLOCKED,
+                    summary="依赖失败",
+                    created_at=now,
+                    details={"reason": "dependency_failed", "dependency": dependency_id},
+                )
+            )
 
     def _apply(self, ticket_id: str, action: TicketAction, *, summary: str | None = None) -> Ticket:
         with self._store.transaction():

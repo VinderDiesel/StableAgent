@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from stableagent.orchestration.errors import IllegalTransitionError, UnknownTicketError
+from stableagent.orchestration.errors import (
+    CyclicDependencyError,
+    IllegalTransitionError,
+    UnknownTicketError,
+)
 from stableagent.orchestration.model import (
     AssignmentAction,
     AssignmentStatus,
@@ -199,3 +203,72 @@ def test_closeout_is_idempotent(service) -> None:
     svc.closeout_cancelled_assignment(assignment.id)
     svc.closeout_cancelled_assignment(assignment.id)
     assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
+
+
+def test_add_dependency_rejects_direct_and_indirect_cycles(service) -> None:
+    svc, _, _ = service
+    a = svc.create_ticket("A")
+    b = svc.create_ticket("B")
+    c = svc.create_ticket("C")
+    svc.add_dependency(b.id, a.id)
+    with pytest.raises(CyclicDependencyError):
+        svc.add_dependency(a.id, b.id)  # 直接环
+    svc.add_dependency(c.id, b.id)
+    with pytest.raises(CyclicDependencyError):
+        svc.add_dependency(a.id, c.id)  # 间接环 a<-c<-b<-a
+    with pytest.raises(ValueError):
+        svc.add_dependency(a.id, a.id)  # 自指：模型校验仍先于一切
+
+
+def test_downstream_waits_until_all_dependencies_completed(service) -> None:
+    svc, store, clock = service
+    parent = svc.create_ticket("父")
+    child = svc.create_ticket("子", parent_id=parent.id)  # E3：parent 关系只来自显式调用
+    svc.add_dependency(child.id, parent.id)
+    svc.queue_ticket(parent.id)
+    svc.queue_ticket(child.id)
+    assert svc.enqueue_work_for_runnable_tickets(clock.now_ms()) == 1  # 只有父可运行（E5）
+    # enqueue_work 已把父翻成 RUNNING；直接把父推到完成：running->ready->completed
+    svc.transition_ticket(parent.id, TicketAction.DELIVER)
+    svc.complete_ticket(parent.id)
+    assert svc.enqueue_work_for_runnable_tickets(clock.now_ms()) == 1  # 子解锁（E5）
+
+
+def test_block_policy_derives_blocked_with_structured_reason(service) -> None:
+    svc, store, clock = service
+    upstream = svc.create_ticket("上游")
+    downstream = svc.create_ticket("下游")
+    svc.add_dependency(downstream.id, upstream.id, on_failure="block")
+    svc.queue_ticket(upstream.id)
+    svc.transition_ticket(upstream.id, TicketAction.START)
+    svc.transition_ticket(upstream.id, TicketAction.FAIL)
+    svc.queue_ticket(downstream.id)
+    assert svc.enqueue_work_for_runnable_tickets(clock.now_ms()) == 0
+    assert store.get_ticket(downstream.id).status is TicketStatus.BLOCKED
+    blocked = [r for r in store.list_reports(downstream.id) if r.kind is ReportKind.BLOCKED]
+    assert blocked[0].details == {"reason": "dependency_failed", "dependency": upstream.id}
+
+
+def test_continue_policy_injects_failed_dependency_as_input(service) -> None:
+    svc, store, clock = service
+    upstream, downstream = svc.create_ticket("上游"), svc.create_ticket("下游")
+    svc.add_dependency(downstream.id, upstream.id, on_failure="continue")
+    svc.queue_ticket(upstream.id)
+    svc.transition_ticket(upstream.id, TicketAction.START)
+    svc.transition_ticket(upstream.id, TicketAction.FAIL)
+    svc.queue_ticket(downstream.id)
+    assert svc.enqueue_work_for_runnable_tickets(clock.now_ms()) == 1  # 照常开跑
+    payloads = [i.payload for i in store.list_inputs(downstream.id)]
+    assert any(p.startswith("[依赖失败:") for p in payloads)
+    svc.enqueue_work_for_runnable_tickets(clock.now_ms())  # 再跑一轮
+    injected = [
+        item for item in store.list_inputs(downstream.id) if item.payload.startswith("[依赖失败:")
+    ]
+    assert len(injected) == 1  # 只注入一次
+
+
+def test_child_tickets_come_only_from_explicit_calls(service) -> None:
+    svc, _, _ = service
+    parent = svc.create_ticket("父")
+    child = svc.create_ticket("子", parent_id=parent.id)
+    assert child.parent_id == parent.id
