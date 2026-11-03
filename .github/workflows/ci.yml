@@ -26,7 +26,7 @@ jobs:
         run: mypy
       - name: Tests + coverage (全库门槛 70%，见 pyproject fail_under)
         run: pytest --cov=stableagent --cov-report=xml --cov-report=term-missing
-      - name: 心脏模块覆盖率闸门（loop / checkpoint / errors / context / evidence 单独 ≥90%）
+      - name: 心脏模块覆盖率闸门（18 文件：loop/checkpoint/errors/context/evidence/orchestration 各 ≥90%）
         run: |
           python - <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -43,6 +43,12 @@ jobs:
               "context/budget.py",
               "context/engine.py",
               "tools/evidence.py",
+              "orchestration/model.py",
+              "orchestration/store.py",
+              "orchestration/outbox.py",
+              "orchestration/executor.py",
+              "orchestration/scheduler.py",
+              "orchestration/service.py",
           )
           rows = [
               (k.get("filename", ""), 100 * float(k.get("line-rate")))
