@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### 规划与决策（P5 启动，2026-11-03）
+- 新增 [ADR-05](docs/design-decisions/05-guarded-execution.md)（Accepted）：P5 的 10 项决策——
+  `control/execution/integrations` 三新包与依赖方向矩阵（四旧包禁止 import 新包）、Mandate 在
+  P4 原表兼容加 10 列（`p4-local-v1` 旧行不回写）、审批与审计经 `schema_migrations`
+  `p5-control-v1` 同库两新表、Policy 判定在执行层 `RepositoryWorkerExecutor`+`PolicyToolFilter`
+  （Core 零 diff，`permission_hook` 明示为非安全字段）、EffectKind 加 4 类外部写而
+  merge/auto-merge 结构性不进枚举、worktree 命名/复用四要素/环境白名单硬口径、
+  `LocalRestrictedRunner` 文案禁用 "sandbox"（Docker 为唯一安全边界且测试双条件跳过）、
+  MCP stdio 先行且发现≠授权、GitHub 仅显式 API/CLI 请求且幂等键=外部稳定 id+digest、
+  `CONTRACT_VERSION` 保持 `1.1.0`，并记录 8 项被否决方案
+- 新建 [P5 验收账本](docs/acceptance/p5-guarded-execution.md)：心脏边界 L1~L8 + 分组 A~H 共
+  **46 项 DoD**，四里程碑 40 步（M1 授权 9 / M2 隔离执行 12 / M3 MCP+GitHub 12 / M4 收口 7），
+  当前 **0/46、0/40**，状态 Active；任务级 TDD 计划沿用 P4 约定按里程碑追加（M1 开工时建第 5 节）
+- `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 的阶段表同步：
+  P4 行为已完成收口、P5 行为 Active；**P5 能力在 M4 收口前不宣布交付**
+
 ### 实现（P4 编排内核落地并收口，2026-11-03；远端 run 41596839282 双绿）
 - `stableagent/orchestration/` 全量落地：`Ticket`/`Mandate`/`Assignment`/`TicketInput`/`Report`/
   `Dependency`/`Effect` 记录与三个纯转换状态机；stdlib `sqlite3` Store（8 张表 + `schema_migrations`）；

@@ -244,6 +244,11 @@ Assignment
 
 ## P5：受控执行与仓库集成（Guarded Execution & Repository Integration）
 
+**实施入口**：执行顺序（M1 结构化授权 → M2 隔离执行 → M3 MCP 与 GitHub 闭环 → M4 收口）、
+心脏边界 L1~L8 与逐项验收写在 [P5 验收账本](acceptance/p5-guarded-execution.md)；设计取舍与
+否决方案写在 [ADR-05](design-decisions/05-guarded-execution.md)。2026-11-03 计划经维护者确认
+（ADR-05 Accepted），状态 Active。
+
 **目标**：让 Worker 在明确授权和隔离边界内操作真实代码仓库，为长期运行的协作 Agent 建立安全基础。
 
 ### 交付物
