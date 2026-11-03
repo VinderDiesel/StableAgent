@@ -5,12 +5,13 @@
 > + [ADR-02 Checkpoint](../design-decisions/02-checkpoint.md)（`stream_recover` 语义与单快照源）
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
-> **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m2-width` 上完成 M2，
-> DoD 51/60，里程碑步骤 22/30（M1 10/10 + M2 12/12），M2 任务级步骤 60/60——M2 出口命令全绿。
+> **状态：实现完成，待远端 CI 收口（2026-11-03；分支 `feat/p4-m2-width`）。
+> DoD 59/60，里程碑步骤 29/30（M1 10/10 + M2 12/12 + M3 7/8），仅剩 H6（远端 CI 双绿）
+> 与 M3 出口；远端门禁通过前不写"收口"。
 > M1 收口见提交 `fc1e055`/`9ea0c2c`/`2a2ca2e`；M2 收口见第 7 节各 Task 提交（`4b6b583`/`830cb84`
-> 及本出口提交）。M3 计划待出口全绿后追加为第 8 节）。**
+> 及该出口提交）；M3 计划与执行见第 8 节（2026-11-03 追加，40 个 Step）。**
 >
-> 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6/7 节的 M1/M2 任务级步骤），
+> 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6/7/8 节的 M1/M2/M3 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
 > 每个可勾选事项都写明需求来源、可执行验证方法、对应测试或命令、证据占位；全部勾选且第 3 节命令
 > 在 CI 复现后 P4 才算收口。计划推进时把实际输出追加到对应条目，不重写已记录的历史输出。
@@ -18,8 +19,9 @@
 > **计数口径**：DoD = 第 0 节 L1~L8（8 项）+ 第 2 节 A~H（52 项）= 60 项；
 > 里程碑步骤 = M1 的 10 项 + M2 的 12 项 + M3 的 8 项 = 30 项。里程碑与 DoD 的归属见第 1.4 节。
 > 第 6 节的 50 个 Step 是 M1 十个里程碑步骤的执行粒度（Task↔M1.x 对照见第 6 节开头），
-> 第 7 节的 60 个 Step 是 M2 十二个里程碑步骤的执行粒度（Task↔M2.x 对照见第 7 节开头），两批都不计入
-> 30 项；M3 的同粒度计划在 M3 开工前追加为第 8 节。
+> 第 7 节的 60 个 Step 是 M2 十二个里程碑步骤的执行粒度（Task↔M2.x 对照见第 7 节开头），
+> 第 8 节的 40 个 Step 是 M3 八个里程碑步骤的执行粒度（Task↔M3.x 对照见第 8 节开头），三批都不计入
+> 30 项。
 
 ---
 
@@ -312,21 +314,38 @@
 
 ### M3：对外可见与收口
 
-- [ ] **M3.1** `examples/04_ticket_orchestration.py`：父/子 Ticket + 依赖 + 两个脚本 Worker，
+- [x] **M3.1** `examples/04_ticket_orchestration.py`：父/子 Ticket + 依赖 + 两个脚本 Worker，
       打印 Ticket/Assignment/Report 时间线；可离线运行（无 key、无网络），命令写进 docstring。
-- [ ] **M3.2** 示例即测试：`tests/integration/` 或 example 的 selftest 分支覆盖"崩溃→恢复"一次，
+      证据（2026-11-03，Task 23）：`--phase run` 输出 `RUN_RESULT status=completed tickets=2`；
+      `test_run_phase_completes_parent_and_child` 断言父 Ticket 先于子 Ticket 收口。
+- [x] **M3.2** 示例即测试：`tests/integration/` 或 example 的 selftest 分支覆盖"崩溃→恢复"一次，
       防止示例腐烂（P2 的 `examples/03` 先例）。
-- [ ] **M3.3** CI FOCUS 从 12 个文件扩到 18 个：新增 `stableagent/orchestration/{model,store,outbox,executor,scheduler,service}.py`，
+      证据（2026-11-03，Task 24）：`--phase selftest` 在子进程被 SIGKILL 后恢复，末行
+      `SELFTEST ok=True killed=True completed=2`；`test_selftest_phase_kills_then_recovers` 锁死。
+- [x] **M3.3** CI FOCUS 从 12 个文件扩到 18 个：新增 `stableagent/orchestration/{model,store,outbox,executor,scheduler,service}.py`，
       每文件 ≥90%；步骤名同步更新。
-- [ ] **M3.4** 本地矩阵 Python 3.10 / 3.11 / 3.12 等价验证（全量 pytest + 覆盖率 + FOCUS 门槛）。
-- [ ] **M3.5** ADR-04 的"测试与证据"小节把计划条目替换为实际测试名与结果；账本逐项回填证据。
-- [ ] **M3.6** 状态同步：`docs/specs/p4-*.md` 退出清单勾选、`docs/Roadmap.md` P4 段、
+      证据（2026-11-03，Task 25）：`ci.yml` 步骤名与 FOCUS 已同步 18 文件；本地复现输出
+      `BAD: [] MISSING: []`（executor/service 100%/98.3%，其余 ≥98.1%）；
+      `test_ci_focus_gate.py` 锁死路径清单与步骤名。
+- [x] **M3.4** 本地矩阵 Python 3.10 / 3.11 / 3.12 等价验证（全量 pytest + 覆盖率 + FOCUS 门槛）。
+      证据（2026-11-03，Task 26）：三套 `uv venv` 环境均 `423 passed, 1 skipped`、覆盖率 98.46%、
+      18/18 闸门文件 ≥90%；基准用例随后新增，当前全仓 434 项。
+- [x] **M3.5** ADR-04 的"测试与证据"小节把计划条目替换为实际测试名与结果；账本逐项回填证据。
+      证据（2026-11-03，Task 27，提交 `c6dd222`）：ADR-04 状态行改为"实现完成"，"测试与证据"
+      小节含各文件用例数、关键测试名、示例/基准/CI 三条实测；`NO-PLAN-LANGUAGE` 检查通过。
+- [x] **M3.6** 状态同步：`docs/specs/p4-*.md` 退出清单勾选、`docs/Roadmap.md` P4 段、
       `docs/README.md` 阶段索引、`docs/acceptance/README.md` 索引、根 `README.md` 阶段表、`CHANGELOG.md`。
       编排层版本与"未进公共面"的口径要在 CHANGELOG 写明。
-- [ ] **M3.7** 编排基准离线记录：单轮 `tick()` 耗时、`recover()` 到全部 effect 重放的墙钟耗时
+      证据（2026-11-03，Task 29）：规格退出清单 7/7 勾选；四处对外状态同步为"实现完成，待远端 CI
+      收口"；CHANGELOG 增补编排能力、`ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 与
+      "P6 Beta 前不承诺记录结构稳定"。
+- [x] **M3.7** 编排基准离线记录：单轮 `tick()` 耗时、`recover()` 到全部 effect 重放的墙钟耗时
       （注入式 clock 记录、固定 Assignment 规模），写入
       `docs/evidence/p4-orchestration-benchmark-<yyyy-mm-dd>.md` + `benchmarks/` 下的可复跑脚本。
       只报本机量级，不外推性能承诺（对应 ADR-04"同步 sqlite 阻塞循环"那条代价）。
+      证据（2026-11-03，Task 28）：50 Ticket / 100 Assignment、3 轮中位数 `tick` 34.9 ms、
+      `recover` 38.3 ms、`drain` 122.3 ms；见
+      [证据文件](../evidence/p4-orchestration-benchmark-2026-11-03.md)。
 - [ ] **M3 出口**：经维护者确认后提交并推送 `main`，GitHub Actions 3.10 / 3.12 全绿，
       把 run URL/ID 记进本账本，才允许把状态行改为"收口"。
 
@@ -638,20 +657,52 @@
 
 ### H. 质量与发布
 
-- [ ] **H1** spec §4 必测场景七类（模型/Store/Outbox/Executor/Scheduler/集成/回归）逐条有对应测试。
-- [ ] **H2** 本地：`ruff check` 0 error、`ruff format --check` 干净、`mypy` 无问题、`pytest -q` 全绿。
-      证据：（待记录输出）。
-- [ ] **H3** 覆盖率：全库 ≥ 现有基线（P3 收口为 98.99%），orchestration 六个心脏文件每文件 ≥90%。
-      证据：（待记录 `--cov-report=term-missing` 摘录）。
-- [ ] **H4** Python 3.10 / 3.11 / 3.12 本地等价验证通过。证据：（待记录）。
-- [ ] **H5** CI FOCUS 扩到 18 文件并本地复现门槛逻辑；步骤名与注释同步。证据：（待记录）。
+- [x] **H1** spec §4 必测场景七类（模型/Store/Outbox/Executor/Scheduler/集成/回归）逐条有对应测试。
+      证据（2026-11-03，Task 29 对照）：
+
+      | 类别 | 测试文件 | 用例数 | 代表用例 |
+      |---|---|---|---|
+      | 模型 | `tests/unit/test_orchestration_model.py` | 25 | `test_legal_ticket_transitions`、`test_ready_is_not_completed_and_completed_is_terminal` |
+      | Store | `tests/unit/test_orchestration_store.py` | 19 | `test_transaction_is_atomic_for_both_ticket_and_effect`、`test_concurrent_reader_only_sees_committed_state` |
+      | Outbox | `tests/unit/test_outbox.py` | 9 | `test_enqueue_is_idempotent_on_kind_and_key`、`test_handler_never_sees_an_open_transaction` |
+      | Executor | `tests/unit/test_agent_executor.py` | 16 | `test_recover_uses_stream_recover_and_never_replays_events`、`test_deliver_failed_state_ends_assignment_as_failed` |
+      | Scheduler | `tests/unit/test_scheduler.py` | 32 | `test_two_slots_cap_concurrent_workers`、`test_deadline_timeout_cancels_assignment_and_blocks_ticket` |
+      | 集成 | `tests/integration/test_ticket_recovery.py` + `test_ticket_example.py` | 3 | `test_crash_mid_flight_then_recover_finishes`、`test_selftest_phase_kills_then_recovers` |
+      | 回归 | `tests/unit/test_l4_default_equivalence.py` + 全仓 | 2 + 433 passed | `test_p3_default_config_stream_identical_to_p2`、`test_loop_py_is_byte_identical_to_p4_base` |
+
+      另有边界/CI/基准 15 项（`test_orchestration_boundaries.py` 13、`test_ci_focus_gate.py` 1、
+      `test_orchestration_benchmark.py` 1）。
+- [x] **H2** 本地：`ruff check` 0 error、`ruff format --check` 干净、`mypy` 无问题、`pytest -q` 全绿。
+      证据（2026-11-03，Task 29）：
+      `ruff check stableagent tests examples benchmarks` → `All checks passed!`；
+      `ruff format --check …` → `87 files already formatted`；
+      `mypy` → `Success: no issues found in 36 source files`；
+      `pytest -q` → `433 passed, 1 skipped`，覆盖率 99.02%。
+- [x] **H3** 覆盖率：全库 ≥ 现有基线（P3 收口为 98.99%），orchestration 六个心脏文件每文件 ≥90%。
+      证据（2026-11-03，Task 29）：全库 **99.02%**（23 行未覆盖 / 2341 行）；六个心脏文件
+      `executor 100% / model 98.1% / outbox 98.5% / scheduler 100% / service 98.3% / store 100%`。
+      为守住基线补了 8 个尾部用例（提交 `0d08d3d`）：缺 `run_id` 的恢复拒绝、首批输入消费、
+      投递后 FAILED 收口、取消只针对在途 Assignment、无 live Assignment 的排队票、RUNNING 票下
+      非 RUNNING Assignment 的恢复跳过、无 Assignment 的 ready 票拒绝带 summary 完成。
+- [x] **H4** Python 3.10 / 3.11 / 3.12 本地等价验证通过。
+      证据（2026-11-03，Task 26）：`uv venv --python 3.10|3.11|3.12 .matrix/py<v>` + `pip install -e ".[dev]"`；
+      三套环境均 `423 passed, 1 skipped`、覆盖率 98.46%、18/18 FOCUS ≥90%（基准用例随后新增）。
+- [x] **H5** CI FOCUS 扩到 18 文件并本地复现门槛逻辑；步骤名与注释同步。
+      证据（2026-11-03，Task 25 + 29）：`.github/workflows/ci.yml` 的 FOCUS 为 18 项、步骤名为
+      "心脏模块覆盖率闸门（18 文件：loop/checkpoint/errors/context/evidence/orchestration 各 ≥90%）"；
+      本地按同源 heredoc 复现输出 `BAD: [] MISSING: []`；`test_ci_focus_gate.py` 断言 6 个新路径、
+      步骤名与"无未替换 `.py` 占位"。
 - [ ] **H6** 远端 CI 收口：经授权推送后 GitHub Actions 3.10 / 3.12 全绿，run URL/ID 记入本账本，
       且 P0–P3 用例零回归。证据：（待记录）。
-- [ ] **H7** 编排成本的记录方式符合"不把未经复跑的数字写成当前结果"：单轮 `tick()` 与
+- [x] **H7** 编排成本的记录方式符合"不把未经复跑的数字写成当前结果"：单轮 `tick()` 与
       `recover()` 全部 effect 重放的耗时，在固定规模（计划取 50 Ticket / 100 Assignment）下由
       `benchmarks/` 脚本复跑并记入 `docs/evidence/p4-orchestration-benchmark-<yyyy-mm-dd>.md`，
       同时给出命令、参数、日期与波动范围。该记录只为验证 ADR-04 承认的"同步 sqlite 短暂阻塞事件循环"
-      代价，不作任何对外性能承诺。证据：（待记录）。
+      代价，不作任何对外性能承诺。
+      证据（2026-11-03，Task 28）：
+      [p4-orchestration-benchmark-2026-11-03.md](../evidence/p4-orchestration-benchmark-2026-11-03.md)
+      记录 macOS 26.5 arm64 / Python 3.11.15、3 轮中位数与 min/max：`tick` 34.9（27.6–37.1）ms、
+      `recover` 38.3（37.9–45.4）ms、`drain` 122.3（120.6–124.3）ms。
 
 ---
 
@@ -5433,7 +5484,8 @@ git commit -m "docs: close M2 with measured gates and the core-extension evidenc
   - `benchmarks/orchestration_benchmark.py` + `docs/evidence/p4-orchestration-benchmark-2026-11-03.md`
   - ADR-04"测试与证据"实测化、P4 规格退出清单、Roadmap / README / docs 索引 / CHANGELOG 状态同步
   - 账本 M3.1~M3.7、M3 出口、G1、G3、H1~H7 全勾，最终 **DoD 60/60、里程碑 30/30**
-- **DoD 归属**：M3 行 9 项（G1、G3、H1~H7）。Task 29 收口后应为 57/60、里程碑 29/30；
+- **DoD 归属**：M3 行 9 项（G1、G3、H1~H7）。Task 29 收口后应为 59/60、里程碑 29/30
+  （H4/H7 的证据虽在 Task 26/28 产生，勾选统一在 Task 29 的文档同步中补齐）；
   Task 30 远端 CI 绿后补齐 H6 与 M3 出口，达到 60/60、30/30。
 
 ### Global Constraints（M3 特有增量；§6/§7 的全部约束继续生效）
@@ -6008,7 +6060,7 @@ git commit -m "docs: sync the p4 surface and record the quality gates"
 ```
 
 **关闭 DoD：** H1、H2、H3；H5 收口（本地闸门与步骤名同源）；M3.6 可勾
-（DoD 至此 57/60，里程碑 29/30）。
+（DoD 至此 59/60，里程碑 29/30；H4/H7 与 G1/G3 的勾选在本任务一并回填）。
 
 ---
 

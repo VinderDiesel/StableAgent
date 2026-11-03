@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-当前主线是 **P4：Ticket 编排内核**，状态 Active——实施计划已于 2026-11-02 经维护者确认（ADR-04 已接受，实现尚未开始），执行顺序与逐项验收写在 [P4 验收账本](acceptance/p4-ticket-orchestration.md)。**P3：Worker Context Runtime 已 52/52 正式收口**（实现、文档、benchmark、ADR-03 与远端 CI 证据齐备，run 41384598912 在 3.10 / 3.12 全绿）。
+当前主线是 **P4：Ticket 编排内核**，状态"实现完成，待远端 CI 收口"——编排内核、离线示例、基准与 18 文件覆盖率闸门已落地（DoD 59/60、里程碑 29/30），远端门禁通过后才写"收口"；执行顺序与逐项验收写在 [P4 验收账本](acceptance/p4-ticket-orchestration.md)。**P3：Worker Context Runtime 已 52/52 正式收口**（实现、文档、benchmark、ADR-03 与远端 CI 证据齐备，run 41384598912 在 3.10 / 3.12 全绿）。
 
 - 现行范围和阶段顺序：[Roadmap](Roadmap.md)
 - 当前阶段 P4：[实施规格](specs/p4-ticket-orchestration-kernel.md) → [验收账本与实施计划](acceptance/p4-ticket-orchestration.md) → [ADR-04](design-decisions/04-ticket-orchestration.md)
@@ -44,7 +44,7 @@
 | P1 | 完成 | — | [P1 Core Runtime](acceptance/p1-core-runtime.md) | [ADR-01](design-decisions/01-loop-runtime.md) |
 | P2 | 完成 | — | [P2 Checkpoint & Recovery](acceptance/p2-checkpoint-recovery.md) | [ADR-02](design-decisions/02-checkpoint.md) |
 | P3 | 完成 | [P3 Spec](specs/p3-worker-context-runtime.md) | [P3 Acceptance](acceptance/p3-context-engineering.md) | [ADR-03](design-decisions/03-context-engineering.md) |
-| P4 | Active（计划已确认，实现未开始） | [P4 Spec](specs/p4-ticket-orchestration-kernel.md) | [P4 Acceptance](acceptance/p4-ticket-orchestration.md) | [ADR-04](design-decisions/04-ticket-orchestration.md) |
+| P4 | 实现完成，待远端 CI 收口（DoD 59/60，里程碑 29/30） | [P4 Spec](specs/p4-ticket-orchestration-kernel.md) | [P4 Acceptance](acceptance/p4-ticket-orchestration.md) | [ADR-04](design-decisions/04-ticket-orchestration.md) |
 | P5 | 未来 | [P5 Spec](specs/p5-guarded-execution-repository-integration.md) | 待阶段启动时创建 | ADR-05，待创建 |
 | P6 | 未来 | [P6 Spec](specs/p6-single-repository-super-agent-beta.md) | 待阶段启动时创建 | ADR-06，待创建 |
 | P7 | 未来 | [P7 Spec](specs/p7-production-hardening-ecosystem.md) | 待阶段启动时创建 | ADR-07，待创建 |

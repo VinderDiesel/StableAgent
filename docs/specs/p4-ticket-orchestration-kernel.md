@@ -2,7 +2,7 @@
 
 > **阶段定位**：在不接入 GitHub、飞书、MCP、Docker 或长期外部 Source 的前提下，将一次性 Worker run 组织为可持久化、可恢复、可并发调度的长期工作系统。P4 的工作单位是 `Ticket`，执行单位是 `Assignment`，执行内核仍是既有 `stableagent.Agent`。
 >
-> **状态：Active**（2026-11-02 实施计划经维护者确认，实现尚未开始；执行顺序与逐项证据见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)）。
+> **状态：实现完成，待远端 CI 收口**（2026-11-03；退出清单 7/7，DoD 59/60、里程碑 29/30；执行顺序与逐项证据见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)）。
 >
 > **开始条件**：P3 已满足其全部退出条件，并记录最终验证和 benchmark 基线。（已满足：P3 52/52，CI run 41384598912。）
 >
@@ -231,13 +231,20 @@ class WorkerExecutor(Protocol):
 
 ### P4 退出清单
 
-- [ ] Ticket、Assignment、Input、Report、Dependency、Effect 均持久化且有明确状态机。
-- [ ] 每个 Assignment 唯一映射 Worker `run_id`，不污染 `AgentState`。
-- [ ] domain mutation 与 effect enqueue 原子提交；effect 只在提交后执行且可重试、幂等、保序。
-- [ ] Scheduler 实现有限并发、DAG、取消、重试、恢复和失败隔离。
-- [ ] 任意崩溃恢复不会重复已确认 Assignment 或 effect 的外部语义。
-- [ ] 全部测试离线确定性；P0-P3 无回归；新增 orchestration 心脏模块 CI 覆盖率 ≥90%。
-- [ ] ADR-04、CHANGELOG、README 和示例已完成。
+- [x] Ticket、Assignment、Input、Report、Dependency、Effect 均持久化且有明确状态机。
+      （2026-11-03 实测，证据见账本 A1~A6、B1~B2、G4）
+- [x] 每个 Assignment 唯一映射 Worker `run_id`，不污染 `AgentState`。
+      （2026-11-03 实测，证据见账本 A4、D5、L5）
+- [x] domain mutation 与 effect enqueue 原子提交；effect 只在提交后执行且可重试、幂等、保序。
+      （2026-11-03 实测，证据见账本 B3~B4、C1~C7、L6）
+- [x] Scheduler 实现有限并发、DAG、取消、重试、恢复和失败隔离。
+      （2026-11-03 实测，证据见账本 E1~E9）
+- [x] 任意崩溃恢复不会重复已确认 Assignment 或 effect 的外部语义。
+      （2026-11-03 实测，证据见账本 C5、E8、G2）
+- [x] 全部测试离线确定性；P0-P3 无回归；新增 orchestration 心脏模块 CI 覆盖率 ≥90%。
+      （2026-11-03 实测，证据见账本 L8、H4、H5；全仓 433 passed / 1 skipped，覆盖率 99.02%）
+- [x] ADR-04、CHANGELOG、README 和示例已完成。
+      （2026-11-03 实测，证据见账本 G1、G3、M3.1、M3.6）
 
 ## 5. 阶段交接：P5 的输入
 

@@ -4,13 +4,26 @@
 
 ## [Unreleased]
 
-### 实现（P4 里程碑 M1 进行中；进度以[P4 验收账本](docs/acceptance/p4-ticket-orchestration.md)为准，P4 能力未交付）
-- 新增 `stableagent/orchestration/` 包骨架（账本 Task 1）：`ORCHESTRATION_SCHEMA_VERSION = "0.1.0"`
-  只在本包内定义、不在顶层 `stableagent/__init__.py` 重导出；`errors.py` 的
-  `OrchestrationError(ValueError)` 家族（7 个子类）按规格第 6 节第 8 条以 `.code` 提供机器可判的稳定标识
-- 新增 `tests/unit/test_orchestration_boundaries.py`：AST 扫描 `core/context/providers/tools` 四包，
-  断言无任何 `stableagent.orchestration` 导入（L4 依赖方向前半）
-- `stableagent/planning/__init__.py` docstring 去掉"Phase 4 交付"这一不实声明，改指 `orchestration/`
+### 实现（P4 编排内核落地，2026-11-03；进度以[P4 验收账本](docs/acceptance/p4-ticket-orchestration.md)为准，待远端 CI 收口）
+- `stableagent/orchestration/` 全量落地：`Ticket`/`Mandate`/`Assignment`/`TicketInput`/`Report`/
+  `Dependency`/`Effect` 记录与三个纯转换状态机；stdlib `sqlite3` Store（8 张表 + `schema_migrations`）；
+  Durable Outbox（`launch_assignment`/`deliver_input`/`cancel_assignment` 三类 effect，唯一键幂等、
+  注入式 backoff、孤儿回收）；`Scheduler`（信号量并发、DAG `block`/`continue`、三维优先级、取消、
+  恢复、外层 deadline）；`AgentExecutor`（Event→Report 映射、`stream_recover` 续跑、驻留投递）；
+  `OrchestrationService` 十命令与稳定 `OrchestrationError.code`
+- 唯一被批准的 Core 兼容扩展已实现：`Agent.resume()/aresume(extra_input=None)` 在暂停边界追加
+  user 消息；`core/loop.py` 相对 `46441f0` 零 diff，`extra_input=None` 默认路径与 P2 事件流逐字节相等
+  （L4 金标准复验通过）
+- 新增 `examples/04_ticket_orchestration.py`：父/子 Ticket + 依赖 + 两个脚本 Worker 的离线时间线，
+  `--phase selftest` 自带 SIGKILL→`recover()` 闭环；`benchmarks/orchestration_benchmark.py` 记录
+  50 Ticket / 100 Assignment 固定规模的 `tick`/`recover`/`drain` 耗时（证据见 `docs/evidence/`）
+- 测试：编排层单测 128 项（model 25 / store 19 / outbox 9 / executor 16 / scheduler 32 / service 27）、
+  边界与 CI/基准 15 项、集成 3 项；全仓 434 项（433 passed, 1 skipped），覆盖率 99.02%；
+  CI 心脏闸门从 12 扩到 18 文件（新增 orchestration 六模块，各 ≥90%），
+  Python 3.10/3.11/3.12 本地等价验证通过
+- 公开契约口径：`ORCHESTRATION_SCHEMA_VERSION = "0.1.0"` 只在编排包内定义，顶层
+  `stableagent/__init__.py` 不重导出 Ticket/Assignment/Report——**P6 Beta 之前不承诺编排层记录结构
+  稳定**，`CONTRACT_VERSION` 仍为 `1.1.0`（Core 公共 payload 未变）
 
 ### 规划与决策（P4 启动，2026-11-02）
 - 新增 [ADR-04](docs/design-decisions/04-ticket-orchestration.md)（Accepted）：P4 的驱动模型（单一 asyncio
@@ -21,12 +34,14 @@
   并记录 10 项被否决方案
 - 唯一被批准的 Core 兼容扩展：`Agent.resume()/aresume()` 增加 `extra_input: str | None = None`，用于在
   暂停边界投递 `TicketInput`。`core/loop.py` 仍保持零 diff，默认 `None` 时要求 L4 金标准重新 dump
-  逐字节相等。**该扩展尚未实现**，排在里程碑 M2
+  逐字节相等。（2026-11-03 已实现并通过 L4 复验，见上）
 - 新建 [P4 验收账本](docs/acceptance/p4-ticket-orchestration.md)：按维护者确认，实施计划（M1 走骨架 /
   M2 宽度 / M3 收口共 30 个步骤与验证命令）与 DoD（心脏边界 L1~L8 + 分组 A~H，共 60 项，含
-  里程碑归属表）同处一文件，当前 **0/60**，状态 Active
+  里程碑归属表）同处一文件。2026-11-03 状态：DoD **59/60**、里程碑 **29/30**，仅剩
+  H6（远端 CI）与 M3 出口
 - 处置 [ADR-02 后果 4](docs/design-decisions/02-checkpoint.md) 交给"P4 预算治理"的 deadline 遗留项：
-  外层 Assignment deadline（超时 → `cancel_assignment` effect → Ticket `blocked`）归 P4（账本 E9）；
+  外层 Assignment deadline（超时 → Ticket `blocked`，实现为 `expire_assignment()` 直接落态，
+  见 ADR-04）归 P4（账本 E9）；
   内层 Provider 单次调用硬超时因需要改 Core 调用点、与 P4 的"唯一 Core 扩展"约束冲突，改归
   P7 [WP-7.2](docs/specs/p7-production-hardening-ecosystem.md)。ADR-02 原文只追加日期说明、不重写结论；
   [P4 规格](docs/specs/p4-ticket-orchestration-kernel.md) 与
@@ -40,10 +55,10 @@
   10 个 Task / 50 个 TDD Step，每个 Task 写明精确文件、测试名、红绿命令与提交信息，并给出
   Task ↔ 里程碑步骤 ↔ DoD 三项归属对照（第 1.4 节 M1 的 30 项在任务级全部有落点）。
   M2/M3 的同粒度计划在各自里程碑开工前追加为第 7、8 节。M1 自 Task 1（包骨架 + 稳定错误码 +
-  依赖方向边界测试）起在分支 `feat/p4-m1-skeleton` 上推进，逐项证据写进账本对应条目；
-  **P4 能力在 M3 收口前不算交付**
-- `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 阶段表的 P4 行同步为
-  Active；无任何文档把 P4 能力描述为已交付
+  依赖方向边界测试）起在分支 `feat/p4-m1-skeleton` 上推进，M2/M3 在 `feat/p4-m2-width` 上完成，
+  逐项证据写进账本对应条目；**P4 能力在远端 CI 收口前不宣布交付**
+- `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 阶段表的 P4 行在
+  2026-11-03 同步为"实现完成、待远端 CI 收口"；远端门禁通过前不写"收口"
 
 ### 契约扩展（P3 已收口，run 41384598912；全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
 - `ContextConfig` 新增 5 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /

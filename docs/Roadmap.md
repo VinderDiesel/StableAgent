@@ -177,13 +177,14 @@ P3 已正式收口：变更提交并推送 `main` 后，GitHub Actions run 41384
 
 ---
 
-## P4：Ticket 编排内核（Ticket Orchestration Kernel）— Active（计划已确认，实现未开始）
+## P4：Ticket 编排内核（Ticket Orchestration Kernel）— 实现完成，待远端 CI 收口
 
 **实施入口**：执行顺序（M1 端到端骨架 → M2 宽度 → M3 收口）、心脏边界 L1~L8 与逐项验收写在
 [P4 验收账本](acceptance/p4-ticket-orchestration.md)；设计取舍与否决方案写在
-[ADR-04](design-decisions/04-ticket-orchestration.md)。2026-11-02 计划经维护者确认，M1 实现已在分支
-`feat/p4-m1-skeleton` 上开工（逐项证据与进度以账本首屏计数为准），因此本节全部交付物在 M3 收口前
-均不算已交付。已确认的八处口径（完整清单见
+[ADR-04](design-decisions/04-ticket-orchestration.md)。2026-11-02 计划经维护者确认，M1 在分支
+`feat/p4-m1-skeleton`、M2/M3 在 `feat/p4-m2-width` 上完成；截至 2026-11-03 本地 DoD **59/60**、
+里程碑 **29/30**，仅剩 H6（远端 CI 双绿）与 M3 出口，**在远端门禁通过前不宣布收口**。已确认的
+八处口径（完整清单见
 [P4 规格第 6 节](specs/p4-ticket-orchestration-kernel.md)）：单一 asyncio 循环加信号量驱动 Worker、
 `Store.transaction()` 内禁止 `await`（由此"状态与 effect 同事务、提交前不启动 Worker"成为可测性质）、
 `Agent.aresume(extra_input=None)` 作为唯一被批准的 Core 兼容扩展（`core/loop.py` 仍零 diff）、
