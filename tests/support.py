@@ -201,10 +201,12 @@ class StubAgent:
         self.config = config or Config()
         self.recovered_with: list[str | None] = []
         self.resumed_with: list[str | None] = []
+        self.tasks: list[str] = []
         self.next_state: Any = None
         self._run_id = run_id
 
     async def stream(self, task: str) -> AsyncIterator[Any]:
+        self.tasks.append(task)
         for event in self._events:
             yield event
 

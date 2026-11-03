@@ -9,6 +9,7 @@ import pytest
 from stableagent.orchestration.errors import (
     CyclicDependencyError,
     IllegalTransitionError,
+    UnknownAssignmentError,
     UnknownTicketError,
 )
 from stableagent.orchestration.model import (
@@ -343,3 +344,65 @@ def test_stable_error_matrix(service) -> None:
         svc.queue_ticket(ticket.id)  # queued 再 queue 非法
     with pytest.raises(IllegalTransitionError):
         svc.retry_ticket(ticket.id)  # queued 不可 retry
+
+
+def test_cancel_skips_ended_history_and_cancels_live_assignments(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("重试后取消")
+    svc.queue_ticket(ticket.id)
+    first = store.list_assignments(ticket.id)[0]
+    svc.transition_ticket(ticket.id, TicketAction.START)
+    svc.finish_assignment(first.id, AssignmentAction.LAUNCH)
+    svc.finish_assignment(first.id, AssignmentAction.FAIL)
+    svc.transition_ticket(ticket.id, TicketAction.FAIL)
+    svc.retry_ticket(ticket.id)
+    svc.cancel_ticket(ticket.id)
+    cancels = [
+        e
+        for e in store.due_effects(clock.now_ms(), limit=10)
+        if e.kind is EffectKind.CANCEL_ASSIGNMENT
+    ]
+    assert [e.payload["assignment_id"] for e in cancels] == [
+        store.list_assignments(ticket.id)[-1].id
+    ]  # 已 ended 的 attempt 1 被跳过，只在途的 attempt 2 入队
+
+
+def test_fail_unstarted_assignment_for_missing_row_is_a_noop(service) -> None:
+    svc, store, _ = service
+    svc.fail_unstarted_assignment("as-missing", "worker 起不来")
+    assert store.list_tickets() == []  # 无记录可写，幂等空转
+
+
+def test_finish_assignment_with_unknown_id_is_stable_error(service) -> None:
+    svc, _, _ = service
+    with pytest.raises(UnknownAssignmentError):
+        svc.finish_assignment("as-missing", AssignmentAction.END)
+
+
+def test_queued_ticket_without_live_assignment_is_skipped(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("陈旧排队")
+    svc.queue_ticket(ticket.id)
+    assignment = store.list_assignments(ticket.id)[0]
+    svc.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    svc.finish_assignment(assignment.id, AssignmentAction.FAIL)
+    assert svc.enqueue_work_for_runnable_tickets(clock.now_ms()) == 0  # 没有可起的 Assignment
+    assert store.get_ticket(ticket.id).status is TicketStatus.QUEUED
+
+
+def test_recover_skips_a_running_ticket_without_running_assignment(service) -> None:
+    svc, store, _ = service
+    ticket = svc.create_ticket("只翻票未发车")
+    svc.queue_ticket(ticket.id)
+    svc.transition_ticket(ticket.id, TicketAction.START)
+    summary = svc.recover()
+    assert summary.interrupted_assignments == 0
+    assert store.list_assignments(ticket.id)[0].status is AssignmentStatus.PENDING
+
+
+def test_complete_ready_ticket_without_assignments_is_refused(service) -> None:
+    svc, store, _ = service
+    ticket = svc.create_ticket("无 Assignment 的 ready")
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.READY}))
+    with pytest.raises(IllegalTransitionError):
+        svc.complete_ticket(ticket.id, summary="人工通过")

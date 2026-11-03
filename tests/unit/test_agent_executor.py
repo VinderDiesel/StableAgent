@@ -228,3 +228,44 @@ async def test_error_emits_failed_report_keyed_on_reason_field() -> None:
     assert [r[2] for r in sink.reports] == [ReportKind.FAILED.value]
     assert sink.finished[0][1] == AssignmentAction.FAIL.value
     assert sink.finished[0][2] == "provider_unavailable"  # 只读 data.reason，不读正文文本
+
+
+async def test_recover_without_run_id_is_refused_before_factory() -> None:
+    executor, agent = _executor([], RecordingSink())
+    with pytest.raises(WorkerConfigError):
+        await executor.recover(_assignment(), _ticket())  # worker_run_id 仍为 None
+    assert agent.recovered_with == []
+
+
+async def test_launch_consumes_inputs_at_the_first_event_and_joins_task() -> None:
+    sink = RecordingSink()
+    executor, agent = _executor([Event(type=EventType.DONE, data={}, step=1)], sink)
+    item = TicketInput(
+        id="in-1", ticket_id="tk-1", sequence=1, kind="text", payload="线索", created_at=1
+    )
+    await executor.launch(_assignment(), _ticket(), [item])
+    assert sink.consumed == [("tk-1", "in-1")]
+    assert agent.tasks == ["算一遍\n\n线索"]  # 初始输入作为 task 的一部分进入 Worker
+
+
+async def test_deliver_failed_state_ends_assignment_as_failed() -> None:
+    sink = RecordingSink()
+    paused = Event(
+        type=EventType.PAUSED, data={"step": 2, "reason": "needs_human", "detail": None}, step=2
+    )
+    executor, agent = _executor([paused], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    agent.next_state = AgentState(
+        run_id="run-1",
+        agent_name="stub",
+        status=AgentStatus.FAILED,
+        messages=[],
+        error="boom",
+    )
+    item = TicketInput(
+        id="in-1", ticket_id="tk-1", sequence=1, kind="text", payload="继续", created_at=1
+    )
+    await executor.deliver(_assignment(), _ticket(), [item])
+    assert sink.finished == [("as-1", AssignmentAction.FAIL.value, "boom")]
+    assert sink.ticket_actions[-1] == ("tk-1", TicketAction.FAIL.value)
+    assert executor.parked_assignments() == set()
