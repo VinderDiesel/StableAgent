@@ -88,7 +88,7 @@ class OrchestrationService:
             self._store.insert_ticket(ticket)
         return ticket
 
-    def queue_ticket(self, ticket_id: str) -> Ticket:
+    def queue_ticket(self, ticket_id: str, *, deadline_at: int | None = None) -> Ticket:
         """OPEN/BLOCKED -> QUEUED，并在同一事务里建 Assignment + launch effect（C2）。"""
         with self._store.transaction():
             ticket = self._require(ticket_id)
@@ -97,7 +97,12 @@ class OrchestrationService:
             updated = ticket.model_copy(update={"status": status, "queued_at": now})
             self._store.update_ticket(updated)
             attempt = len(self._store.list_assignments(ticket_id)) + 1
-            assignment = Assignment(id=self._ids.new_id("as"), ticket_id=ticket_id, attempt=attempt)
+            assignment = Assignment(
+                id=self._ids.new_id("as"),
+                ticket_id=ticket_id,
+                attempt=attempt,
+                deadline_at=deadline_at,
+            )
             self._store.insert_assignment(assignment)
             self._store.enqueue_effect(
                 Effect(
@@ -251,6 +256,45 @@ class OrchestrationService:
             return item
 
     # ------------------------------------------------------------------ effect 失败派生
+    def expire_assignment(self, assignment_id: str) -> None:
+        """deadline 到期：Assignment 取消（已终态即 no-op）、Ticket running->blocked，报告必写。"""
+        with self._store.transaction():
+            assignment = self._require_assignment(assignment_id)
+            now = self._clock.now_ms()
+            if assignment.status is AssignmentStatus.RUNNING:
+                self._store.update_assignment(
+                    assignment.model_copy(
+                        update={
+                            "status": next_assignment_status(
+                                assignment.status, AssignmentAction.CANCEL
+                            ),
+                            "ended_at": now,
+                        }
+                    )
+                )
+            ticket = self._store.get_ticket(assignment.ticket_id)
+            if ticket is not None and ticket.status is TicketStatus.RUNNING:
+                self._store.update_ticket(
+                    ticket.model_copy(
+                        update={"status": next_ticket_status(ticket.status, TicketAction.BLOCK)}
+                    )
+                )
+            self._store.insert_report(
+                Report(
+                    id=self._ids.new_id("rp"),
+                    ticket_id=assignment.ticket_id,
+                    assignment_id=assignment_id,
+                    kind=ReportKind.BLOCKED,
+                    summary="deadline 超时",
+                    created_at=now,
+                    details={
+                        "reason": "deadline_exceeded",
+                        "assignment_id": assignment_id,
+                        "deadline_at": assignment.deadline_at,
+                    },
+                )
+            )
+
     def fail_unstarted_assignment(
         self, assignment_id: str, detail: str, *, reason: str = "effect_exhausted"
     ) -> None:

@@ -414,3 +414,38 @@ async def test_recover_leaves_ended_tickets_alone(env, tmp_path) -> None:
     summary = service.recover()
     assert (summary.interrupted_assignments, summary.relaunched) == (0, 0)
     assert executor.launched == []  # E8：终态不复活
+
+
+async def test_deadline_timeout_cancels_assignment_and_blocks_ticket(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("超预算的")
+    service.queue_ticket(ticket.id, deadline_at=clock.now_ms())  # 相对时限 0：必然超时
+    assignment = store.list_assignments(ticket.id)[0]
+    await scheduler.tick()
+    await _wait_until_idle(scheduler)  # wait_for 在首个 await 处开火
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
+    assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED
+    blocked = [r for r in store.list_reports(ticket.id) if r.kind is ReportKind.BLOCKED]
+    assert blocked and blocked[0].details["reason"] == "deadline_exceeded"
+    assert executor.launched == [assignment.id]  # 起跑过、被取消，非空转
+
+
+async def test_future_deadline_does_not_interfere(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("按时的")
+    service.queue_ticket(ticket.id, deadline_at=clock.now_ms() + 600_000)
+    assignment = store.list_assignments(ticket.id)[0]
+    await scheduler.tick()
+    executor.gate.set()
+    await _wait_until_idle(scheduler)
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.RUNNING
+    assert store.get_ticket(ticket.id).status is TicketStatus.RUNNING  # stub 未发终态事件
+
+
+async def test_negative_remaining_budget_clamps_to_zero(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("迟到的")
+    service.queue_ticket(ticket.id, deadline_at=clock.now_ms() - 5000)
+    await scheduler.tick()
+    await _wait_until_idle(scheduler)
+    assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED

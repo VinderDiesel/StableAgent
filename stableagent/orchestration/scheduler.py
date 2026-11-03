@@ -107,27 +107,52 @@ class Scheduler:
         self._tasks[assignment.id] = asyncio.create_task(self._guarded(assignment, ticket))
 
     async def _guarded(self, assignment: Assignment, ticket: Ticket) -> None:
+        async with self._slots:  # 槽位由 Worker 任务自己持有，直到终态或异常/超时
+            try:
+                await self._run_with_deadline(assignment, ticket)
+            except asyncio.CancelledError:
+                self._service.finish_assignment(assignment.id, AssignmentAction.CANCEL)
+                raise
+            except Exception as exc:  # Worker 起不来就派生失败：重试一次坏掉的启动没有意义
+                self._service.fail_unstarted_assignment(
+                    assignment.id, repr(exc), reason="worker_start_failed"
+                )
+
+    async def _run_with_deadline(self, assignment: Assignment, ticket: Ticket) -> None:
+        if assignment.deadline_at is None:
+            # 不额外包 task：launch 要落在本次调度内，drain 与测试的 sleep(0) 依赖这一点。
+            await self._run_worker(assignment, ticket)
+            return
+        worker = asyncio.ensure_future(self._run_worker(assignment, ticket))
         try:
-            async with self._slots:  # 槽位由 Worker 任务自己持有，直到终态或异常
-                if assignment.status is AssignmentStatus.INTERRUPTED:
-                    running = self._service.relaunch_assignment(assignment.id)
-                    await self._executor.recover(running, ticket)
-                else:
-                    # D6 首形态（空闲边界=启动点）：未消费 Input 进 task，AgentExecutor 在
-                    # 第一个事件处逐条回写消费。
-                    pending = [
-                        item
-                        for item in self._store.list_inputs(ticket.id, pending_only=True)
-                        if item.kind == "text"
-                    ]
-                    await self._executor.launch(assignment, ticket, pending)
+            # E9：3.10 兼容不用 asyncio.timeout；预算可为 0，所以用 wait() 而不是 wait_for()
+            # ——后者在 timeout=0 时会在协程首步之前就掐掉，Worker 成空转。
+            budget = max((assignment.deadline_at - self._clock.now_ms()) / 1000.0, 0.0)
+            done, _ = await asyncio.wait({worker}, timeout=budget)
         except asyncio.CancelledError:
-            self._service.finish_assignment(assignment.id, AssignmentAction.CANCEL)
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
             raise
-        except Exception as exc:  # Worker 起不来就派生失败：重试一次坏掉的启动没有意义
-            self._service.fail_unstarted_assignment(
-                assignment.id, repr(exc), reason="worker_start_failed"
-            )
+        if worker in done:
+            worker.result()
+            return
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        self._service.expire_assignment(assignment.id)
+
+    async def _run_worker(self, assignment: Assignment, ticket: Ticket) -> None:
+        if assignment.status is AssignmentStatus.INTERRUPTED:
+            running = self._service.relaunch_assignment(assignment.id)
+            await self._executor.recover(running, ticket)
+            return
+        # D6 首形态（空闲边界=启动点）：未消费 Input 进 task，AgentExecutor 在
+        # 第一个事件处逐条回写消费。
+        pending = [
+            item
+            for item in self._store.list_inputs(ticket.id, pending_only=True)
+            if item.kind == "text"
+        ]
+        await self._executor.launch(assignment, ticket, pending)
 
     def _handle_exhausted(self, effect: Effect, detail: str) -> None:
         """真实失败打满重试（Deferrable 永不走到这里）：按 kind 派生结构化记录。"""

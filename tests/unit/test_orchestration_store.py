@@ -308,3 +308,11 @@ def test_list_all_dependencies_is_globally_ordered(store: Store) -> None:
         ("tk-1", "tk-0"),
         ("tk-2", "tk-1"),
     ]
+
+
+def test_deadline_at_round_trips(store: Store) -> None:
+    store.insert_ticket(_ticket("tk-1", status=TicketStatus.QUEUED))
+    assignment = Assignment(id="as-1", ticket_id="tk-1", attempt=1, deadline_at=123)
+    store.insert_assignment(assignment)
+    assert store.get_assignment("as-1").deadline_at == 123
+    assert store.get_assignment("as-1") == assignment
