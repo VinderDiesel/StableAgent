@@ -108,6 +108,38 @@ class OrchestrationService:
     def transition_ticket(self, ticket_id: str, action: TicketAction) -> Ticket:
         return self._apply(ticket_id, action)
 
+    def submit_input(self, ticket_id: str, text: str) -> TicketInput:
+        """落库未消费 Input 并入队 deliver_input effect（C2 后半：输入写入后建投递）。"""
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            if ticket.status in TERMINAL_TICKET_STATUSES:
+                raise IllegalTransitionError("ticket", ticket.status.value, "submit_input")
+            now = self._clock.now_ms()
+            sequence = len(self._store.list_inputs(ticket_id)) + 1
+            item = TicketInput(
+                id=self._ids.new_id("in"),
+                ticket_id=ticket_id,
+                sequence=sequence,
+                kind="text",
+                payload=text,
+                created_at=now,
+            )
+            self._store.insert_input(item)
+            if ticket.status is not TicketStatus.RUNNING:
+                self._store.update_ticket(
+                    ticket.model_copy(update={"woken_at": ticket.woken_at or now})
+                )
+            self._store.enqueue_effect(
+                Effect(
+                    id=self._ids.new_id("ef"),
+                    kind=EffectKind.DELIVER_INPUT,
+                    idempotency_key=f"deliver:{ticket_id}:{sequence}",
+                    payload={"ticket_id": ticket_id, "input_id": item.id, "sequence": sequence},
+                    due_at=now,
+                )
+            )
+            return item
+
     # ------------------------------------------------------------------ sink（executor 的回写面）
     def register_run_id(self, assignment_id: str, worker_run_id: str) -> None:
         with self._store.transaction():
@@ -156,6 +188,23 @@ class OrchestrationService:
                     update={"status": status, "failure": failure, "ended_at": ended_at}
                 )
             )
+
+    def mark_input_consumed(self, ticket_id: str, input_id: str) -> None:
+        """sink 面：投递进 Worker（内存里的 state 副本）之后回写 consumed_at/state。"""
+        with self._store.transaction():
+            for item in self._store.list_inputs(ticket_id):
+                if item.id == input_id:
+                    now = self._clock.now_ms()
+                    self._store.update_input(
+                        item.model_copy(
+                            update={
+                                "delivered_at": item.delivered_at or now,
+                                "consumed_at": now,
+                                "state": "consumed",
+                            }
+                        )
+                    )
+                    return
 
     # ------------------------------------------------------------------ 调度支撑
     def enqueue_work_for_runnable_tickets(self, now_ms: int) -> int:

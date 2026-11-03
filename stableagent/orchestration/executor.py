@@ -54,6 +54,8 @@ class AssignmentSink(Protocol):
 
     def transition_ticket(self, ticket_id: str, action: TicketAction) -> None: ...
 
+    def mark_input_consumed(self, ticket_id: str, input_id: str) -> None: ...
+
 
 class WorkerExecutor(Protocol):
     async def launch(

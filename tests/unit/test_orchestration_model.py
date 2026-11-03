@@ -12,10 +12,12 @@ from stableagent.orchestration.model import (
     AssignmentStatus,
     Dependency,
     EffectAction,
+    EffectKind,
     EffectState,
     Mandate,
     Ticket,
     TicketAction,
+    TicketInput,
     TicketStatus,
     assert_assignment_belongs_to,
     next_assignment_status,
@@ -140,3 +142,19 @@ def test_assignment_cross_record_check_rejects_foreign_ticket() -> None:
     assert_assignment_belongs_to(ticket, Assignment(id="as-1", ticket_id="tk-1", attempt=1))
     with pytest.raises(IllegalTransitionError):
         assert_assignment_belongs_to(ticket, Assignment(id="as-2", ticket_id="tk-other", attempt=1))
+
+
+def test_m2_effect_kinds_close_the_whitelist() -> None:
+    assert {k.value for k in EffectKind} == {
+        "launch_assignment",
+        "deliver_input",
+        "cancel_assignment",
+    }  # C1：P4 不引入 P5/P6 种类，白名单就此闭合
+
+
+def test_deadline_and_input_state_are_defaulted_compat_fields() -> None:
+    assignment = Assignment(id="as-1", ticket_id="tk-1", attempt=1)
+    assert assignment.deadline_at is None  # 加列即默认值：旧构造不受影响（兼容扩展规则）
+    item = TicketInput(id="in-1", ticket_id="tk-1", sequence=1, payload="x", created_at=1)
+    assert item.state == "pending"
+    assert TicketInput.model_validate_json(item.model_dump_json()) == item

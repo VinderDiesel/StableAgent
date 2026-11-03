@@ -251,3 +251,50 @@ def test_concurrent_reader_only_sees_committed_state(tmp_path: Path) -> None:
     finally:
         reader.close()
         handle.close()
+
+
+OLD_ASSIGNMENT_DDL = (
+    "CREATE TABLE assignments (id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL,"
+    " attempt INTEGER NOT NULL, status TEXT NOT NULL, worker_run_id TEXT,"
+    " started_at INTEGER, ended_at INTEGER, checkpoint_run_id TEXT, failure TEXT,"
+    " worker_config_version TEXT, worker_config TEXT NOT NULL DEFAULT '{}',"
+    " UNIQUE (ticket_id, attempt), UNIQUE (worker_run_id))"
+)
+OLD_INPUTS_DDL = (
+    "CREATE TABLE inputs (id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL,"
+    " sequence INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL,"
+    " created_at INTEGER NOT NULL, delivered_at INTEGER, consumed_at INTEGER,"
+    " UNIQUE (ticket_id, sequence))"
+)
+
+
+def test_m2_migration_adds_columns_and_backfills_state(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy.db"
+    conn = sqlite3.connect(legacy)
+    conn.execute(OLD_ASSIGNMENT_DDL)
+    conn.execute(OLD_INPUTS_DDL)
+    conn.execute(
+        "INSERT INTO assignments (id,ticket_id,attempt,status) VALUES ('as-1','tk-1',1,'pending')"
+    )
+    conn.execute(
+        "INSERT INTO inputs (id,ticket_id,sequence,kind,payload,created_at,consumed_at)"
+        " VALUES ('in-1','tk-1',1,'text','x',1,9)"
+    )
+    conn.commit()
+    conn.close()
+    migrated = Store(legacy, clock=FixedClock())  # M1 形状的老库：重开即完成迁移
+    try:
+        columns = {row["name"] for row in migrated._conn.execute("PRAGMA table_info(assignments)")}
+        assert "deadline_at" in columns
+        assert migrated.get_assignment("as-1").deadline_at is None
+        assert migrated.list_inputs("tk-1")[0].state == "consumed"  # 由 consumed_at 回填
+    finally:
+        migrated.close()
+
+
+def test_update_input_and_get_effect_are_public(store: Store) -> None:
+    item = TicketInput(id="in-1", ticket_id="tk-1", sequence=1, payload="x", created_at=1)
+    store.insert_input(item)
+    store.update_input(item.model_copy(update={"state": "consumed", "consumed_at": 2}))
+    assert store.list_inputs("tk-1", pending_only=True) == []
+    assert store.get_effect("ef-missing") is None

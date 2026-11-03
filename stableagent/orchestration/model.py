@@ -63,6 +63,8 @@ class EffectState(str, Enum):
 
 class EffectKind(str, Enum):
     LAUNCH_ASSIGNMENT = "launch_assignment"
+    DELIVER_INPUT = "deliver_input"
+    CANCEL_ASSIGNMENT = "cancel_assignment"
 
 
 class ReportKind(str, Enum):
@@ -105,6 +107,7 @@ class Assignment(BaseModel):
     ended_at: int | None = None
     checkpoint_run_id: str | None = None
     failure: str | None = None
+    deadline_at: int | None = None
     worker_config_version: str | None = None
     worker_config: dict[str, Any] = Field(default_factory=dict)
 
@@ -118,6 +121,7 @@ class TicketInput(BaseModel):
     created_at: int
     delivered_at: int | None = None
     consumed_at: int | None = None
+    state: Literal["pending", "consumed"] = "pending"
 
 
 class Report(BaseModel):

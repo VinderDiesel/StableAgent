@@ -97,3 +97,45 @@ def test_recover_relaunches_interrupted_assignment(service) -> None:
     assert summary.relaunched == 1
     keys = [e.idempotency_key for e in store.due_effects(clock.now_ms())]
     assert f"launch:{assignment.id}:1:relaunch" in keys
+
+
+def test_submit_input_persists_pending_row_and_effect(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("任务")
+    item = svc.submit_input(ticket.id, "追加线索")
+    assert (item.sequence, item.kind, item.state) == (1, "text", "pending")
+    effects = store.due_effects(clock.now_ms())
+    assert [e.kind for e in effects] == [EffectKind.DELIVER_INPUT]
+    assert effects[0].idempotency_key == f"deliver:{ticket.id}:1"
+    svc.mark_input_consumed(ticket.id, item.id)
+    fresh = svc.get_ticket(ticket.id).inputs[0]
+    assert (fresh.state, fresh.consumed_at is not None) == ("consumed", True)
+
+
+def test_submit_input_wakes_queued_and_refuses_terminal(service) -> None:
+    svc, store, _ = service
+    queued = svc.create_ticket("排队")
+    svc.queue_ticket(queued.id)
+    clock = svc._clock
+    other = svc.create_ticket("更早")
+    svc.queue_ticket(other.id)
+    svc.submit_input(queued.id, "唤醒")
+    assert store.get_ticket(queued.id).woken_at is not None  # 优先级键生效（Task 18 锁死）
+    assert [t.id for t in store.list_runnable_tickets(clock.now_ms())] == [queued.id, other.id]
+    done = svc.create_ticket("已完成")
+    svc.queue_ticket(done.id)
+    svc.transition_ticket(done.id, TicketAction.START)
+    svc.transition_ticket(done.id, TicketAction.DELIVER)
+    svc.complete_ticket(done.id)
+    with pytest.raises(IllegalTransitionError):  # 已结束写入（G4 一条腿）
+        svc.submit_input(done.id, "太晚了")
+    with pytest.raises(UnknownTicketError):
+        svc.submit_input("tk-missing", "未知")
+
+
+def test_second_input_sequence_increments_per_ticket(service) -> None:
+    svc, _, _ = service
+    ticket = svc.create_ticket("任务")
+    first = svc.submit_input(ticket.id, "线索一")
+    second = svc.submit_input(ticket.id, "线索二")
+    assert (first.sequence, second.sequence) == (1, 2)

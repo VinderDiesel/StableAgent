@@ -161,6 +161,7 @@ class RecordingSink:
         self.finished: list[tuple[str, str, str | None]] = []
         self.ticket_actions: list[tuple[str, str]] = []
         self.run_ids: list[tuple[str, str]] = []
+        self.consumed: list[tuple[str, str]] = []
 
     def add_report(
         self,
@@ -184,6 +185,9 @@ class RecordingSink:
 
     def transition_ticket(self, ticket_id: str, action: Any) -> None:
         self.ticket_actions.append((ticket_id, action.value))
+
+    def mark_input_consumed(self, ticket_id: str, input_id: str) -> None:
+        self.consumed.append((ticket_id, input_id))
 
 
 class StubAgent:

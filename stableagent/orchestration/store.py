@@ -52,7 +52,8 @@ _SCHEMA: dict[str, str] = {
         "CREATE TABLE IF NOT EXISTS assignments ("
         " id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, attempt INTEGER NOT NULL,"
         " status TEXT NOT NULL, worker_run_id TEXT, started_at INTEGER, ended_at INTEGER,"
-        " checkpoint_run_id TEXT, failure TEXT, worker_config_version TEXT,"
+        " checkpoint_run_id TEXT, failure TEXT, deadline_at INTEGER,"
+        " worker_config_version TEXT,"
         " worker_config TEXT NOT NULL DEFAULT '{}',"
         " UNIQUE (ticket_id, attempt), UNIQUE (worker_run_id))"
     ),
@@ -60,7 +61,8 @@ _SCHEMA: dict[str, str] = {
         "CREATE TABLE IF NOT EXISTS inputs ("
         " id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, sequence INTEGER NOT NULL,"
         " kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL,"
-        " delivered_at INTEGER, consumed_at INTEGER, UNIQUE (ticket_id, sequence))"
+        " delivered_at INTEGER, consumed_at INTEGER, state TEXT NOT NULL DEFAULT 'pending',"
+        " UNIQUE (ticket_id, sequence))"
     ),
     "reports": (
         "CREATE TABLE IF NOT EXISTS reports ("
@@ -122,6 +124,7 @@ def _row_to_assignment(row: sqlite3.Row) -> Assignment:
         ended_at=row["ended_at"],
         checkpoint_run_id=row["checkpoint_run_id"],
         failure=row["failure"],
+        deadline_at=row["deadline_at"],
         worker_config_version=row["worker_config_version"],
         worker_config=json.loads(row["worker_config"]),
     )
@@ -137,6 +140,7 @@ def _row_to_input(row: sqlite3.Row) -> TicketInput:
         created_at=row["created_at"],
         delivered_at=row["delivered_at"],
         consumed_at=row["consumed_at"],
+        state=row["state"],
     )
 
 
@@ -181,6 +185,30 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._in_tx = False
         self._create_schema()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """加列与索引（兼容扩展：全部带默认值）；老库的 inputs.state 由时间戳回填。
+
+        预发布口径：ORCHESTRATION_SCHEMA_VERSION 保持 0.1.0——编排记录尚未对外承诺（ADR-04 决策 1）。
+        """
+        assignment_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(assignments)")
+        }
+        input_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(inputs)")}
+        with self.transaction():
+            if "deadline_at" not in assignment_columns:
+                self._conn.execute("ALTER TABLE assignments ADD COLUMN deadline_at INTEGER")
+            if "state" not in input_columns:
+                self._conn.execute(
+                    "ALTER TABLE inputs ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'"
+                )
+                self._conn.execute(
+                    "UPDATE inputs SET state = 'consumed' WHERE consumed_at IS NOT NULL"
+                )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS effects_due ON effects (due_at, kind, id)"
+            )
 
     def _create_schema(self) -> None:
         with self.transaction():
@@ -309,8 +337,8 @@ class Store:
         self._conn.execute(
             "INSERT INTO assignments"
             " (id, ticket_id, attempt, status, worker_run_id, started_at, ended_at,"
-            " checkpoint_run_id, failure, worker_config_version, worker_config)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " checkpoint_run_id, failure, deadline_at, worker_config_version, worker_config)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 assignment.id,
                 assignment.ticket_id,
@@ -321,6 +349,7 @@ class Store:
                 assignment.ended_at,
                 assignment.checkpoint_run_id,
                 assignment.failure,
+                assignment.deadline_at,
                 assignment.worker_config_version,
                 json.dumps(assignment.worker_config, sort_keys=True, ensure_ascii=False),
             ),
@@ -330,7 +359,8 @@ class Store:
         self._conn.execute(
             "UPDATE assignments SET ticket_id = ?, attempt = ?, status = ?,"
             " worker_run_id = ?, started_at = ?, ended_at = ?, checkpoint_run_id = ?,"
-            " failure = ?, worker_config_version = ?, worker_config = ? WHERE id = ?",
+            " failure = ?, deadline_at = ?, worker_config_version = ?, worker_config = ?"
+            " WHERE id = ?",
             (
                 assignment.ticket_id,
                 assignment.attempt,
@@ -340,6 +370,7 @@ class Store:
                 assignment.ended_at,
                 assignment.checkpoint_run_id,
                 assignment.failure,
+                assignment.deadline_at,
                 assignment.worker_config_version,
                 json.dumps(assignment.worker_config, sort_keys=True, ensure_ascii=False),
                 assignment.id,
@@ -385,8 +416,9 @@ class Store:
     def insert_input(self, ticket_input: TicketInput) -> None:
         self._conn.execute(
             "INSERT INTO inputs"
-            " (id, ticket_id, sequence, kind, payload, created_at, delivered_at, consumed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, ticket_id, sequence, kind, payload, created_at,"
+            " delivered_at, consumed_at, state)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ticket_input.id,
                 ticket_input.ticket_id,
@@ -396,11 +428,30 @@ class Store:
                 ticket_input.created_at,
                 ticket_input.delivered_at,
                 ticket_input.consumed_at,
+                ticket_input.state,
             ),
         )
 
+    def update_input(self, ticket_input: TicketInput) -> TicketInput:
+        self._conn.execute(
+            "UPDATE inputs SET ticket_id = ?, sequence = ?, kind = ?, payload = ?,"
+            " created_at = ?, delivered_at = ?, consumed_at = ?, state = ? WHERE id = ?",
+            (
+                ticket_input.ticket_id,
+                ticket_input.sequence,
+                ticket_input.kind,
+                ticket_input.payload,
+                ticket_input.created_at,
+                ticket_input.delivered_at,
+                ticket_input.consumed_at,
+                ticket_input.state,
+                ticket_input.id,
+            ),
+        )
+        return ticket_input
+
     def list_inputs(self, ticket_id: str, *, pending_only: bool = False) -> list[TicketInput]:
-        where = "ticket_id = ? AND delivered_at IS NULL" if pending_only else "ticket_id = ?"
+        where = "ticket_id = ? AND state = 'pending'" if pending_only else "ticket_id = ?"
         rows = self._conn.execute(
             f"SELECT * FROM inputs WHERE {where} ORDER BY sequence ASC", (ticket_id,)
         ).fetchall()
@@ -442,6 +493,9 @@ class Store:
         return effect
 
     def _effect_row(self, effect_id: str) -> Effect | None:
+        return self.get_effect(effect_id)
+
+    def get_effect(self, effect_id: str) -> Effect | None:
         row = self._conn.execute("SELECT * FROM effects WHERE id = ?", (effect_id,)).fetchone()
         return _row_to_effect(row) if row else None
 
