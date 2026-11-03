@@ -1,6 +1,6 @@
 # ADR-04：Ticket 编排内核与 Durable Outbox（P4）
 
-- 状态：Accepted（2026-11-03 实现并收口，远端 CI run 41596456428 双绿，证据见账本）
+- 状态：Accepted（2026-11-03 实现并收口，远端 CI run 41596839282 双绿，证据见账本）
 - 日期：2026-11-02（决策）；2026-11-03（实测证据回填）
 - 关联：[公共契约](00-contracts.md)、[ADR-01 Loop](01-loop-runtime.md)、[ADR-02 Checkpoint](02-checkpoint.md)、[ADR-03 Context](03-context-engineering.md)、[P4 实施规格](../specs/p4-ticket-orchestration-kernel.md)、[P4 验收账本](../acceptance/p4-ticket-orchestration.md)
 - 代码入口：`stableagent/orchestration/{model,store,outbox,executor,scheduler,service,errors}.py`、`stableagent/core/agent.py`

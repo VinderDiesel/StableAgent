@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-### 实现（P4 编排内核落地并收口，2026-11-03；远端 run 41596456428 双绿）
+### 实现（P4 编排内核落地并收口，2026-11-03；远端 run 41596839282 双绿）
 - `stableagent/orchestration/` 全量落地：`Ticket`/`Mandate`/`Assignment`/`TicketInput`/`Report`/
   `Dependency`/`Effect` 记录与三个纯转换状态机；stdlib `sqlite3` Store（8 张表 + `schema_migrations`）；
   Durable Outbox（`launch_assignment`/`deliver_input`/`cancel_assignment` 三类 effect，唯一键幂等、
@@ -38,7 +38,7 @@
 - 新建 [P4 验收账本](docs/acceptance/p4-ticket-orchestration.md)：按维护者确认，实施计划（M1 走骨架 /
   M2 宽度 / M3 收口共 30 个步骤与验证命令）与 DoD（心脏边界 L1~L8 + 分组 A~H，共 60 项，含
   里程碑归属表）同处一文件。2026-11-03 收口：DoD **60/60**、里程碑 **30/30**，
-  远端 CI run 41596456428 在 Python 3.10 / 3.12 双绿
+  远端 CI run 41596839282 在 Python 3.10 / 3.12 双绿
 - 处置 [ADR-02 后果 4](docs/design-decisions/02-checkpoint.md) 交给"P4 预算治理"的 deadline 遗留项：
   外层 Assignment deadline（超时 → Ticket `blocked`，实现为 `expire_assignment()` 直接落态，
   见 ADR-04）归 P4（账本 E9）；
@@ -58,7 +58,7 @@
   依赖方向边界测试）起在分支 `feat/p4-m1-skeleton` 上推进，M2/M3 在 `feat/p4-m2-width` 上完成，
   逐项证据写进账本对应条目；**P4 能力在远端 CI 收口前不宣布交付**
 - `docs/README.md`、`docs/Roadmap.md`、`docs/acceptance/README.md`、根 README 阶段表的 P4 行在
-  2026-11-03 同步为已收口（远端 run 41596456428 双绿）
+  2026-11-03 同步为已收口（远端 run 41596839282 双绿）
 
 ### 契约扩展（P3 已收口，run 41384598912；全部非破坏性，`CONTRACT_VERSION` 仍为 1.1.0）
 - `ContextConfig` 新增 5 个带默认值字段：`keep_recent_messages=8` / `max_summary_chars=1200` /

@@ -6,7 +6,7 @@
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
 > **状态：已收口（2026-11-03；`feat/p4-m2-width` 快进合并至 `main`，远端 CI
-> [run 41596456428](https://github.com/VinderDiesel/StableAgent/actions/runs/41596456428)
+> [run 41596839282](https://github.com/VinderDiesel/StableAgent/actions/runs/41596839282)
 > 在 Python 3.10 / 3.12 双绿）。DoD 60/60，里程碑步骤 30/30（M1 10/10 + M2 12/12 + M3 8/8）。**
 > M1 收口见提交 `fc1e055`/`9ea0c2c`/`2a2ca2e`；M2 收口见第 7 节各 Task 提交（`4b6b583`/`830cb84`
 > 及该出口提交）；M3 计划与执行见第 8 节（2026-11-03 追加，40 个 Step）。
@@ -349,7 +349,8 @@
 - [x] **M3 出口**：经维护者确认后提交并推送 `main`，GitHub Actions 3.10 / 3.12 全绿，
       把 run URL/ID 记进本账本，才允许把状态行改为"收口"。
       证据（2026-11-03，Task 30）：维护者授权后快进合并 `fdea014..9f6f33d` 并推送；
-      run 41596456428 双 job 全绿（见 H6），首屏据此改为"已收口"，DoD 60/60、里程碑 30/30。
+      run 41596456428 双 job 全绿；回填提交 `46c6e8e` 的 run 41596839282 同样双绿（见 H6），
+      首屏据此改为"已收口"，DoD 60/60、里程碑 30/30。
 
 ### 1.4 里程碑与 DoD 归属
 
@@ -700,6 +701,9 @@
       （`fdea014..9f6f33d`）并推送；[run 41596456428](https://github.com/VinderDiesel/StableAgent/actions/runs/41596456428)
       两个 job 全绿——quality (3.10) 41s、quality (3.12) 34s；两 job 均 `433 passed, 1 skipped`、
       覆盖率 99.02%、18/18 FOCUS ≥90%；P0–P3 用例如数通过（含 L4 金标准），零回归。
+      回填提交 `46c6e8e` 的 [run 41596839282](https://github.com/VinderDiesel/StableAgent/actions/runs/41596839282)
+      同样双 job 全绿（3.10 16.14s / 3.12 12.88s 测试段），`433 passed, 1 skipped`、99.02%、
+      18/18 不变；其后的 run-ID 同步提交仅改文档、不改被测树。
 - [x] **H7** 编排成本的记录方式符合"不把未经复跑的数字写成当前结果"：单轮 `tick()` 与
       `recover()` 全部 effect 重放的耗时，在固定规模（计划取 50 Ticket / 100 Assignment）下由
       `benchmarks/` 脚本复跑并记入 `docs/evidence/p4-orchestration-benchmark-<yyyy-mm-dd>.md`，
@@ -5472,7 +5476,7 @@ git commit -m "docs: close M2 with measured gates and the core-extension evidenc
 
 > **状态：已执行并收口（2026-11-03）。** 8 个 Task / 40 个 Step 全部完成：M3.1~M3.7、G1、G3、
 > H1~H7 与 M3 出口全勾，最终 **DoD 60/60、里程碑 30/30**；Task 30 经维护者授权合并并推送
-> `main`，远端 CI run 41596456428 双绿。前置：M2 出口全绿（2026-11-03：DoD 51/60、里程碑 22/30、
+> `main`，远端 CI run 41596839282 双绿。前置：M2 出口全绿（2026-11-03：DoD 51/60、里程碑 22/30、
 > `418 passed, 1 skipped`、orchestration 八文件 93–100%、L4 `L4-BYTE-EQUAL`、
 > `stableagent/core/` diff 仅 `agent.py`）。本节把 M3 的 8 个里程碑步骤
 > （M3.1~M3.7 + M3 出口）展开为 **8 个 Task / 40 个 Step**；任务级步骤不计入 30 项里程碑计数。

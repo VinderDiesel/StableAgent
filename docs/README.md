@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-当前主线是 **P4：Ticket 编排内核**，状态"已收口"——编排内核、离线示例、基准与 18 文件覆盖率闸门均已落地（DoD 60/60、里程碑 30/30），远端 CI run 41596456428 在 Python 3.10 / 3.12 双绿；执行顺序与逐项验收写在 [P4 验收账本](acceptance/p4-ticket-orchestration.md)。**P3：Worker Context Runtime 已 52/52 正式收口**（实现、文档、benchmark、ADR-03 与远端 CI 证据齐备，run 41384598912 在 3.10 / 3.12 全绿）。
+当前主线是 **P4：Ticket 编排内核**，状态"已收口"——编排内核、离线示例、基准与 18 文件覆盖率闸门均已落地（DoD 60/60、里程碑 30/30），远端 CI run 41596839282 在 Python 3.10 / 3.12 双绿；执行顺序与逐项验收写在 [P4 验收账本](acceptance/p4-ticket-orchestration.md)。**P3：Worker Context Runtime 已 52/52 正式收口**（实现、文档、benchmark、ADR-03 与远端 CI 证据齐备，run 41384598912 在 3.10 / 3.12 全绿）。
 
 - 现行范围和阶段顺序：[Roadmap](Roadmap.md)
 - 当前阶段 P4：[实施规格](specs/p4-ticket-orchestration-kernel.md) → [验收账本与实施计划](acceptance/p4-ticket-orchestration.md) → [ADR-04](design-decisions/04-ticket-orchestration.md)

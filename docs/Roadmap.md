@@ -183,8 +183,8 @@ P3 已正式收口：变更提交并推送 `main` 后，GitHub Actions run 41384
 [P4 验收账本](acceptance/p4-ticket-orchestration.md)；设计取舍与否决方案写在
 [ADR-04](design-decisions/04-ticket-orchestration.md)。2026-11-02 计划经维护者确认，M1 在分支
 `feat/p4-m1-skeleton`、M2/M3 在 `feat/p4-m2-width` 上完成；2026-11-03 快进合并至 `main`
-（`9f6f33d`），远端 CI run 41596456428 在 Python 3.10 / 3.12 双绿，本地 DoD **60/60**、
-里程碑 **30/30**。已确认的八处口径（完整清单见
+（`9f6f33d`，随后文档回填至 `46c6e8e`），远端 CI run 41596456428 / 41596839282 在 Python
+3.10 / 3.12 均双绿，本地 DoD **60/60**、里程碑 **30/30**。已确认的八处口径（完整清单见
 [P4 规格第 6 节](specs/p4-ticket-orchestration-kernel.md)）：单一 asyncio 循环加信号量驱动 Worker、
 `Store.transaction()` 内禁止 `await`（由此"状态与 effect 同事务、提交前不启动 Worker"成为可测性质）、
 `Agent.aresume(extra_input=None)` 作为唯一被批准的 Core 兼容扩展（`core/loop.py` 仍零 diff）、
