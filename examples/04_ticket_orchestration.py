@@ -4,9 +4,12 @@
 - 两个 Worker 都是脚本化 Provider（按对话历史推断进度），零网络、零密钥。
 - 事件按行输出 JSON；末行 `RUN_RESULT status=completed tickets=2`。
 - A 到 READY 后由本示例代替人工验收调用 `complete_ticket`，B 的依赖闸门才打开。
+- `--phase selftest` 起子进程跑 run，在第 2 个 progress 报告落库后 SIGKILL，
+  再用同一目录恢复跑完，末行 `SELFTEST ok=True killed=True completed=2`。
 
 用法：
     python examples/04_ticket_orchestration.py --phase run --dir .demo-orchestration
+    python examples/04_ticket_orchestration.py --phase selftest --dir .demo-orchestration
 
 `--phase run` 会清空所选目录里的编排库与 checkpoint 库（演示目录，便于重跑得到确定性输出）。
 """
@@ -16,6 +19,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import signal
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -61,15 +67,16 @@ class DemoClock:
 
 
 class DemoIds:
-    """seq-<tag>-<n>：重开库时新主键不与旧行相撞。"""
+    """seq-<tag>-<n>：重开库时新主键（带进程标签）不与旧行相撞。"""
 
-    def __init__(self) -> None:
+    def __init__(self, tag: str = "") -> None:
+        self._tag = f"-{tag}" if tag else ""
         self._seq: dict[str, int] = {}
 
     def new_id(self, prefix: str) -> str:
         n = self._seq.get(prefix, 0) + 1
         self._seq[prefix] = n
-        return f"{prefix}-{n:04d}"
+        return f"{prefix}{self._tag}-{n:04d}"
 
 
 class RecordFindingTool(Tool):
@@ -154,6 +161,7 @@ class PrintingSink:
         event_step: int | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
+        before = {report.id for report in self._store.list_reports(ticket_id)}
         self._service.add_report(
             ticket_id=ticket_id,
             assignment_id=assignment_id,
@@ -162,7 +170,8 @@ class PrintingSink:
             event_step=event_step,
             details=details,
         )
-        report = self._store.list_reports(ticket_id)[-1]
+        # 按集合差取新行：恢复进程的 DemoClock 会重置，不能靠 created_at 排序猜"最后一行"。
+        report = next(r for r in self._store.list_reports(ticket_id) if r.id not in before)
         print(
             json.dumps(
                 {
@@ -197,10 +206,12 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def build(workdir: Path, *, delay: float) -> tuple[Store, OrchestrationService, Scheduler]:
+def build(
+    workdir: Path, *, delay: float, tag: str = ""
+) -> tuple[Store, OrchestrationService, Scheduler]:
     clock = DemoClock()
     store = Store(workdir / "orchestration.db", clock=clock)
-    service = OrchestrationService(store, clock=clock, ids=DemoIds())
+    service = OrchestrationService(store, clock=clock, ids=DemoIds(tag))
     sink = PrintingSink(service, store)
     registry = _registry()
 
@@ -270,16 +281,90 @@ async def phase_run(workdir: Path, *, delay: float) -> int:
         store.close()
 
 
+async def phase_selftest(workdir: Path, *, delay: float) -> int:
+    """起子进程跑 run → 第 2 个 progress 报告落库后 SIGKILL → 恢复并跑完。
+
+    击杀点读确定性事件（A 的两个工具步恰好两条 progress），不读墙钟。
+    """
+    for suffix in ("orchestration.db", "checkpoint.db"):
+        (workdir / suffix).unlink(missing_ok=True)
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--phase",
+        "run",
+        "--dir",
+        str(workdir),
+        "--delay",
+        str(delay),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    assert proc.stdout is not None
+    progress = 0
+    killed = False
+    while True:
+        raw = await proc.stdout.readline()
+        if not raw:
+            break
+        line = raw.decode().rstrip()
+        print(f"[run] {line}", flush=True)
+        if not line.startswith("{"):
+            continue
+        payload = json.loads(line)
+        if payload.get("kind") != "progress":
+            continue
+        progress += 1
+        if progress >= 2:
+            os.kill(proc.pid, signal.SIGKILL)
+            killed = True
+            print(f"[kill] {progress} 条 progress 已落库，SIGKILL pid={proc.pid}", flush=True)
+            break
+    exit_code = await proc.wait()
+    if not killed:
+        print("演示进程自己跑完了，没给 kill 留出窗口（把 --delay 调大）", file=sys.stderr)
+        return 1
+    if exit_code == 0:
+        print(f"被 kill 的进程退出码为 0，不符合预期：{exit_code}", file=sys.stderr)
+        return 1
+
+    # 恢复进程用带标签的 ID：新 effect/report 主键不与被杀进程留下的行相撞。
+    store, service, scheduler = build(workdir, delay=0.0, tag="resume")
+    try:
+        summary = service.recover()
+        print(
+            json.dumps(
+                {
+                    "recover": {
+                        "interrupted_assignments": summary.interrupted_assignments,
+                        "reclaimed_effects": summary.reclaimed_effects,
+                        "relaunched": summary.relaunched,
+                    }
+                }
+            ),
+            flush=True,
+        )
+        tickets = await drive_until_idle(service, scheduler)
+    finally:
+        store.close()
+    completed = sum(1 for ticket in tickets if ticket.status is TicketStatus.COMPLETED)
+    ok = completed == 2
+    print(f"SELFTEST ok={ok} killed=True completed={completed}", flush=True)
+    return 0 if ok else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="P4 父子 Ticket 编排演示")
-    parser.add_argument("--phase", choices=["run"], default="run")
+    parser.add_argument("--phase", choices=["run", "selftest"], default="run")
     parser.add_argument("--dir", default=".demo-orchestration")
     parser.add_argument("--delay", type=float, default=0.15)
     args = parser.parse_args()
 
     workdir = Path(args.dir)
     workdir.mkdir(parents=True, exist_ok=True)
-    raise SystemExit(asyncio.run(phase_run(workdir, delay=args.delay)))
+    if args.phase == "run":
+        raise SystemExit(asyncio.run(phase_run(workdir, delay=args.delay)))
+    raise SystemExit(asyncio.run(phase_selftest(workdir, delay=args.delay)))
 
 
 if __name__ == "__main__":

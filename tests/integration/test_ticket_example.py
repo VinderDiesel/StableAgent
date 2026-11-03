@@ -47,3 +47,11 @@ async def test_run_phase_completes_parent_and_child(tmp_path: Path) -> None:
         i for i, line in enumerate(lines) if line.get("ticket") == "tk-0001" and "report" in line
     )
     assert parent_end < first_child_assignment  # 依赖：B 在 A 收口之后才起跑
+
+
+async def test_selftest_phase_kills_then_recovers(tmp_path: Path) -> None:
+    code, out = await _run_example(
+        "--phase", "selftest", "--dir", str(tmp_path / "selftest"), "--delay", "0.3"
+    )
+    assert code == 0, out
+    assert "SELFTEST ok=True killed=True completed=2" in out
