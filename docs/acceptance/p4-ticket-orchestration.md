@@ -5,9 +5,10 @@
 > + [ADR-02 Checkpoint](../design-decisions/02-checkpoint.md)（`stream_recover` 语义与单快照源）
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
-> **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m1-skeleton` 上开始，
-> DoD 29/60，里程碑步骤 10/30，M1 任务级步骤 50/50——M1 出口命令全绿。
-> M2 任务级计划已成文为第 7 节（2026-11-03），待开工，执行分支 `feat/p4-m2-width`）。**
+> **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m2-width` 上完成 M2，
+> DoD 51/60，里程碑步骤 22/30（M1 10/10 + M2 12/12），M2 任务级步骤 60/60——M2 出口命令全绿。
+> M1 收口见提交 `fc1e055`/`9ea0c2c`/`2a2ca2e`；M2 收口见第 7 节各 Task 提交（`4b6b583`/`830cb84`
+> 及本出口提交）。M3 计划待出口全绿后追加为第 8 节）。**
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6/7 节的 M1/M2 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
@@ -30,11 +31,18 @@
       落一条离线口径 `test_loop_py_is_byte_identical_to_p4_base`——loop.py 的 sha256
       （`27b71b61…cfc6299`）与 46441f0 版本逐字节相等，不依赖 CI 里的 git 区间。
       未满足归属：视为架构越界，回到 ADR-04 重议接缝，不改 loop。
-- [ ] **L2 Core 只允许一处兼容扩展**（来源：ADR-04 决策 6）。
+- [x] **L2 Core 只允许一处兼容扩展**（来源：ADR-04 决策 6）。
       即 `Agent.resume()/aresume()` 新增 `extra_input: str | None = None`，其余 Core 公共 payload 不变。
       验收方式：`git diff 46441f0..HEAD --stat -- stableagent/core/` 仅出现 `agent.py`；
       `tests/l4_default_stream_dump.py` 重新 dump 与 `tests/fixtures/l4_p2_default_stream.json` 逐字节相等。
-      证据：（待记录）。未满足归属：任何额外 Core 改动须先写 superseding ADR。
+      证据（2026-11-03，Task 17 + Task 22 复核）：`git diff 2eaea4f^..HEAD --stat -- stableagent/core/`
+      仅 `stableagent/core/agent.py | 17 +++++++++++------`（11 插入 / 6 删除，全在
+      `resume()/aresume()` 的 `extra_input` 透传与 `_resume_state()` 副本里追加
+      `Message(role="user")`）；`PYTHONPATH=. .venv/bin/python -m
+      tests.l4_default_stream_dump | diff - tests/fixtures/l4_p2_default_stream.json` 无输出并打印
+      `L4-BYTE-EQUAL`；`test_agent_recovery.py::test_resume_sync_signature_accepts_extra_input` +
+      `test_l4_default_equivalence.py`（`20 passed`）离线兜底。未满足归属：任何额外 Core 改动须先写
+      superseding ADR。
 - [x] **L3 运行时依赖仍为 3 个**（`pydantic` / `anyio` / `httpx`）：编排层用 stdlib `sqlite3`，
       不引入 `aiosqlite`、ORM 或调度库。验收方式：`pyproject.toml` 的 `dependencies` 条目数不变 +
       `tests/unit/test_p3_contract.py` 的 L3 断言仍绿。
@@ -183,29 +191,124 @@
 
 ### M2：宽度（输入投递、取消、DAG、真并发、优先级、Core 扩展）
 
-- [ ] **M2.1** 输入模型落地：`submit_input` + `TicketInput.sequence/consumed_at` + `deliver_input` effect
+- [x] **M2.1** 输入模型落地：`submit_input` + `TicketInput.sequence/consumed_at` + `deliver_input` effect
       （同一 Assignment 按 `sequence` 保序，不同 Ticket 可并发）。先写保序与并发用例。
-- [ ] **M2.2** `AgentExecutor.deliver()` 与恢复路径：`await agent.stream_recover(run_id)` 用于崩溃恢复；
+      证据（2026-11-03，Task 12）：`submit_input()` 同事务写 `TicketInput`（`sequence = 已有行数 + 1`）
+      并入队 `deliver:{ticket_id}:{sequence}`；`test_submit_input_persists_pending_row_and_effect`、
+      `test_second_input_sequence_increments_per_ticket`、`test_submit_input_wakes_queued_and_refuses_terminal`
+      锁落库面；保序/并发见 `test_delivery_waits_for_park_boundary_and_keeps_sequence`（effect 领取乱序、
+      消费仍按 sequence）与 `test_deliveries_of_different_tickets_run_in_one_round`（同轮两条 deliver）。
+      `test_orchestration_service.py` = `22 passed`。
+- [x] **M2.2** `AgentExecutor.deliver()` 与恢复路径：`await agent.stream_recover(run_id)` 用于崩溃恢复；
       空闲/暂停边界投递。先写"运行中不得抢占 `advance()`"的用例（断言投递只发生在 PAUSED 之后）。
-- [ ] **M2.3** Core 扩展：`Agent.resume()/aresume(extra_input=None)` 追加 `Message(role="user")` 到 state 副本，
+      证据（2026-11-03，Task 13）：`deliver()` 仅在 `_agents` 驻留表命中时 `aresume(extra_input)` 并
+      `mark_input_consumed`，否则抛 `DeferrableEffectError`（"现在不能消费"≠失败）；
+      `test_deliver_resumes_parked_agent_and_consumes_input`、`test_reparked_segment_reports_waiting_for_human_without_classification`、
+      `test_deliver_without_park_defers_instead_of_failing`；"不抢占 advance()"由调度面
+      `test_delivery_waits_for_park_boundary_and_keeps_sequence` 锁死（RUNNING 且有活 Worker 时 gate 不领、
+      attempts 不涨）。崩溃恢复仍走 `recover()` → `stream_recover`（`test_recover_uses_stream_recover_and_never_replays_events`）。
+      `test_agent_executor.py` = `13 passed`。
+      偏差登记（设计裁定 1 的落地）：(1) park 语义成立——PAUSED 时 Assignment 保持 `RUNNING`、
+      Ticket 进 `waiting|blocked`、活 Agent 驻留、槽位释放，M1 的 `PAUSED → END` 已删除；
+      (2) 续段再暂停的原因不可得（`AgentState.error` 是自由文本，D4 不读），一律记
+      `waiting_for_human`，不细分 blocked——`test_reparked_segment_reports_waiting_for_human_without_classification`
+      锁此口径；(3) 设计裁定 2 的门控补了一个口子：Ticket `RUNNING` 但 Store 里该 Ticket 已无活
+      Worker 任务时允许领取（唤醒后连续投递的中间态），`test_deliveries_of_different_tickets_run_in_one_round`
+      依赖它。
+- [x] **M2.3** Core 扩展：`Agent.resume()/aresume(extra_input=None)` 追加 `Message(role="user")` 到 state 副本，
       默认 `None` 行为不变。测试先行：`tests/unit/test_agent_recovery.py` 增用例 +
       重新 dump L4 比对 fixture（逐字节相等）。
-- [ ] **M2.4** `retry_ticket`：新 Assignment（`attempt+1`）、不覆盖历史、幂等键含 attempt。
-- [ ] **M2.5** `cancel_ticket` + `cancel_assignment` effect：只取消未结束 Ticket，不删历史；
+      证据（2026-11-03，Task 11）：`test_aresume_extra_input_appends_user_message_to_state_copy`（副本追加、
+      原 state 不变）、`test_aresume_without_paused_rejects_extra_input_too`（无 PAUSED 仍 `ValueError`）、
+      `test_resume_sync_signature_accepts_extra_input`；默认路径 `tests.l4_default_stream_dump` 与
+      `tests/fixtures/l4_p2_default_stream.json` 逐字节相等（`L4-BYTE-EQUAL`，见 L2/F3）。
+      `test_agent_recovery.py` = `18 passed`，全量 `409 passed, 1 skipped`（Task 21 收口时点）。
+- [x] **M2.4** `retry_ticket`：新 Assignment（`attempt+1`）、不覆盖历史、幂等键含 attempt。
+      证据（2026-11-03，Task 14）：FAILED→QUEUED→新 Assignment（`attempt+1`）并同事务入队
+      `launch:{assignment_id}:{attempt}`；`test_retry_ticket_adds_an_attempt_and_keeps_history` 断言旧行原样、
+      新幂等键不同；`test_retry_only_from_failed` 断言 queued/其他状态被状态机拒绝。
+      实现备注：为让"启动前就炸"的 QUEUED Ticket 也能进 FAILED，转换表补了 `(QUEUED, FAIL)→FAILED`
+      与 `(FAILED, RETRY)→QUEUED` 两条边。偏差登记：Global Constraints 只列了三条新边
+      （`(BLOCKED, START)`、`(FAILED, RETRY)`、`(QUEUED, BLOCK)`），实测多出第四条
+      `(QUEUED, FAIL)→FAILED`——计划自带的 retry 测试要求 FAILED 只能由 RETRY 进入，而"启动前就炸"
+      的 Ticket 没有 START 可走；该边已在 `test_orchestration_model.py` 矩阵登记，`_ASSIGNMENT_TABLE`
+      其余边零改动。
+- [x] **M2.5** `cancel_ticket` + `cancel_assignment` effect：只取消未结束 Ticket，不删历史；
       槽位释放语义写进测试。
-- [ ] **M2.6** effect 失败路径：注入式 backoff、`max_attempts` 耗尽 → `failed` 并派生 `blocked`/`failed` Report。
-- [ ] **M2.7** DAG：`add_dependency` + 直接/间接环检测（`CyclicDependencyError`）+ `block` / `continue`
+      证据（2026-11-03，Task 15）：`cancel_ticket()` 只对未终态 Assignment 入队 `cancel:{assignment_id}`，
+      不删任何历史行；`test_cancel_ticket_keeps_history_and_enqueues_effect`、`test_closeout_is_idempotent`；
+      调度面 `test_cancel_releases_the_slot_for_the_next_ticket`（取消后槽位当轮归还、下一 Ticket 起跑）、
+      `test_cancel_of_parked_worker_drops_the_park`、executor 面 `test_cancel_clears_park_without_touching_store`。
+- [x] **M2.6** effect 失败路径：注入式 backoff、`max_attempts` 耗尽 → `failed` 并派生 `blocked`/`failed` Report。
+      证据（2026-11-03，Task 16）：`EffectDispatcher(backoff=..., on_exhausted=...)` 注入；
+      `test_handler_exception_retries_then_fails_without_memory_flags`（attempts 打满 → failed）、
+      `test_backoff_fn_is_injected_and_exhaustion_fires_hook`（注入函数被调用、提交后才回调 hook）、
+      `test_deferrable_error_backs_off_without_burning_budget`（顺延不侵蚀预算）；派生面
+      `test_exhausted_launch_fails_assignment_and_writes_failed_report`（LAUNCH→Assignment/Ticket failed + FAILED Report）、
+      `test_exhausted_delivery_blocks_ticket_with_reason`（DELIVER→Ticket blocked + 结构化 `effect_id`）、
+      `test_exhausted_launch_and_cancel_effects_derive_structured_records`（cancel→BLOCKED Report）。
+      偏差登记："Worker 起不来"（`executor.launch()` 抛异常）由 `_guarded` 直接调
+      `fail_unstarted_assignment(reason="worker_start_failed")`，不走 launch effect 的退避重试——
+      dispatcher 在 handler 返回后才结算 effect，worker 异常发生在结算之后，重试一次坏掉的启动
+      没有意义；effect 侧的重试/超限仍完整保留给 handler 自身抛错的场景（如 ghost assignment）。
+- [x] **M2.7** DAG：`add_dependency` + 直接/间接环检测（`CyclicDependencyError`）+ `block` / `continue`
       两策略（`continue` 时把失败依赖作为 Input/metadata 注入）。
-- [ ] **M2.8** 并发与优先级：`max_concurrency` 槽位从 effect 领取起占到 Assignment 终态/waiting/blocked；
+      证据（2026-11-03，Task 17）：`test_add_dependency_rejects_direct_and_indirect_cycles`（两跳路径打印）、
+      `test_downstream_waits_until_all_dependencies_completed`、`test_block_policy_derives_blocked_with_structured_reason`、
+      `test_continue_policy_injects_failed_dependency_as_input`（`[依赖失败: …]` Input 只注入一次）；
+      `store.test_list_all_dependencies_is_globally_ordered` 锁边表全序。
+- [x] **M2.8** 并发与优先级：`max_concurrency` 槽位从 effect 领取起占到 Assignment 终态/waiting/blocked；
       排序键 `(唤醒过的优先, queued_at, created_at)` 并锁死顺序测试。
-- [ ] **M2.9** 全 5 种 `Report.kind` 与 `list_tickets` 过滤/排序/分页；`RecoverySummary` 字段定稿。
-- [ ] **M2.10** `recover()` 全语义：running→interrupted、pending/retry_wait effect 续跑、
+      证据（2026-11-03，Task 18）：`test_two_slots_cap_concurrent_workers`（`max_live == 2`，第三个在门外）、
+      `test_tick_starts_exactly_one_worker_per_concurrency_slot`（单槽逐轮放行）、
+      `test_woken_ticket_precedes_older_queued_ones`（E7 唤醒优先）、`test_inflight_launch_effect_is_not_redispatched`
+      （L7 在途不重领，attempts 不涨）；Store 层 `test_runnable_order_is_woken_then_queued_then_created`。
+      实现偏差：优先级经 `enqueue_work_for_runnable_tickets()` 给被唤醒 Ticket 的 launch effect 重打
+      `due_at`（`now_ms - (total - index)`，全部 ≤ now）落实，未改 SQL `ORDER BY` 契约；
+      单轮 `dispatch_due()` 的窗口固定 10 条（与 `max_concurrency` 解耦），并发上界由
+      `_gate_launch` 的活任务计数守住——这是"不同 Ticket 的投递同轮领掉"（C6）的前提，
+      已由 `test_deliveries_of_different_tickets_run_in_one_round` 锁死。
+- [x] **M2.9** 全 5 种 `Report.kind` 与 `list_tickets` 过滤/排序/分页；`RecoverySummary` 字段定稿。
+      证据（2026-11-03，Task 19）：五种 kind 各有落点——PROGRESS（`test_run_id_is_registered_once_at_the_first_step_boundary`
+      断言 TOOL_RESULT → PROGRESS @ step 1；`test_thinking_and_tool_call_do_not_emit_reports_by_default` 锁默认零噪音）、
+      READY（`test_done_emits_ready_report_with_verbatim_diagnostic_payload`）、
+      FAILED（`test_error_emits_failed_report_keyed_on_reason_field`）、BLOCKED（`test_paused_budget_maps_to_blocked_and_parks`）、
+      WAITING_FOR_HUMAN（`test_reparked_segment_reports_waiting_for_human_without_classification`）；
+      `test_list_tickets_filters_pages_and_carries_views`（status 过滤 + limit/offset + 携带 view）、
+      `store.test_pagination_is_stable`；`test_recovery_summary_fields_are_final` 钉死
+      `["interrupted_assignments", "reclaimed_effects", "relaunched"]`。
+- [x] **M2.10** `recover()` 全语义：running→interrupted、pending/retry_wait effect 续跑、
       已 `ended` 不重跑、幂等规则新旧 effect 共用。
-- [ ] **M2.11** Assignment deadline（E9）：`deadline_at` → `asyncio.timeout` 包住 executor 任务 →
+      证据（2026-11-03，Task 19）：`test_recover_relaunches_interrupted_assignment`（running→interrupted、
+      `:relaunch` 键与旧键不同）、`test_committed_effect_survives_reopen_and_dispatches`（提交后崩溃、
+      新进程只重放一次）、`test_orphan_running_effect_is_reclaimed_then_driven_once`（handler 前崩溃、
+      `reclaimed_effects == 1`、只驱动一次）、`test_recover_leaves_ended_tickets_alone`（终态不复活）；
+      进程级 `tests/integration/test_ticket_recovery.py::test_crash_mid_flight_then_recover_finishes`
+      （SIGKILL 后终态正确、已完成 Assignment 不重跑、`provider_calls == [3]`）。
+- [x] **M2.11** Assignment deadline（E9）：`deadline_at` → `asyncio.timeout` 包住 executor 任务 →
       超时写 `cancel_assignment` effect 并派生 `blocked` Report。先写注入 clock 的超时用例，
       确认 Core 调用点未被改动（`git diff --stat -- stableagent/core/` 仍只出现 `agent.py`）。
-- [ ] **M2 出口**：M1 出口命令全集 + `pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py tests/unit/test_scheduler.py`
+      证据（2026-11-03，Task 20）：`queue_ticket(..., deadline_at=...)` 落到 `Assignment.deadline_at`
+      （`store.test_deadline_at_round_trips`）；`test_deadline_timeout_cancels_assignment_and_blocks_ticket`
+      （预算 0 → 起跑过、Assignment cancelled、Ticket blocked、BLOCKED Report `reason=deadline_exceeded`）、
+      `test_future_deadline_does_not_interfere`、`test_negative_remaining_budget_clamps_to_zero`（负预算夹到 0）、
+      `test_cancel_interrupts_a_deadline_bounded_worker`（预算内也可正常取消）。
+      实现偏差（登记）：Python 3.10 兼容改用 `ensure_future` + `asyncio.wait(timeout=budget)`
+      （`asyncio.timeout` 3.11 起才有；`wait_for(0)` 会在首步前掐掉 Worker）；超时处置由
+      `service.expire_assignment()` 直接落 cancelled+blocked+Report，不再另入队 `cancel_assignment`
+      effect（无在途 task 可取消，入队只多一条空转账）；`stableagent/core/` diff 仍只有 `agent.py`。
+- [x] **M2 出口**：M1 出口命令全集 + `pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py tests/unit/test_scheduler.py`
       + L4 dump 比对结果记进 L2 条目。
+      证据（2026-11-03，Task 22 实测）：`pytest -q` = `418 passed, 1 skipped in 8.90s`（两次连跑除耗时外
+      逐字一致）；`mypy` = `Success: no issues found in 36 source files`；`ruff check stableagent tests examples benchmarks`
+      = `All checks passed!`；`ruff format --check …` = `82 files already formatted`；
+      `--cov-report=term-missing`：orchestration 八文件 `__init__ 100 / errors 100 / executor 93 / model 98 /
+      outbox 98 / scheduler 100 / service 96 / store 100`，全库 `98.46%`（2336 stmts / 36 miss）；
+      `git diff 46441f0..HEAD -- stableagent/core/loop.py` = 0 行；
+      `git diff 2eaea4f^..HEAD --stat -- stableagent/core/` = 仅 `agent.py`；
+      点名三文件 = `52 passed`；L4 dump = `L4-BYTE-EQUAL`。
+      偏差：计划写 `asyncio.timeout`、`cancel_assignment` effect 与 `DoD 29+21=50/60`，实测分别按
+      M2.11 偏差、M2.11 处置与 C2 在 M1 出口仍未勾而按实际 51/60 记账（29 + M2 行 22，其中 C2 补 M1 的 30 项之一）。
 
 ### M3：对外可见与收口
 
@@ -317,24 +420,47 @@
 - [x] **C1** effect kind 只有 `launch_assignment`、`deliver_input`、`cancel_assignment`；未提前引入 P5/P6 种类。
       证据（2026-11-02，Task 6）：`EffectKind` 当前仅 `LAUNCH_ASSIGNMENT`，是三种白名单的 M1 子集；
       M2 的 F 组按 ADR-04 决策 6 增补 `deliver_input`/`cancel_assignment`，不引入白名单外种类。
-- [ ] **C2** 创建/重试 Assignment 在同事务创建 `launch_assignment`；输入写入后创建 `deliver_input`。
+- [x] **C2** 创建/重试 Assignment 在同事务创建 `launch_assignment`；输入写入后创建 `deliver_input`。
       证据（前半，2026-11-02，Task 9）：`queue_ticket()` 在同一事务内建 Assignment 并入队
       `launch_assignment`（`test_create_then_queue_writes_assignment_and_effect_atomically`），
       `recover()` 对 INTERRUPTED Assignment 入队带 `:relaunch` 后缀的 effect
-      （`test_recover_relaunches_interrupted_assignment`）；"输入写入后创建 `deliver_input`"
-      半边属 M2 F 组（输入投递 + Core 扩展），届时闭合后整条勾。
+      （`test_recover_relaunches_interrupted_assignment`）；后半（2026-11-03，Task 12/14）：
+      `retry_ticket()` 同事务建 `attempt+1` 的 Assignment + `launch:{id}:{attempt}`
+      （`test_retry_ticket_adds_an_attempt_and_keeps_history`），`submit_input()` 同事务写
+      `TicketInput` + `deliver:{ticket_id}:{sequence}`（`test_submit_input_persists_pending_row_and_effect`）。
 - [x] **C3** dispatcher 在 commit 后拉取 due effects；同 idempotency key 的 pending 重复入队只更新 payload，
       不新增副作用（SQLite 唯一键证明，非内存标志）。验证：`test_outbox.py`。
       证据（2026-11-02，Task 6）：`test_enqueue_is_idempotent_on_kind_and_key` 证明重复入队后
       `COUNT(*)==1` 且返回既有 `ef-1`；`test_handler_never_sees_an_open_transaction` 证明 handler
       运行时 `in_transaction` 为 False（dispatch 在 `due_effects` 查询之后、事务之外）。
-- [ ] **C4** handler 成功才标 `succeeded`；失败用注入式 backoff 进 `retry_wait`，达 `max_attempts` 标 `failed`
-      并派生 `blocked`/`failed` Report。证据：（待记录）。
-- [ ] **C5** handler 的 I/O 不持有事务；重启后 pending/retry_wait 继续执行。
-      验证："handler 成功前 crash"用例 + 集成恢复测试。证据：（待记录）。
-- [ ] **C6** 按 kind 保序：同一 Assignment 的输入按 `sequence` 投递；不同 Ticket 并发。证据：（待记录）。
-- [ ] **C7** spec 要求的七类 outbox 场景测试齐备（commit 后 crash、handler 前 crash、重复 dispatch、
-      失败重试、超限失败、同 Ticket 保序、不同 Ticket 并发）。证据：（待记录）。
+- [x] **C4** handler 成功才标 `succeeded`；失败用注入式 backoff 进 `retry_wait`，达 `max_attempts` 标 `failed`
+      并派生 `blocked`/`failed` Report。
+      证据（2026-11-03，Task 16）：`test_handler_exception_retries_then_fails_without_memory_flags`
+      （attempts 1→2→3 → failed，无内存标志）、`test_backoff_fn_is_injected_and_exhaustion_fires_hook`
+      （注入函数决定 due_at；后半断言超限 → failed 且 `on_exhausted` 在提交后只触发一次）；
+      派生面 `test_exhausted_launch_fails_assignment_and_writes_failed_report`、
+      `test_exhausted_delivery_blocks_ticket_with_reason`、`test_exhausted_launch_and_cancel_effects_derive_structured_records`。
+- [x] **C5** handler 的 I/O 不持有事务；重启后 pending/retry_wait 继续执行。
+      验证："handler 成功前 crash"用例 + 集成恢复测试。
+      证据（2026-11-03，Task 16/19）：`test_handler_never_sees_an_open_transaction`（handler 内
+      `in_transaction is False`）；重开续跑 `test_committed_effect_survives_reopen_and_dispatches`
+      （PENDING 提交后崩溃）与 `test_orphan_running_effect_is_reclaimed_then_driven_once`（RUNNING 孤儿回收，
+      `reclaimed_effects == 1`）；进程级 `test_crash_mid_flight_then_recover_finishes`。
+- [x] **C6** 按 kind 保序：同一 Assignment 的输入按 `sequence` 投递；不同 Ticket 并发。
+      证据（2026-11-03，Task 12/18）：`test_delivery_waits_for_park_boundary_and_keeps_sequence`
+      （两条 deliver effect 的 due_at 反转后，消费仍为 `["线索一", "线索二"]`）、
+      `test_deliveries_of_different_tickets_run_in_one_round`（同轮 `dispatched == 2`，两个 Ticket 各一条）。
+- [x] **C7** spec 要求的七类 outbox 场景测试齐备（commit 后 crash、handler 前 crash、重复 dispatch、
+      失败重试、超限失败、同 Ticket 保序、不同 Ticket 并发）。
+      证据（2026-11-03，Task 22 对照）：
+      commit 后 crash = `test_committed_effect_survives_reopen_and_dispatches`；
+      handler 前 crash = `test_orphan_running_effect_is_reclaimed_then_driven_once`；
+      重复 dispatch = `test_handler_never_sees_an_open_transaction` + 领取即置 running（`test_inflight_launch_effect_is_not_redispatched`）；
+      失败重试 = `test_backoff_fn_is_injected_and_exhaustion_fires_hook` 前半；
+      超限失败 = 同测试后半 + `test_handler_exception_retries_then_fails_without_memory_flags`；
+      同 Ticket 保序 = `test_delivery_waits_for_park_boundary_and_keeps_sequence`；
+      不同 Ticket 并发 = `test_deliveries_of_different_tickets_run_in_one_round`。
+      `test_outbox.py` = `9 passed`。
 
 ### D. WorkerExecutor 与 Event→Report（spec WP-4.4）
 
@@ -356,13 +482,23 @@
       `DELIVER→ready`）、`ERROR→(FAIL,FAIL)`；PAUSED 按 reason 分派 `WAIT`/`BLOCK`；
       `emit_progress_on` 默认 `frozenset({TOOL_RESULT})`，
       `test_thinking_and_tool_call_do_not_emit_reports_by_default` 证明默认零 progress。
-- [ ] **D4** Worker Event 原样保留为诊断载荷，但 Ticket 状态判定不读自然语言文本。
-      验证：断言映射输入为 `EventType`/`AgentStatus`/reason 字段。证据：（待记录）。
+- [x] **D4** Worker Event 原样保留为诊断载荷，但 Ticket 状态判定不读自然语言文本。
+      验证：断言映射输入为 `EventType`/`AgentStatus`/reason 字段。
+      证据（2026-11-03，Task 13/19）：映射只读 `event.type`、`agent.next_state.status` 与
+      `data["reason"]` 字段（`executor._TERMINAL_ACTION` 与 PAUSED 分派）；Event payload 原样进
+      `Report.details`（`test_done_emits_ready_report_with_verbatim_diagnostic_payload`、
+      `test_error_emits_failed_report_keyed_on_reason_field`）；续段暂停原因不可得时不读文本，
+      统一记 `waiting_for_human`（`test_reparked_segment_reports_waiting_for_human_without_classification`）。
+- [x] **D6** 初始输入作为 task 进入 Worker；后续输入只在空闲/暂停边界投递，不抢占执行中的 `advance()`。
+      证据（2026-11-03，Task 12/13）：入队时已落的未消费 Input 由 `_run_worker` 随 launch 一并传入
+      （`scheduler._run_worker` 的 `pending` → `executor.launch(..., pending)`）；运行中 deliver
+      effect 被 `_gate_deliver` 挡在领取之外（`test_delivery_waits_for_park_boundary_and_keeps_sequence`
+      断言 `delivered == []`、attempts 不涨）；PAUSED 驻留后 `test_deliver_resumes_parked_agent_and_consumes_input`
+      证明只在 `_agents` 驻留边界投递。
 - [x] **D5** 启动前注册 `worker_run_id`，同 run 禁止两个 executor 并行驱动（L7 同源）。
       证据（2026-11-02，Task 7）：`_drive()` 在进入事件流后于第一个 step 边界注册（ADR-04 决策 4.1，
       `test_run_id_is_registered_once_at_the_first_step_boundary` 断言只注册一次）；
       "同 run 单驱动"的 DuplicateLaunch 防护落点在 Task 8 `Scheduler._tasks`。
-- [ ] **D6** 初始输入作为 task 进入 Worker；后续输入只在空闲/暂停边界投递，不抢占执行中的 `advance()`。
 - [x] **D7** 核心测试不需要真实 LLM：FakeExecutor + FakeProvider 覆盖映射、恢复、取消、重复 launch 防护。
       证据（2026-11-02，Task 7）：`test_agent_executor.py` 7 条全离线（`StubAgent` + `RecordingSink`，
       无 Provider 实例）；"取消/重复 launch 防护"两半在 Task 8（`StubExecutor` + DuplicateLaunch 用例）
@@ -375,28 +511,72 @@
       `service.enqueue_work_for_runnable_tickets()` → `Store.list_runnable_tickets()`（SQL 排序），
       `self._tasks` 只存取消/去重句柄；`test_queue_survives_reopen_without_memory_state` 关闭
       Store 后重开同名库文件，QUEUED Ticket 仍可从库推导（Task 9 补上 `service.py` 后全绿）。
-- [ ] **E2** `max_concurrency` 限制 running Assignment 数；槽位从 effect 领取起占到终态/waiting/blocked 释放。
-- [ ] **E3** 子 Ticket 只由 API/测试显式创建；未引入 LLM Planner。
-- [ ] **E4** DAG 添加前检测直接环与间接环，拒绝并抛稳定错误。
-- [ ] **E5** 依赖满足判定：所有依赖 `completed` 才可运行。
-- [ ] **E6** `block` 使下游 `blocked` 且写结构化原因；`continue` 允许下游运行并把失败依赖作为 Input/metadata。
-- [ ] **E7** 优先级 `(唤醒过的优先, queued_at, created_at)` 实现并被顺序测试锁死（ADR-04 决策 7）。
-- [ ] **E8** `recover()` 覆盖 spec WP-4.5.7 全部语义：running→interrupted、幂等重启、旧新 effect 同规则。
-- [ ] **E9** 外层 Assignment deadline（来源：[ADR-02 后果 4](../design-decisions/02-checkpoint.md) 中属于 P4 的那一半，
+- [x] **E2** `max_concurrency` 限制 running Assignment 数；槽位从 effect 领取起占到终态/waiting/blocked 释放。
+      证据（2026-11-03，Task 18）：槽位由 `_guarded()` 的 `asyncio.Semaphore` 在 Worker 整个生命周期持有，
+      领取前另有 `_gate_launch` 以活任务数判上限；`test_two_slots_cap_concurrent_workers` 断言
+      三 Ticket 下 `max_live == 2`（第三个在门外，两轮后全部起跑）；
+      `test_tick_starts_exactly_one_worker_per_concurrency_slot` 锁单槽逐轮放行；
+      取消释放见 `test_cancel_releases_the_slot_for_the_next_ticket`。
+- [x] **E3** 子 Ticket 只由 API/测试显式创建；未引入 LLM Planner。
+      证据（2026-11-03，Task 17）：`test_child_tickets_come_only_from_explicit_calls`（仅
+      `create_ticket(parent_id=...)` 产生父子关系）；静态面
+      `test_scheduler_and_service_never_import_planning`（scheduler/service 不 import planning）。
+- [x] **E4** DAG 添加前检测直接环与间接环，拒绝并抛稳定错误。
+      证据（2026-11-03，Task 17）：`test_add_dependency_rejects_direct_and_indirect_cycles`——
+      自环与两跳环均抛 `CyclicDependencyError`（`code = orchestration.cyclic_dependency`），
+      错误消息含路径；`test_error_code_inventory_is_unique_and_prefixed` 锁 code 稳定。
+- [x] **E5** 依赖满足判定：所有依赖 `completed` 才可运行。
+      证据（2026-11-03，Task 17）：`test_downstream_waits_until_all_dependencies_completed`
+      （两条依赖，只完成一条时 `enqueue_work_for_runnable_tickets() == 0`，全完成才 1）。
+- [x] **E6** `block` 使下游 `blocked` 且写结构化原因；`continue` 允许下游运行并把失败依赖作为 Input/metadata。
+      证据（2026-11-03，Task 17）：`test_block_policy_derives_blocked_with_structured_reason`
+      （BLOCKED Report `details["reason"] == "dependency_failed"`），
+      `test_continue_policy_injects_failed_dependency_as_input`（下游照常入队，`[依赖失败: …]` Input 只注入一次）。
+- [x] **E7** 优先级 `(唤醒过的优先, queued_at, created_at)` 实现并被顺序测试锁死（ADR-04 决策 7）。
+      证据（2026-11-03，Task 18）：SQL 排序 `test_runnable_order_is_woken_then_queued_then_created`；
+      调度面 `test_woken_ticket_precedes_older_queued_ones`（后排但被 `submit_input` 唤醒的 Ticket
+      先于先排的起跑）。落实方式：`enqueue_work_for_runnable_tickets()` 按 Store 给出的顺序把被唤醒
+      Ticket 的 launch effect `due_at` 重打为 `now_ms - (total - index)`（全部 ≤ now，仍走 outbox 领取）。
+- [x] **E8** `recover()` 覆盖 spec WP-4.5.7 全部语义：running→interrupted、幂等重启、旧新 effect 同规则。
+      证据（2026-11-03，Task 19）：`test_recover_relaunches_interrupted_assignment`（running→interrupted
+      后入队 `:relaunch`）；`test_committed_effect_survives_reopen_and_dispatches` 与
+      `test_orphan_running_effect_is_reclaimed_then_driven_once`（新旧 effect 同规则、只驱动一次）；
+      `test_recover_leaves_ended_tickets_alone`（幂等重启不复活终态）；进程级
+      `test_crash_mid_flight_then_recover_finishes`。
+- [x] **E9** 外层 Assignment deadline（来源：[ADR-02 后果 4](../design-decisions/02-checkpoint.md) 中属于 P4 的那一半，
       处置见 [ADR-04](../design-decisions/04-ticket-orchestration.md)）：`deadline_at` 超时由 Scheduler 以
       `asyncio.timeout` 包住 executor 任务，写 `cancel_assignment` effect，Assignment 进 `cancelled`、
       Ticket 进 `blocked` 并带结构化原因；不触碰 Core 调用点。
       验证：`test_scheduler.py` 用注入式 clock 触发超时，断言无墙钟等待。
-      **不在本项范围**：Provider 单次调用的内层硬超时，归 P7 WP-7.2。证据：（待记录）。
+      **不在本项范围**：Provider 单次调用的内层硬超时，归 P7 WP-7.2。
+      证据（2026-11-03，Task 20）：`test_deadline_timeout_cancels_assignment_and_blocks_ticket`
+      （注入 clock 预算 0；无墙钟等待；Assignment `CANCELLED`、Ticket `BLOCKED`、BLOCKED Report
+      `details["reason"] == "deadline_exceeded"`）、`test_negative_remaining_budget_clamps_to_zero`、
+      `test_future_deadline_does_not_interfere`、`test_cancel_interrupts_a_deadline_bounded_worker`。
+      实现偏差：3.10 兼容用 `ensure_future` + `asyncio.wait(timeout=budget)` 替代 `asyncio.timeout`；
+      超时由 `service.expire_assignment()` 直接落终态，不再入队 `cancel_assignment`（无在途 task 可取消）；
+      Core 无改动（`git diff --stat -- stableagent/core/` 仅 `agent.py`，来自 Task 11 的 F 组合法扩展）。
 
 ### F. 输入投递与 Core 扩展（ADR-04 决策 6）
 
-- [ ] **F1** `submit_input(ticket_id, text)` 落库为未消费 `TicketInput` 并创建 `deliver_input` effect。
-- [ ] **F2** `Agent.resume()/aresume(extra_input=None)`：追加 `Message(role="user")` 到 state 副本后才继续；
-      无 PAUSED 态时沿用既有 `ValueError`。验证：`test_agent_recovery.py` 新用例。证据：（待记录）。
-- [ ] **F3** L4 默认路径复验：重新 dump 与既有 fixture 逐字节相等；`extra_input` 默认值不改变任何 payload。
-      证据：（待记录 dump 与 diff 结果）。
-- [ ] **F4** `core/loop.py` 仍零 diff（L1 复核），且 `git diff --stat -- stableagent/core/` 只出现 `agent.py`（L2）。
+- [x] **F1** `submit_input(ticket_id, text)` 落库为未消费 `TicketInput` 并创建 `deliver_input` effect。
+      证据（2026-11-03，Task 12）：`test_submit_input_persists_pending_row_and_effect`
+      （`consumed_at is None`、`deliver:{ticket_id}:{sequence}`）、`test_second_input_sequence_increments_per_ticket`、
+      `test_submit_input_wakes_queued_and_refuses_terminal`（终态票拒写：`IllegalTransitionError`）。
+- [x] **F2** `Agent.resume()/aresume(extra_input=None)`：追加 `Message(role="user")` 到 state 副本后才继续；
+      无 PAUSED 态时沿用既有 `ValueError`。验证：`test_agent_recovery.py` 新用例。
+      证据（2026-11-03，Task 11）：`test_aresume_extra_input_appends_user_message_to_state_copy`
+      （副本末尾追加一条 `role="user"`，原 state 不变）、
+      `test_aresume_without_paused_rejects_extra_input_too`（仍抛既有 `ValueError`）、
+      `test_resume_sync_signature_accepts_extra_input`（同步签名透传）。
+- [x] **F3** L4 默认路径复验：重新 dump 与既有 fixture 逐字节相等；`extra_input` 默认值不改变任何 payload。
+      证据（2026-11-03，Task 22 实测）：`PYTHONPATH=. .venv/bin/python -m tests.l4_default_stream_dump |
+      diff - tests/fixtures/l4_p2_default_stream.json` 无输出并打印 `L4-BYTE-EQUAL`；
+      自动化版 `test_l4_default_equivalence.py` 与 `test_agent_recovery.py` 合跑 `20 passed`。
+- [x] **F4** `core/loop.py` 仍零 diff（L1 复核），且 `git diff --stat -- stableagent/core/` 只出现 `agent.py`（L2）。
+      证据（2026-11-03，Task 22 实测）：`git diff 46441f0..HEAD -- stableagent/core/loop.py` = 0 行输出；
+      `git diff 2eaea4f^..HEAD --stat -- stableagent/core/` = 仅 `agent.py`（11 插入 / 6 删除）；
+      离线哈希 `test_loop_py_is_byte_identical_to_p4_base` 兜底。
 
 ### G. 本地接口、示例与故障演练（spec WP-4.6）
 
@@ -410,10 +590,32 @@
       `[3]`（从 step-1 快照续放的确定性步数——M1.9 的"调用次数硬断言"）。
 - [ ] **G3** ADR-04 记录 Ticket/AgentState 边界、状态机、outbox 事务、幂等键、输入投递语义、
       单驱动规则与被否决方案（已成文，实现后把"计划"字样改为实际证据）。
-- [ ] **G4** `OrchestrationService` 十个命令全部可用且非法输入抛稳定 `OrchestrationError` 子类
+- [x] **G4** `OrchestrationService` 十个命令全部可用且非法输入抛稳定 `OrchestrationError` 子类
       （spec 原文写 `UserError`，Core 无此基类，口径见 spec 第 6 节第 8 条）
-      （未知 ID、非法状态、环、已结束写入、跨 Ticket 报告）。证据：（待记录）。
-- [ ] **G5** `errors.py` 的 code 清单在账本里登记，供 P5/P6 映射。证据：（待记录）。
+      （未知 ID、非法状态、环、已结束写入、跨 Ticket 报告）。
+      证据（2026-11-03，Task 21）：`test_all_ten_commands_exist` 枚举
+      `create_ticket/add_dependency/queue_ticket/submit_input/retry_ticket/cancel_ticket/complete_ticket/recover/get_ticket/list_tickets`；
+      `test_stable_error_matrix` 覆盖未知 Ticket（queue/get/submit/retry/cancel/add_dependency 六命令）、
+      queued 再 queue、queued 上 retry；`test_cross_ticket_report_is_refused`（`add_report` 经
+      `assert_assignment_belongs_to` 拒绝跨 Ticket 挂载，`IllegalTransitionError`）；
+      环由 `test_add_dependency_rejects_direct_and_indirect_cycles`，已结束写入由
+      `test_submit_input_wakes_queued_and_refuses_terminal`。
+- [x] **G5** `errors.py` 的 code 清单在账本里登记，供 P5/P6 映射。
+      证据（2026-11-03，Task 21/22）：`test_error_code_inventory_is_unique_and_prefixed` 枚举
+      `errors` 全部子类，断言 `orchestration.` 前缀、snake_case、code 唯一；清单如下
+      （基类 `OrchestrationError.code = "orchestration.error"` 是兜底，不单独 raise，故不入清单）：
+
+      | 异常类 | code |
+      |---|---|
+      | `IllegalTransitionError` | `orchestration.illegal_transition` |
+      | `UnknownTicketError` | `orchestration.unknown_ticket` |
+      | `UnknownAssignmentError` | `orchestration.unknown_assignment` |
+      | `ReentrantTransactionError` | `orchestration.reentrant_transaction` |
+      | `DuplicateLaunchError` | `orchestration.duplicate_launch` |
+      | `WorkerConfigError` | `orchestration.worker_config` |
+      | `IdempotencyConflictError` | `orchestration.idempotency_conflict` |
+      | `DeferrableEffectError` | `orchestration.effect_deferred` |
+      | `CyclicDependencyError` | `orchestration.cyclic_dependency` |
 
 ### H. 质量与发布
 
@@ -3425,7 +3627,7 @@ Task 12 建立 kind/模型/迁移，13 才有门控对象；Task 16 的 `on_exha
   `ValueError("没有可恢复的 PAUSED 状态")`——带不带 `extra_input` 都抛它（F2 验收原文）。
 - Consumes: 无（不依赖任何编排层符号，方向仍是 core ← orchestration，L4 不变）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_agent_recovery.py 追加（并入既有导入块，不另起 import）
@@ -3458,12 +3660,12 @@ def test_resume_sync_signature_accepts_extra_input() -> None:
         agent.resume(extra_input="追加线索")
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_agent_recovery.py -k extra -v`
 Expected: FAIL — `TypeError: aresume() got an unexpected keyword argument 'extra_input'`
 
-- [ ] **Step 3: 实现（`agent.py` 只改三个方法签名，循环体零改动）**
+- [x] **Step 3: 实现（`agent.py` 只改三个方法签名，循环体零改动）**
 
 ```python
 # stableagent/core/agent.py（替换既有 aresume/resume/_resume_state 三处）
@@ -3484,7 +3686,7 @@ Expected: FAIL — `TypeError: aresume() got an unexpected keyword argument 'ext
         return state
 ```
 
-- [ ] **Step 4: 跑到绿（含默认路径逐字节不变的复验）**
+- [x] **Step 4: 跑到绿（含默认路径逐字节不变的复验）**
 
 Run:
 ```bash
@@ -3497,7 +3699,7 @@ Expected: PASS。`test_l4_default_equivalence` 绿即 F3 的"默认路径 payloa
 （它就是拿当前代码重跑 dump 与 `46441f0` fixture 逐字节比对）；出口（Task 22）再留一份
 手工 dump diff 的实测记录。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/core/agent.py tests/unit/test_agent_recovery.py
@@ -3529,7 +3731,7 @@ git commit -m "feat: let a paused worker take one more user turn without changin
   `service.mark_input_consumed(ticket_id, input_id) -> None`（sink 面，Task 13 起被 executor 调用）。
 - Consumes: Task 1~9 全部既有。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_model.py 追加
@@ -3645,12 +3847,12 @@ def test_second_input_sequence_increments_per_ticket(service) -> None:
 SequenceIds 的 `tk-0001/tk-0002` 已固定 `created_at` 同值、`queued_at` 同值，顺序只由
 `woken_at` 决定，无需让时钟走。）
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_store.py tests/unit/test_orchestration_service.py -k "whitelist or compat or migration or public or submit_input or sequence_increments" -v`
 Expected: FAIL —`AttributeError: DELIVER_INPUT` / `TypeError: submit_input` 一族。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```python
 # model.py：EffectKind 增两员；TicketInput 增 `state: Literal["pending", "consumed"] = "pending"`；
@@ -3731,13 +3933,13 @@ Expected: FAIL —`AttributeError: DELIVER_INPUT` / `TypeError: submit_input` �
 协议扩展只发生在 sink 侧，`WorkerExecutor` 四方法签名不动（Global Constraints）。
 `tests/support.py` 的 `RecordingSink` 补 `self.consumed: list[tuple[str, str]]` 与同名方法。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_store.py tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py --no-cov`
 Expected: PASS；全量 `.venv/bin/pytest -q` 也须绿（`list_inputs` 语义未变，M1 用例不应受损）；
 `.venv/bin/mypy`、`.venv/bin/ruff check stableagent tests` 干净。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ tests/support.py tests/unit/test_orchestration_model.py \
@@ -3777,7 +3979,7 @@ git commit -m "feat: queue human inputs as durable per-sequence deliveries"
   每次 dispatch 消费该 Ticket 最旧一条未消费 Input（设计裁定 3）。
 - Consumes: Task 12 的 kind/state/键格式；Task 11 的 `aresume(extra_input)`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_outbox.py 追加
@@ -3935,12 +4137,12 @@ def test_blocked_can_be_started_by_delivery_wakeup() -> None:
     assert next_ticket_status(TicketStatus.BLOCKED, TicketAction.START) is TicketStatus.RUNNING
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py tests/unit/test_scheduler.py tests/unit/test_orchestration_model.py -k "ineligible or deferrable or parks or delivers or delivery_waits or blocked_can" -v`
 Expected: FAIL —`ImportError: DeferrableEffectError` / `TypeError: __init__() got 'eligible'`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `outbox.py`：`__init__` 增 `eligible: Mapping[EffectKind, Callable[[Effect], bool]] | None = None`
 （缺省空表）；`dispatch_due` 循环里 handler 查询之后插 `if not self._eligible(effect): continue`；
@@ -4017,13 +4219,13 @@ launch handler 返回前不消费——由 `AgentExecutor.launch` 在第一个�
 （`woken_at` 沿用 `submit_input` 已置的值）。`AgentExecutor.launch` 消费回写：`_drive` 收到第一个
 事件时把 `inputs` 逐条 `self._sink.mark_input_consumed(...)`（测试断 `sink.consumed`）。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py tests/unit/test_scheduler.py tests/unit/test_orchestration_model.py --no-cov`
 Expected: PASS；全量绿（M1 两条被替换用例按 Step 1 注处理）；`mypy`、`ruff check`、
 `ruff format --check` 干净。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ tests/support.py tests/unit/test_outbox.py \
@@ -4048,7 +4250,7 @@ git commit -m "feat: park paused workers and feed them only at the pause boundar
   `launch:{assignment_id}:{attempt}` effect；COMPLETED/CANCELLED 拒绝（终态不复活）。
 - Consumes: Task 12 的 effect 形状。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_model.py 追加
@@ -4093,12 +4295,12 @@ def test_retry_only_from_failed(service) -> None:
         svc.retry_ticket(done.id)
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_service.py -k "retry" -v`
 Expected: FAIL —`ImportError: RETRY` / `AttributeError: retry_ticket`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `model.py`：`TicketAction` 增 `RETRY = "retry"`；`_TICKET_TABLE` 增
 `(TicketStatus.FAILED, TicketAction.RETRY): TicketStatus.QUEUED`。
@@ -4126,12 +4328,12 @@ Expected: FAIL —`ImportError: RETRY` / `AttributeError: retry_ticket`。
             return assignment
 ```
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_service.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/model.py stableagent/orchestration/service.py \
@@ -4160,7 +4362,7 @@ git commit -m "feat: retry a failed ticket as a fresh attempt with history intac
   （`task.cancel()` + `gather` 等槽位归还），再 `executor.cancel` + closeout。
 - Consumes: Task 12 的 kind。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_service.py 追加
@@ -4225,12 +4427,12 @@ async def test_cancel_of_parked_worker_drops_the_park(env) -> None:
     assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py -k "cancel" -v`
 Expected: FAIL —`AttributeError: 'OrchestrationService' object has no attribute 'cancel_ticket'`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `service.py`：
 
@@ -4293,12 +4495,12 @@ assignment.id, AssignmentAction.CANCEL); raise`（任务被取消的当场记 CA
 若 Task 13 尚未整删，此处删除并补 `test_cancel_clears_park_without_touching_store`
 （executor 无 store 依赖，断 `parked_assignments()` 由 {as-1} 变 set()）。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py tests/unit/test_agent_executor.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ tests/unit/test_orchestration_service.py \
@@ -4331,7 +4533,7 @@ git commit -m "feat: cancel work in flight without touching the stored history"
   均只经 service 写入（唯一写入口）。
 - Consumes: Task 13 的门控与回退。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_outbox.py 追加
@@ -4392,12 +4594,12 @@ async def test_exhausted_delivery_blocks_ticket_with_reason(env) -> None:
     assert blocked and "effect" in blocked[0].details        # 结构化原因，非自然语言
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_scheduler.py -k "backoff or exhausted" -v`
 Expected: FAIL —`TypeError: __init__() got an unexpected keyword argument 'backoff'`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `outbox.py`：`__init__` 增两参（`self._backoff = backoff`、`self._on_exhausted = on_exhausted`）；
 `_fail_or_retry` 里 `due_at` 计算改为
@@ -4433,12 +4635,12 @@ BLOCK`（START 后的投递失败回 blocked），`READY/OPEN/QUEUED` 不动只�
 `StubExecutor` 增 `self.fail_launches = False`（launch 抛 RuntimeError）与
 `self.defer_deliver = False`（deliver 抛 `DeferrableEffectError`）。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_scheduler.py tests/unit/test_orchestration_service.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ tests/unit/test_outbox.py tests/unit/test_scheduler.py \
@@ -4471,7 +4673,7 @@ git commit -m "feat: turn exhausted effects into structured blocked and failed r
   子 Ticket 仅由 `create_ticket(..., parent_id=...)` 显式创建（E3，boundary 扫 `planning` 佐证）。
 - Consumes: Task 12/13 的 Input 与 launch 形状。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_service.py 追加
@@ -4561,12 +4763,12 @@ def test_scheduler_and_service_never_import_planning() -> None:
         assert not any("planning" in item for item in imports)   # E3：无 LLM Planner
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py tests/unit/test_orchestration_model.py -k "cycle or dependencies or block_policy or continue_policy or child or planning or blocked_by" -v`
 Expected: FAIL —`ImportError: CyclicDependencyError` / `AttributeError: add_dependency`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `errors.py`：
 
@@ -4610,12 +4812,12 @@ depends_on_ticket_id`）。
 （details `{"reason": "dependency_failed", "dependency": dep_id}`）。Ticket 不在 QUEUED
 （例如已 RUNNING）时只写 Report 不转态。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_store.py tests/unit/test_orchestration_boundaries.py tests/unit/test_orchestration_model.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/ tests/unit/test_orchestration_service.py \
@@ -4640,7 +4842,7 @@ git commit -m "feat: gate tickets on a dependency graph that refuses cycles"
 - Produces: 无新符号；本 Task 把 E2（`max_concurrency` 从 effect 领取起占到终态/waiting/blocked）
   与 E7（排序键 `(woken, queued_at, created_at)` 契约）用测试钉死。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_scheduler.py 追加（并发 fixture：max_concurrency=2）
@@ -4686,26 +4888,26 @@ async def test_woken_ticket_precedes_older_queued_ones(env) -> None:
 `CountingExecutor`：launch 里 `self.live += 1; self.max_live = max(...); await self.gate.wait();
 self.live -= 1`，其余方法同 `StubExecutor`。
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py -k "two_slots or woken_ticket" -v`
 Expected: 若 M1/M2 形状已对，可能直接绿——**绿不代表无事发生**：本 Task 的产出就是这两条
 锁死断言；若 `max_live` 越界（信号量与 dispatch limit 错位），这里必红。先跑，红则按 Step 3
 修正接线，绿则跳过 Step 3 的实现改动、只补测试并提交（照实登记"实现未被本 Task 改动"）。
 
-- [ ] **Step 3: 修正接线（仅当 Step 2 有失败）**
+- [x] **Step 3: 修正接线（仅当 Step 2 有失败）**
 
 已知需要核对的两点：`tick()` 的 `dispatch_due(limit=self._max_concurrency)` 会跳过门控关闭的
 effect——limit 计的是领取数而非扫描数，跳过不补位（M1 语义，保留）；`_guarded` 的
 `async with self._slots` 必须在 `launch/deliver` 全程持有。若 `env2` 首跑即绿，本步在账本
 记"无需改动"，commit 只含测试文件。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py && .venv/bin/mypy && .venv/bin/ruff check stableagent tests`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/unit/test_scheduler.py
@@ -4732,7 +4934,7 @@ git commit -m "test: lock the concurrency cap and the woken-first ordering"
   recover 全语义（E8/C5）：running→interrupted、pending/retry_wait 续跑、已 ended 不重跑、
   新旧 effect 同一幂等规则；`Store.get_effect` 公开读（Task 12 已加，本 Task 使用其 C5 用例）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_agent_executor.py 追加
@@ -4829,12 +5031,12 @@ async def test_recover_leaves_ended_tickets_alone(env, tmp_path) -> None:
     assert executor.launched == []                            # E8：终态不复活
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_agent_executor.py tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py -k "ready_report or failed_report or summary_fields or list_tickets or survives_reopen or orphan or leaves_ended" -v`
 Expected: FAIL —DONE/ERROR 无终态 Report（`sink.reports == []`）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `executor.py`：`_drive` 的终态分支在 `finish_assignment/transition_ticket` 之前插一条
 `self._sink.add_report(... kind=READY|FAILED, summary="worker delivered"|f"worker failed: {failure}",
@@ -4844,12 +5046,12 @@ event_step=event.step, details=dict(event.data))`——**Report 先于状态转�
 Scheduler/Service 无行为改动——若 Step 1 的三条 scheduler 用例有红，按失败面回看 Task 13/16
 接线，不在本 Task 新增语义。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_agent_executor.py tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py tests/unit/test_orchestration_model.py && .venv/bin/mypy && .venv/bin/ruff check stableagent tests`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/executor.py stableagent/orchestration/service.py \
@@ -4882,7 +5084,7 @@ git commit -m "feat: complete the five report kinds and the recovery contract"
   `except (TimeoutError, asyncio.TimeoutError)`——理由与结论记进 M2.11 证据。
 - Consumes: 不触碰 Core 调用点（Step 4 复核 `git diff --stat -- stableagent/core/` 只出现 agent.py）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_scheduler.py 追加
@@ -4931,12 +5133,12 @@ def test_deadline_at_round_trips(store: Store) -> None:
     assert store.get_assignment("as-1") == assignment
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py tests/unit/test_orchestration_store.py -k "deadline or budget" -v`
 Expected: FAIL —`TypeError: queue_ticket() got an unexpected keyword argument 'deadline_at'`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `scheduler.py`：
 
@@ -4961,7 +5163,7 @@ no-op，幂等），Ticket `RUNNING→BLOCK`（非 RUNNING 不动 Ticket 但仍�
 到期而 Worker 恰在收口之间竞争时，报告仍要说得出话）；Report 按上方 details 形状。
 `queue_ticket` 增 keyword 参 `deadline_at` 并写入 Assignment。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run:
 ```bash
@@ -4971,7 +5173,7 @@ git diff --stat -- stableagent/core/          # 只出现 agent.py（E9 原文�
 ```
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/scheduler.py stableagent/orchestration/service.py \
@@ -4995,7 +5197,7 @@ git commit -m "feat: bound each assignment with a scheduler-side deadline"
   G5 测试枚举 `errors` 全部子类并断言 code 唯一、前缀、snake_case；账本 G5 条目在
   Task 22 回填清单。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_service.py 追加
@@ -5070,22 +5272,22 @@ def test_error_code_inventory_is_unique_and_prefixed() -> None:
 （`OrchestrationError` 基类自身的 `code` 是 `orchestration.error`，不进清单——它是兜底，
 不该被 raise。）
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py -k "ten_commands or cross_ticket or error_matrix or code_inventory" -v`
 Expected: FAIL（add_report 目前不校验归属；错误码枚举类清单未钉死）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `service.add_report`：事务体内先 `assert_assignment_belongs_to(self._require(ticket_id),
 self._require_assignment(assignment_id))`。无其他生产改动。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add stableagent/orchestration/service.py tests/unit/test_orchestration_service.py \
@@ -5105,7 +5307,7 @@ C7 的七场景清单核对也在 Task 22。
   L2、C2 整条、C4~C7、D4、D6、E2~E9、F1~F4、G4、G5 逐条填实测证据；G5 附 code 清单）
 - 无代码改动（发现问题回到对应 Task 修，不许出口处顺手改）
 
-- [ ] **Step 1: 跑出口命令全集并留档**
+- [x] **Step 1: 跑出口命令全集并留档**
 
 ```bash
 git checkout feat/p4-m2-width && git status                      # 必须 clean
@@ -5126,7 +5328,7 @@ PYTHONPATH=. .venv/bin/python -m tests.l4_default_stream_dump | diff - \
 把每条命令的实际输出记进第 1 节 M2 出口条目。`| diff -` 那条即 F3/L2 要求的"重新 dump
 与 fixture 逐字节相等"的手工复验（`test_l4_default_equivalence` 的自动化版已在 CI 绿）。
 
-- [ ] **Step 2: 账本勾选与证据回填**
+- [x] **Step 2: 账本勾选与证据回填**
 
 - 勾 M2.1~M2.11、M2 出口；DoD 勾 L2、C2（整条）、C4、C5、C6、C7、D4、D6、E2~E9、F1~F4、
   G4、G5，每条附"（2026-11-XX，Task N）+ 实测命令输出/测试名"；**不得写"应该通过"**。
@@ -5139,19 +5341,19 @@ PYTHONPATH=. .venv/bin/python -m tests.l4_default_stream_dump | diff - \
   不同 Ticket 并发 = `test_deliveries_of_different_tickets_run_in_one_round`）。
 - 首屏计数同步：DoD 勾后应为 29+21=50/60（若中途已勾按实际），里程碑步骤 22/30。
 
-- [ ] **Step 3: 偏差复核**
+- [x] **Step 3: 偏差复核**
 
 对照本计划 Global Constraints 与三处设计裁定，逐条确认实现与账本叙述一致；park 语义、
 `wait_for` 替 `asyncio.timeout`、续段暂停一律记 `waiting_for_human` 三处偏差必须已写进
 对应 M2.x 证据段。`git diff --stat -- stableagent/core/` 若出现 `agent.py` 之外的文件，
 停下回 Task 11 核查（L2 违例先改 ADR 再改代码，第 5 节归属规则）。
 
-- [ ] **Step 4: 连跑两次核对离线确定性（L8 的 M2 增量复跑）**
+- [x] **Step 4: 连跑两次核对离线确定性（L8 的 M2 增量复跑）**
 
 `.venv/bin/pytest -q` 两次，除耗时外逐字一致；不一致的测试（真实 sleep、墙钟、随机）
 就地修掉再回来。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add docs/acceptance/p4-ticket-orchestration.md
