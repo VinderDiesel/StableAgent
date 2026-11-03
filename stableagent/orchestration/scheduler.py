@@ -75,6 +75,12 @@ class Scheduler:
         live = self.running_assignments()
         if effect.payload.get("assignment_id") in live:
             return False  # L7：在途去重
+        ticket = self._store.get_ticket(effect.payload["ticket_id"])
+        if ticket is not None and ticket.status is TicketStatus.QUEUED:
+            # E5：queue_ticket 先把 launch effect 落进 outbox，依赖未满足时票停在 QUEUED。
+            # enqueue_work 在依赖全 completed 的同一轮把票推成 RUNNING，此前不发车；
+            # effect 保持 PENDING（不领取、不耗 attempts），与 _gate_deliver 同一事实源哲学。
+            return False
         return len(live) < self._max_concurrency  # E2：槽位按活任务数判，驻留不占位
 
     def _gate_deliver(self, effect: Effect) -> bool:
@@ -178,6 +184,8 @@ class Scheduler:
             AssignmentStatus.CANCELLED,
         ):
             return  # 已收口/已取消：领掉 effect，不再冷启动
+        if ticket.status is not TicketStatus.RUNNING:
+            return  # queued 等 enqueue_work 推起；waiting/ready/blocked/终态一律领掉空转
         await self.drive(assignment, ticket)
 
     async def _handle_cancel(self, effect: Effect) -> None:

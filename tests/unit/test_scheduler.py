@@ -607,3 +607,55 @@ async def test_exhausted_launch_and_cancel_effects_derive_structured_records(env
     scheduler._handle_exhausted(cancel, "cancel boom")
     blocked = [r for r in store.list_reports(other.id) if r.kind is ReportKind.BLOCKED]
     assert blocked and blocked[0].details["effect_id"] == "ef-dead-cancel"
+
+
+async def test_queued_downstream_waits_for_upstream_before_launching(env) -> None:
+    """E5 的调度面：queue_ticket 先落 launch effect，但依赖未满足时不得发车。"""
+    store, service, executor, _scheduler, clock = env
+    wide = Scheduler(
+        store=store, service=service, executor=executor, clock=clock, max_concurrency=2
+    )
+    parent = _queued(service, "父")
+    child_ticket = service.create_ticket("子", parent_id=parent.id)
+    service.add_dependency(child_ticket.id, parent.id)
+    service.queue_ticket(child_ticket.id)
+    executor.gate.set()
+    await wide.tick()
+    await _wait_until_idle(wide)
+    assert executor.launched == [store.list_assignments(parent.id)[0].id]
+
+    child_launch = [
+        effect
+        for effect in store.due_effects(clock.now_ms())
+        if effect.kind is EffectKind.LAUNCH_ASSIGNMENT
+        and effect.payload["ticket_id"] == child_ticket.id
+    ]
+    assert len(child_launch) == 1 and child_launch[0].state is EffectState.PENDING
+    assert child_launch[0].attempts == 0  # 门控不领、不耗 attempts
+    assert store.get_ticket(child_ticket.id).status is TicketStatus.QUEUED
+    assert store.list_assignments(child_ticket.id)[0].status is AssignmentStatus.PENDING
+
+    service.transition_ticket(parent.id, TicketAction.DELIVER)
+    service.complete_ticket(parent.id)
+    await wide.tick()
+    await _wait_until_idle(wide)
+    child_assignment = store.list_assignments(child_ticket.id)[0]
+    assert child_assignment.id in executor.launched
+    assert store.get_ticket(child_ticket.id).status is TicketStatus.RUNNING
+
+
+async def test_launch_effect_for_blocked_ticket_is_voided(env) -> None:
+    store, service, executor, scheduler, clock = env
+    executor.gate.set()
+    ticket = _queued(service, "受阻")
+    service.transition_ticket(ticket.id, TicketAction.START)
+    service.transition_ticket(ticket.id, TicketAction.BLOCK)
+    await scheduler.tick()
+    await asyncio.sleep(0)
+    assert executor.launched == [] and executor.recovered == []
+    leftover = [
+        effect
+        for effect in store.due_effects(clock.now_ms())
+        if effect.kind is EffectKind.LAUNCH_ASSIGNMENT and effect.payload["ticket_id"] == ticket.id
+    ]
+    assert leftover == []  # 领掉空转：不留永久 due 垃圾
