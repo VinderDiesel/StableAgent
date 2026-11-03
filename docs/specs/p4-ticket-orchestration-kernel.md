@@ -2,7 +2,7 @@
 
 > **阶段定位**：在不接入 GitHub、飞书、MCP、Docker 或长期外部 Source 的前提下，将一次性 Worker run 组织为可持久化、可恢复、可并发调度的长期工作系统。P4 的工作单位是 `Ticket`，执行单位是 `Assignment`，执行内核仍是既有 `stableagent.Agent`。
 >
-> **状态：实现完成，待远端 CI 收口**（2026-11-03；退出清单 7/7，DoD 59/60、里程碑 29/30；执行顺序与逐项证据见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)）。
+> **状态：已收口**（2026-11-03；远端 CI run 41596456428 在 Python 3.10 / 3.12 双绿；退出清单 7/7，DoD 60/60、里程碑 30/30；执行顺序与逐项证据见 [P4 验收账本](../acceptance/p4-ticket-orchestration.md)）。
 >
 > **开始条件**：P3 已满足其全部退出条件，并记录最终验证和 benchmark 基线。（已满足：P3 52/52，CI run 41384598912。）
 >

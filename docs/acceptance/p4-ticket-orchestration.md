@@ -5,11 +5,11 @@
 > + [ADR-02 Checkpoint](../design-decisions/02-checkpoint.md)（`stream_recover` 语义与单快照源）
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
-> **状态：实现完成，待远端 CI 收口（2026-11-03；分支 `feat/p4-m2-width`）。
-> DoD 59/60，里程碑步骤 29/30（M1 10/10 + M2 12/12 + M3 7/8），仅剩 H6（远端 CI 双绿）
-> 与 M3 出口；远端门禁通过前不写"收口"。
+> **状态：已收口（2026-11-03；`feat/p4-m2-width` 快进合并至 `main`，远端 CI
+> [run 41596456428](https://github.com/VinderDiesel/StableAgent/actions/runs/41596456428)
+> 在 Python 3.10 / 3.12 双绿）。DoD 60/60，里程碑步骤 30/30（M1 10/10 + M2 12/12 + M3 8/8）。**
 > M1 收口见提交 `fc1e055`/`9ea0c2c`/`2a2ca2e`；M2 收口见第 7 节各 Task 提交（`4b6b583`/`830cb84`
-> 及该出口提交）；M3 计划与执行见第 8 节（2026-11-03 追加，40 个 Step）。**
+> 及该出口提交）；M3 计划与执行见第 8 节（2026-11-03 追加，40 个 Step）。
 >
 > 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6/7/8 节的 M1/M2/M3 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
@@ -346,8 +346,10 @@
       证据（2026-11-03，Task 28）：50 Ticket / 100 Assignment、3 轮中位数 `tick` 34.9 ms、
       `recover` 38.3 ms、`drain` 122.3 ms；见
       [证据文件](../evidence/p4-orchestration-benchmark-2026-11-03.md)。
-- [ ] **M3 出口**：经维护者确认后提交并推送 `main`，GitHub Actions 3.10 / 3.12 全绿，
+- [x] **M3 出口**：经维护者确认后提交并推送 `main`，GitHub Actions 3.10 / 3.12 全绿，
       把 run URL/ID 记进本账本，才允许把状态行改为"收口"。
+      证据（2026-11-03，Task 30）：维护者授权后快进合并 `fdea014..9f6f33d` 并推送；
+      run 41596456428 双 job 全绿（见 H6），首屏据此改为"已收口"，DoD 60/60、里程碑 30/30。
 
 ### 1.4 里程碑与 DoD 归属
 
@@ -692,8 +694,12 @@
       "心脏模块覆盖率闸门（18 文件：loop/checkpoint/errors/context/evidence/orchestration 各 ≥90%）"；
       本地按同源 heredoc 复现输出 `BAD: [] MISSING: []`；`test_ci_focus_gate.py` 断言 6 个新路径、
       步骤名与"无未替换 `.py` 占位"。
-- [ ] **H6** 远端 CI 收口：经授权推送后 GitHub Actions 3.10 / 3.12 全绿，run URL/ID 记入本账本，
-      且 P0–P3 用例零回归。证据：（待记录）。
+- [x] **H6** 远端 CI 收口：经授权推送后 GitHub Actions 3.10 / 3.12 全绿，run URL/ID 记入本账本，
+      且 P0–P3 用例零回归。
+      证据（2026-11-03，Task 30）：经维护者授权，`feat/p4-m2-width` 快进合并到 `main`
+      （`fdea014..9f6f33d`）并推送；[run 41596456428](https://github.com/VinderDiesel/StableAgent/actions/runs/41596456428)
+      两个 job 全绿——quality (3.10) 41s、quality (3.12) 34s；两 job 均 `433 passed, 1 skipped`、
+      覆盖率 99.02%、18/18 FOCUS ≥90%；P0–P3 用例如数通过（含 L4 金标准），零回归。
 - [x] **H7** 编排成本的记录方式符合"不把未经复跑的数字写成当前结果"：单轮 `tick()` 与
       `recover()` 全部 effect 重放的耗时，在固定规模（计划取 50 Ticket / 100 Assignment）下由
       `benchmarks/` 脚本复跑并记入 `docs/evidence/p4-orchestration-benchmark-<yyyy-mm-dd>.md`，
@@ -5464,7 +5470,9 @@ git commit -m "docs: close M2 with measured gates and the core-extension evidenc
 
 ## 8. M3 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：待执行。** 前置：M2 出口全绿（2026-11-03：DoD 51/60、里程碑 22/30、
+> **状态：已执行并收口（2026-11-03）。** 8 个 Task / 40 个 Step 全部完成：M3.1~M3.7、G1、G3、
+> H1~H7 与 M3 出口全勾，最终 **DoD 60/60、里程碑 30/30**；Task 30 经维护者授权合并并推送
+> `main`，远端 CI run 41596456428 双绿。前置：M2 出口全绿（2026-11-03：DoD 51/60、里程碑 22/30、
 > `418 passed, 1 skipped`、orchestration 八文件 93–100%、L4 `L4-BYTE-EQUAL`、
 > `stableagent/core/` diff 仅 `agent.py`）。本节把 M3 的 8 个里程碑步骤
 > （M3.1~M3.7 + M3 出口）展开为 **8 个 Task / 40 个 Step**；任务级步骤不计入 30 项里程碑计数。
@@ -5585,7 +5593,7 @@ docs/acceptance/p4-ticket-orchestration.md        # 修改：M3 勾选与最终�
 - Produces: `--phase run` 可独立跑完；stdout 每行一个 JSON（`report` / `ticket` / `assignment`），
   末行 `RUN_RESULT status=completed tickets=2`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/integration/test_ticket_example.py
@@ -5632,12 +5640,12 @@ async def test_run_phase_completes_parent_and_child(tmp_path: Path) -> None:
     assert parent_end < first_child_assignment  # 依赖：B 在 A 收口之后才起跑
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/integration/test_ticket_example.py --no-cov`
 Expected: FAIL（`FileNotFoundError`/退出码非 0：示例文件不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `examples/04_ticket_orchestration.py` 的结构（关键片段，非全文）：
 
@@ -5668,7 +5676,7 @@ async def phase_run(db_dir: Path, *, delay: float) -> int:
   调 `complete_ticket(id)` → `await asyncio.sleep(0.01)`，直到两票 `COMPLETED` 或超轮次。
 - 失败路径：任一 Ticket `FAILED/BLOCKED` 打印后返回 1。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run:
 ```bash
@@ -5678,7 +5686,7 @@ Run:
 ```
 Expected: 用例 PASS；手工运行末行 `RUN_RESULT status=completed tickets=2`；全量不回归。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add examples/04_ticket_orchestration.py tests/integration/test_ticket_example.py
@@ -5699,7 +5707,7 @@ git commit -m "feat: run parent and child tickets through the scheduler offline"
 - Consumes: Task 23 的 run 面与 stdout 约定。
 - Produces: `--phase selftest` 自带 kill/恢复闭环，末行 `SELFTEST ok=True killed=True completed=2`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 async def test_selftest_phase_kills_then_recovers(tmp_path: Path) -> None:
@@ -5710,12 +5718,12 @@ async def test_selftest_phase_kills_then_recovers(tmp_path: Path) -> None:
     assert "SELFTEST ok=True killed=True completed=2" in out
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/integration/test_ticket_example.py -k selftest --no-cov`
 Expected: FAIL（`argparse` 报 invalid choice `selftest`，退出码 2）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `--phase selftest` 复用 `examples/03` 的父子进程约定：
 
@@ -5735,7 +5743,7 @@ async def phase_selftest(workdir: Path, *, delay: float) -> int:
     print(f"SELFTEST ok={ok} killed=True completed={completed}", flush=True)
 ```
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run:
 ```bash
@@ -5745,7 +5753,7 @@ Run:
 ```
 Expected: 两用例 PASS；手工 selftest 末行 `SELFTEST ok=True killed=True completed=2`。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add examples/04_ticket_orchestration.py tests/integration/test_ticket_example.py
@@ -5767,7 +5775,7 @@ M3.1、M3.2 可勾。
 - Consumes: `coverage.xml` 的类名（`stableagent/orchestration/<file>.py`）。
 - Produces: FOCUS 18 项；本地复现命令与 CI 完全同源。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_ci_focus_gate.py
@@ -5791,18 +5799,18 @@ def test_focus_covers_the_eighteen_cardiac_files() -> None:
     assert text.count('".py"') == 0  # 不许用通配兜底
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_ci_focus_gate.py --no-cov`
 Expected: FAIL（六个路径都不在 FOCUS 里，步骤名仍是"心脏模块覆盖率闸门"）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `ci.yml` 的 FOCUS 追加六项，步骤名改为
 `心脏模块覆盖率闸门（18 文件：loop/checkpoint/errors/context/evidence/orchestration 各 ≥90%）`；
 其余步骤零改动。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 Run:
 ```bash
@@ -5813,7 +5821,7 @@ Run:
 ```
 Expected: 契约测试 PASS；本地闸门 18 行全部 ≥90%。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add .github/workflows/ci.yml tests/unit/test_ci_focus_gate.py
@@ -5834,7 +5842,7 @@ git commit -m "ci: gate the orchestration core in the cardiac coverage matrix"
 - Consumes: `uv`（已在本机 `/opt/homebrew/bin/uv`）、`pyproject.toml` 的 `requires-python >= 3.10`。
 - Produces: 三个解释器上的全量 pytest + 覆盖率 + FOCUS 门槛结果。
 
-- [ ] **Step 1: 写资产**
+- [x] **Step 1: 写资产**
 
 在 `.gitignore` 追加：
 
@@ -5843,12 +5851,12 @@ git commit -m "ci: gate the orchestration core in the cardiac coverage matrix"
 .matrix/
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `git check-ignore .matrix/py310/bin/python || echo NOT-IGNORED`
 Expected: `NOT-IGNORED`（尚未加入忽略规则）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```bash
 mkdir -p .matrix
@@ -5861,7 +5869,7 @@ done
 若某版本解释器无法下载：记录 `uv python list` 的结果与失败原因，继续其余版本；
 H4 以"可用本机解释器 + Task 30 远端 3.10/3.12"为最终证据，不伪造本机结果。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 ```bash
 for v in 3.10 3.11 3.12; do
@@ -5873,7 +5881,7 @@ done
 ```
 Expected: 每个可用解释器 `422 passed, 1 skipped`（以实测为准），FOCUS 18 项 ≥90%。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add .gitignore
@@ -5894,7 +5902,7 @@ git commit -m "chore: keep the local interpreter matrix out of git"
 - Consumes: M1/M2 的测试名、M3 的示例/基准/CI 产物。
 - Produces: ADR-04 不再含"计划/尚未实现"措辞；G3 七项内容逐条指向章节。
 
-- [ ] **Step 1: 写断言/清单**
+- [x] **Step 1: 写断言/清单**
 
 ```bash
 grep -n "实现尚未开始\|代码入口（计划）\|测试与证据（计划" \
@@ -5902,13 +5910,13 @@ grep -n "实现尚未开始\|代码入口（计划）\|测试与证据（计划"
 ```
 期望：3 处命中（状态行、代码入口行、证据小节标题）。
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: 同上；并把 G3 的七项（Ticket/AgentState 边界、状态机、outbox 事务、幂等键、
 输入投递语义、单驱动、被否决方案）逐条对照 ADR 章节，缺哪条记哪条。
 Expected: 3 处计划措辞仍在；G3 未勾。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 - 状态行改为 `Accepted（2026-11-03 实现完成，M2 出口全绿，证据见账本）`；
 - "代码入口（计划）"改为"代码入口"；
@@ -5916,7 +5924,7 @@ Expected: 3 处计划措辞仍在；G3 未勾。
   并补示例、基准、CI 三条；
 - 账本 G3 勾选，七项逐条列 ADR 章节锚点（如"状态机 → 决策 2 与 §1 状态表"）。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 ```bash
 grep -n "实现尚未开始\|代码入口（计划）\|测试与证据（计划" \
@@ -5925,7 +5933,7 @@ grep -n "实现尚未开始\|代码入口（计划）\|测试与证据（计划"
 ```
 Expected: `NO-PLAN-LANGUAGE`；测试与静态检查不回归（纯文档改动）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add docs/design-decisions/04-ticket-orchestration.md docs/acceptance/p4-ticket-orchestration.md
@@ -5948,7 +5956,7 @@ git commit -m "docs: turn adr-04's planned evidence into measured contracts"
 - Produces: 每行一个 JSON，末行 `{"summary": {"tickets": 50, "assignments": 100, ...}}`；
   指标 `tick_ms` / `recover_ms` / `drain_ms`（min/median/max，3 次）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/unit/test_orchestration_benchmark.py
@@ -5970,12 +5978,12 @@ def test_benchmark_runs_at_a_small_fixed_scale(tmp_path: Path) -> None:
     assert summary["tick_ms"] >= 0 and summary["recover_ms"] >= 0
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q tests/unit/test_orchestration_benchmark.py --no-cov`
 Expected: FAIL（脚本不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```python
 # 数据形状：每 Ticket 两条 Assignment 历史（attempt 1 ENDED、attempt 2 可运行）
@@ -5986,7 +5994,7 @@ Expected: FAIL（脚本不存在）。
 # 输出：每 phase 一行 JSON；末行 summary = min/median/max（repeat 次）
 ```
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 ```bash
 .venv/bin/pytest -q tests/unit/test_orchestration_benchmark.py --no-cov
@@ -5997,7 +6005,7 @@ Expected: 冒烟测试 PASS；基准末行给出 `tickets=50 assignments=100` �
 把环境（macOS、Python 3.11.15、`.venv`）、命令、日期、min/median/max 与"只报本机量级"
 口径写进 `docs/evidence/p4-orchestration-benchmark-2026-11-03.md`。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add benchmarks/orchestration_benchmark.py tests/unit/test_orchestration_benchmark.py \
@@ -6018,7 +6026,7 @@ git commit -m "bench: record tick and recover cost at a fixed orchestration scal
 - Modify: `docs/acceptance/p4-ticket-orchestration.md`（H1 对照表 + H2/H3/H4/H5 证据；
   P4 状态写"实现完成、待远端 CI 收口"，不写"收口"）
 
-- [ ] **Step 1: 写断言/清单**
+- [x] **Step 1: 写断言/清单**
 
 ```bash
 grep -n "实现未开始\|Active（计划已确认" README.md docs/README.md docs/acceptance/README.md \
@@ -6026,12 +6034,12 @@ grep -n "实现未开始\|Active（计划已确认" README.md docs/README.md doc
 ```
 Expected: 4 处旧状态；同时 P4 规格退出清单 7 个 `- [ ]`。
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: 同上 + `grep -c "^- \[ \]" docs/specs/p4-ticket-orchestration-kernel.md`
 Expected: 旧状态仍在；退出清单 7 项未勾；H1/H2/H3 证据栏为空。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 - 规格退出清单 7 项全部 `- [x]`，每项追加 `（2026-11-03 实测，证据见账本 <条目>）`；
 - Roadmap P4 段状态改为"实现完成，待远端 CI 收口"并列出 M1/M2/M3 提交区间；
@@ -6042,7 +6050,7 @@ Expected: 旧状态仍在；退出清单 7 项未勾；H1/H2/H3 证据栏为空�
   H2/H3 写 M2 出口实测输出，H4 写 Task 26 矩阵结果，H5 写 FOCUS 18 项本地闸门输出；
   M3.6 勾选（"收口"字样留给 Task 30）。
 
-- [ ] **Step 4: 跑到绿**
+- [x] **Step 4: 跑到绿**
 
 ```bash
 grep -n "实现未开始\|Active（计划已确认" README.md docs/README.md \
@@ -6052,7 +6060,7 @@ grep -c "^- \[x\]" docs/specs/p4-ticket-orchestration-kernel.md   # 期望 7
 ```
 Expected: `STATUS-SYNCED`；规格 7 项全勾；测试不回归。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add README.md CHANGELOG.md docs/
@@ -6075,7 +6083,7 @@ git commit -m "docs: sync the p4 surface and record the quality gates"
 - Consumes: Task 23~29 的全部提交；`gh` CLI 的 Actions 查询。
 - Produces: `main` 上 CI 3.10/3.12 双绿；run URL/ID 记入账本；DoD 60/60、里程碑 30/30。
 
-- [ ] **Step 1: 取得授权并准备合并（停下等维护者确认）**
+- [x] **Step 1: 取得授权并准备合并（停下等维护者确认）**
 
 先向维护者确认："是否允许把 `feat/p4-m2-width` 合并并推送 `main`，并在 CI 绿后推送
 run-ID 回填提交？"未获确认前不执行任何远程写。确认后：
@@ -6088,7 +6096,7 @@ git switch main && git pull --ff-only origin main
 git merge --ff-only feat/p4-m2-width   # 非快进则停下，回到维护者
 ```
 
-- [ ] **Step 2: 推送并等待远端 CI**
+- [x] **Step 2: 推送并等待远端 CI**
 
 ```bash
 git push origin main
@@ -6097,13 +6105,13 @@ gh run watch <run-id> --exit-status
 ```
 Expected: 两个 job（Python 3.10 / 3.12）均 success；`pytest` 条数与本地一致；FOCUS 18 项全部 ≥90%。
 
-- [ ] **Step 3: 回填 run 证据与最终状态**
+- [x] **Step 3: 回填 run 证据与最终状态**
 
 在账本 H6 与 M3 出口记 run URL/ID、两个 job 的测试条数与覆盖率；首屏状态改为"收口"，
 DoD **60/60**、里程碑 **30/30**；Roadmap / docs README / 根 README / acceptance README 的
 P4 行改 ✅；规格退出清单无遗漏。
 
-- [ ] **Step 4: 推送回填并复核第二个 run**
+- [x] **Step 4: 推送回填并复核第二个 run**
 
 ```bash
 git add README.md docs/
@@ -6114,7 +6122,7 @@ git status                      # clean
 ```
 Expected: 第二个 run 同样双绿；账本记录的 run ID 是最终提交对应的那一个。
 
-- [ ] **Step 5: 出口复核**
+- [x] **Step 5: 出口复核**
 
 ```bash
 .venv/bin/pytest -q

@@ -364,7 +364,7 @@ enum members, new config sections).
 | P1 | Worker runtime: loop, OpenAI provider, tool loop, pause/resume | ✅ done |
 | P2 | Checkpoint & recovery: 3 backends, self-healing, snapshot versioning | ✅ done — 34/34, CI matrix green on 3.10 & 3.12 |
 | P3 | Worker context runtime: compression, capability view, budget, evidence | ✅ done — 52/52, CI matrix green on 3.10 & 3.12 (run 41384598912) |
-| P4 | Ticket orchestration: Ticket, Assignment, Scheduler, DAG, Durable Outbox | 🟡 implementation complete — awaiting remote CI closeout (59/60 DoD, 29/30 steps) |
+| P4 | Ticket orchestration: Ticket, Assignment, Scheduler, DAG, Durable Outbox | ✅ done — 60/60, 30/30 milestones, CI matrix green on 3.10 & 3.12 (run 41596456428) |
 | P5 | Guarded execution and repository integration | ⏳ |
 | P6 | Single-repository Super-Agent Beta | ⏳ |
 | P7 | Production hardening and ecosystem | ⏳ |
