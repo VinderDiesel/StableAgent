@@ -580,7 +580,12 @@
 
 ### G. 本地接口、示例与故障演练（spec WP-4.6）
 
-- [ ] **G1** `examples/04_ticket_orchestration.py` 可离线运行并打印时间线（父/子 Ticket + 依赖 + 两个脚本 Worker）。
+- [x] **G1** `examples/04_ticket_orchestration.py` 可离线运行并打印时间线（父/子 Ticket + 依赖 + 两个脚本 Worker）。
+      证据（2026-11-03，Task 23/24）：`--phase run` 每行 JSON 打印 `report`/`ticket`/`assignment`，
+      末行 `RUN_RESULT status=completed tickets=2`；`tests/integration/test_ticket_example.py::
+      test_run_phase_completes_parent_and_child` 断言父 Ticket 结束先于子 Ticket 的首个 Assignment
+      （依赖真实生效）；`--phase selftest` 在子进程被 SIGKILL 后输出
+      `SELFTEST ok=True killed=True completed=2`（`test_selftest_phase_kills_then_recovers`）。
 - [x] **G2** 集成测试：子进程 + SIGKILL + 新进程 `recover()`，终态正确、已完成 Assignment 不重复启动。
       证据（2026-11-02，Task 10）：`tests/integration/test_ticket_recovery.py::test_crash_mid_flight_then_recover_finishes`
       通过（`1 passed in 3.29s`，连跑两次一致）。子进程 `ticket_recovery_child.py` 双 Ticket 入队，
@@ -588,8 +593,22 @@
       `{"interrupted_assignments": 1, "reclaimed_effects": 0, "relaunched": 1}`，DB 断言：先 ended 的
       Assignment 保持 ended、无 running 残留、恢复进程只建 1 个 Worker 且 Provider 调用次数恰为
       `[3]`（从 step-1 快照续放的确定性步数——M1.9 的"调用次数硬断言"）。
-- [ ] **G3** ADR-04 记录 Ticket/AgentState 边界、状态机、outbox 事务、幂等键、输入投递语义、
+- [x] **G3** ADR-04 记录 Ticket/AgentState 边界、状态机、outbox 事务、幂等键、输入投递语义、
       单驱动规则与被否决方案（已成文，实现后把"计划"字样改为实际证据）。
+      证据（2026-11-03，Task 27）：[ADR-04](../design-decisions/04-ticket-orchestration.md) 状态行改为
+      `Accepted（2026-11-03 实现完成，M2 出口全绿，证据见账本）`，"测试与证据"已换成实测清单
+      （用例数、关键测试名、DoD 锚点、示例/基准/CI）；七项锚点如下：
+      1. Ticket/AgentState 边界 → 决策 1（包边界、顶层不重导出）、决策 5（Report 只读结构化字段）、
+         "迁移与兼容"末条（P4 不写 `AgentState`）；
+      2. 状态机 → 决策 7（三纯函数集中推进，Repository 无任意字段更新）；
+      3. outbox 事务 → 决策 3（事务内禁 await、提交前不得启动 Worker）与决策 2；
+      4. 幂等键 → 决策 4、"前置 ADR 遗留项的处置"第 1 条（三处唯一键）、被否决方案表中
+         "用内存标志实现 effect 幂等"；
+      5. 输入投递语义 → 决策 6（`aresume(extra_input=...)` 只在暂停/空闲边界）与决策 5
+         （`PAUSED(needs_human)→waiting_for_human`）；
+      6. 单驱动规则 → 决策 4（`_tasks` 只作取消句柄、`DuplicateLaunchError`）与 4.1
+         （`worker_run_id` 在第一个 step 边界注册）；
+      7. 被否决方案 → "被否决方案"整节（线程池、子进程 per Assignment、直改 checkpoint 等 11 条）。
 - [x] **G4** `OrchestrationService` 十个命令全部可用且非法输入抛稳定 `OrchestrationError` 子类
       （spec 原文写 `UserError`，Core 无此基类，口径见 spec 第 6 节第 8 条）
       （未知 ID、非法状态、环、已结束写入、跨 Ticket 报告）。

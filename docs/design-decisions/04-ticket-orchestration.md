@@ -1,9 +1,9 @@
 # ADR-04：Ticket 编排内核与 Durable Outbox（P4）
 
-- 状态：Accepted（决策已接受，实现尚未开始；证据条目在 [P4 验收账本](../acceptance/p4-ticket-orchestration.md) 逐条落地）
-- 日期：2026-11-02
+- 状态：Accepted（2026-11-03 实现完成，M2 出口全绿，证据见账本）
+- 日期：2026-11-02（决策）；2026-11-03（实测证据回填）
 - 关联：[公共契约](00-contracts.md)、[ADR-01 Loop](01-loop-runtime.md)、[ADR-02 Checkpoint](02-checkpoint.md)、[ADR-03 Context](03-context-engineering.md)、[P4 实施规格](../specs/p4-ticket-orchestration-kernel.md)、[P4 验收账本](../acceptance/p4-ticket-orchestration.md)
-- 代码入口（计划）：`stableagent/orchestration/{model,store,outbox,executor,scheduler,service,errors}.py`、`stableagent/core/agent.py`
+- 代码入口：`stableagent/orchestration/{model,store,outbox,executor,scheduler,service,errors}.py`、`stableagent/core/agent.py`
 
 ## 背景
 
@@ -64,15 +64,15 @@ P4 要回答的是"多个长期任务如何被组织"：创建 `Ticket`、派生
 
 ### 4. 恢复所有权：内存句柄不是事实源
 
-`Scheduler._tasks: dict[worker_run_id, asyncio.Task]` 只作取消句柄；一切可运行性从 Store 推导
-（规格 WP-4.5.1）。同一 `worker_run_id` 已在 `_tasks` 中时拒绝第二次驱动并抛 `DuplicateLaunchError`，
-因此 Scheduler 重启不会并发恢复同一 Assignment。
+`Scheduler._tasks: dict[assignment_id, asyncio.Task]` 只作取消句柄；一切可运行性从 Store 推导
+（规格 WP-4.5.1）。`assignment_id` 已在 `_tasks` 中时拒绝第二次驱动并抛 `DuplicateLaunchError`，
+因此 Scheduler 重启不会并发恢复同一 Assignment（同一 `worker_run_id` 另有数据库唯一键兜底）。
 
 `recover()` 把崩溃时为 `running` 的 Assignment 标 `interrupted`，以含 `attempt` 的幂等键重新入队
 `launch_assignment`，executor 走 `Agent.stream_recover(worker_run_id)`——不重放 Event、不复制 state，
 沿用 ADR-02 的快照恢复语义。已 `ended` 的 Assignment 不得被再次启动，测试以 Provider 调用次数断言。
 
-### 4.1 补充（写计划时发现）：`worker_run_id` 在第一个 step 边界注册，而不是启动前
+### 4.1 补充（规格修订）：`worker_run_id` 在第一个 step 边界注册，而不是启动前
 
 规格 WP-4.4.5 要求"每次启动前注册 Assignment 的 `worker_run_id`"，但 Core 在 `Agent._drive()` 内部
 才生成 run_id（`stableagent/core/agent.py:325`），公开事件流里它只出现在 `CHECKPOINT` 事件的
@@ -159,18 +159,66 @@ Report 判定只读结构化字段（`Event.type`、`AgentStatus`、`PauseReason
 - P5 复用 P4 的 `WorkerExecutor` 协议：协议签名变化必须走新 ADR，P5 只提供新实现。
 - 旧快照与旧事件流不受影响：P4 不写 `AgentState`，只读 Worker 产出并映射为 Report。
 
-## 测试与证据（计划，逐条在账本落地）
+## 测试与证据（实测，2026-11-03）
 
-- `tests/unit/test_orchestration_model.py`：全部合法/非法转换、序列化 round-trip、注入 ID/clock 的确定性。
-- `tests/unit/test_orchestration_store.py`：事务回滚、重入与"事务内不得 await"守卫、重开无损、唯一键、迁移、排序分页。
-- `tests/unit/test_outbox.py`：commit 后执行、重复 dispatch、幂等键、失败耗尽、同 Assignment 保序、不同 Ticket 并发。
-- `tests/unit/test_agent_executor.py`：Event→Report 映射、`stream_recover` 恢复、取消、重复 launch 防护。
-- `tests/unit/test_scheduler.py`：并发上限、依赖两策略、环拒绝、优先级顺序、隔离、重试、`recover()`、单 run 单驱动。
-- `tests/unit/test_orchestration_boundaries.py`：`core/**` 与 `context/**` 不 import `orchestration`（AST 扫描）、
-  `git diff 46441f0 -- stableagent/core/loop.py` 为空。
-- `tests/integration/test_ticket_recovery.py`：子进程建库跑到两个 Assignment 后 SIGKILL，新进程 `recover()` 后终态正确、
-  已完成 Assignment 不重跑、pending/retry_wait effect 继续执行。
-- L4 复验（M2）：`tests/l4_default_stream_dump.py` 重新 dump 与既有 fixture 逐字节相等。
+全仓 `424 passed, 1 skipped`，行覆盖率 98.46%；下述用例全部离线确定性（注入 ID/clock、脚本化
+Provider、无网络/墙钟/随机），账本条目以 `A1`–`L8` 引用。
+
+- `tests/unit/test_orchestration_model.py`（25）：A1–A4、A6。关键用例
+  `test_ticket_round_trips_and_is_deterministic`、`test_legal_ticket_transitions`（9 条参数化）、
+  `test_assignment_attempt_starts_at_one_and_rejects_zero`、
+  `test_ready_is_not_completed_and_completed_is_terminal`、`test_m2_effect_kinds_close_the_whitelist`
+  （effect kind 白名单三值收口）。
+- `tests/unit/test_orchestration_store.py`（19）：B1–B7、L6。关键用例
+  `test_transaction_is_atomic_for_both_ticket_and_effect`、
+  `test_nested_transaction_is_rejected_and_flag_clears`、
+  `test_reopen_loses_nothing_and_unique_keys_hold`、
+  `test_concurrent_reader_only_sees_committed_state`、
+  `test_runnable_order_is_woken_then_queued_then_created`。
+- `tests/unit/test_outbox.py`（9）：C3–C7、L6（handler 不持事务）。关键用例
+  `test_enqueue_is_idempotent_on_kind_and_key`、`test_handler_never_sees_an_open_transaction`、
+  `test_handler_exception_retries_then_fails_without_memory_flags`、
+  `test_orphan_running_effects_are_reclaimed`、`test_deferrable_error_backs_off_without_burning_budget`。
+- `tests/unit/test_agent_executor.py`（13）：D1–D7、F2 的 Worker 侧。关键用例
+  `test_checkpoint_required_worker_is_refused_before_any_io`、
+  `test_run_id_is_registered_once_at_the_first_step_boundary`、
+  `test_recover_uses_stream_recover_and_never_replays_events`、
+  `test_done_emits_ready_report_with_verbatim_diagnostic_payload`、
+  `test_deliver_resumes_parked_agent_and_consumes_input`。
+- `tests/unit/test_scheduler.py`（32）：E1–E9、L7。关键用例
+  `test_two_slots_cap_concurrent_workers`、`test_delivery_waits_for_park_boundary_and_keeps_sequence`、
+  `test_woken_ticket_precedes_older_queued_ones`、`test_recover_leaves_ended_tickets_alone`、
+  `test_deadline_timeout_cancels_assignment_and_blocks_ticket`、
+  `test_queued_downstream_waits_for_upstream_before_launching`、
+  `test_launch_effect_for_blocked_ticket_is_voided`。
+- `tests/unit/test_orchestration_service.py`（22）：A5、C2、E4–E6、G4。关键用例
+  `test_all_ten_commands_exist`、`test_stable_error_matrix`、`test_view_is_derived_only_from_records`、
+  `test_retry_ticket_adds_an_attempt_and_keeps_history`、
+  `test_add_dependency_rejects_direct_and_indirect_cycles`。
+- `tests/unit/test_orchestration_boundaries.py`（13）：约束 1/2/6、L1、L3–L5、L8、B7。关键用例
+  `test_core_layers_never_import_orchestration`（core/context/providers/tools 四层 AST 扫描）、
+  `test_loop_py_is_byte_identical_to_p4_base`、`test_agent_state_dump_has_no_ticket_fields`、
+  `test_orchestration_version_is_independent_and_not_reexported`、
+  `test_every_error_carries_a_stable_code`（G5 的清单来源）。
+- `tests/unit/test_l4_default_equivalence.py`（2）：约束 4、决策 6 的默认路径。
+  `test_p3_default_config_stream_identical_to_p2` 与 `test_l4_golden_covers_the_three_p3_switches`；
+  另以 `PYTHONPATH=. .venv/bin/python -m tests.l4_default_stream_dump |
+  diff - tests/fixtures/l4_p2_default_stream.json` 复核，无输出即逐字节相等（L2）。
+- `tests/integration/test_ticket_recovery.py`（1）：E8、C5。子进程双 Ticket 跑到第 2 个 Report 后
+  SIGKILL；新进程 `recover()` 后 `interrupted_assignments=1`，先 ended 的 Assignment 不重跑，
+  恢复进程 Provider 调用数恰为 `[3]`（G2）。
+- 示例：`examples/04_ticket_orchestration.py --phase run`（父/子 Ticket + 依赖 + 两个脚本 Worker）
+  与 `tests/integration/test_ticket_example.py`（2）覆盖 run 面；`--phase selftest` 在子进程被
+  SIGKILL 后输出 `SELFTEST ok=True killed=True completed=2`（G1、M3.1、M3.2）。
+- 基准：`benchmarks/orchestration_benchmark.py`，50 Ticket / 100 Assignment、3 轮中位数：
+  `tick` 34.9 ms、`recover` 38.3 ms、`drain` 122.3 ms；原始 JSON 与复现步骤见
+  [证据 2026-11-03](../evidence/p4-orchestration-benchmark-2026-11-03.md)。只用于验证本 ADR
+  "后果与代价"第一条的量级，不外推为性能承诺（H7）。
+- CI：`.github/workflows/ci.yml` 的心脏覆盖率闸门为 18 个文件（新增
+  `orchestration/{model,store,outbox,executor,scheduler,service}.py`），每个 ≥90%；
+  `tests/unit/test_ci_focus_gate.py`（1）锁死路径清单与步骤名（M3.3、H5）。
+- 解释器矩阵：`uv venv --python 3.10|3.11|3.12` 三套环境各自全绿、覆盖率 98.46%、18/18
+  闸门文件 ≥90%（M3.4、H4）；基准用例为矩阵之后新增，当前全仓（3.12）425 项。
 
 ## 前置 ADR 遗留项的处置（2026-11-02 补充）
 
@@ -183,13 +231,15 @@ Report 判定只读结构化字段（`Event.type`、`AgentStatus`、`PauseReason
 2. **后果 4（"Provider 调用整体的硬超时留待 P4 的预算治理，因为二者共享同一个 deadline 模型"）**：
    拆成两层归属。
    - **外层 Assignment deadline 归 P4**（M2 新增账本项 E9）：`deadline_at` 超时由 Scheduler 用
-     `asyncio.timeout` 包住 executor 任务，写 `cancel_assignment` effect 并把 Ticket 置 `blocked`
-     带结构化原因。它只依赖本 ADR 决策 2 的单循环模型，不动 Core。
+     `ensure_future` + `asyncio.wait(timeout=budget)` 包住 executor 任务（3.10 兼容，不用
+     `asyncio.timeout`），超时后由 `service.expire_assignment()` 直接落 Assignment `cancelled`、
+     Ticket `blocked` 并写 `reason=deadline_exceeded` 的 BLOCKED Report；不再入队
+     `cancel_assignment`（已无在途 task 可取消）。它只依赖本 ADR 决策 2 的单循环模型，不动 Core。
    - **内层 Provider 单次调用硬超时不属于 P4**：它要在 `stableagent/core/` 的调用点包裹
      `asyncio.timeout`，与决策 6 锁定的"P4 只允许一处 Core 兼容扩展"直接冲突，因此改归
      P7 [WP-7.2 多 Provider 与成本路由](../specs/p7-production-hardening-ecosystem.md)。
      deadline 模型不再"共享一个入口"：P4 管任务级，P7 管单次调用级，两者以
-     `cancel_assignment` effect 与 `ProviderConfig.request_timeout_seconds` 分别可观测。
+     BLOCKED Report 的结构化原因与 `ProviderConfig.request_timeout_seconds` 分别可观测。
 
 本处置不改写 ADR-02 的结论；在 ADR-02 原条目处只追加了指向本文的日期说明。
 
