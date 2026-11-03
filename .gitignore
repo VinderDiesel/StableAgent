@@ -15,3 +15,6 @@ coverage.xml
 # 本地演示/基准产物（examples/03、benchmarks 生成）
 .demo-checkpoint/
 .bench-checkpoint/
+
+# 本地解释器矩阵（Task 26）
+.matrix/
