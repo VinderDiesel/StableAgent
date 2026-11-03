@@ -6,9 +6,10 @@
 > + [ADR-03 Context](../design-decisions/03-context-engineering.md)（默认不增加事件噪音的结论）。
 >
 > **状态：Active（2026-11-02 计划经维护者确认；实现已在分支 `feat/p4-m1-skeleton` 上开始，
-> DoD 29/60，里程碑步骤 10/30，M1 任务级步骤 50/50——M1 出口命令全绿，M2 待开工）。**
+> DoD 29/60，里程碑步骤 10/30，M1 任务级步骤 50/50——M1 出口命令全绿。
+> M2 任务级计划已成文为第 7 节（2026-11-03），待开工，执行分支 `feat/p4-m2-width`）。**
 >
-> 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6 节的 M1 任务级步骤），
+> 使用方式：本文件既是 P4 的实施计划（第 1 节的里程碑步骤 + 第 6/7 节的 M1/M2 任务级步骤），
 > 也是 P4 的验收账本（第 0、2 节）。
 > 每个可勾选事项都写明需求来源、可执行验证方法、对应测试或命令、证据占位；全部勾选且第 3 节命令
 > 在 CI 复现后 P4 才算收口。计划推进时把实际输出追加到对应条目，不重写已记录的历史输出。
@@ -16,7 +17,8 @@
 > **计数口径**：DoD = 第 0 节 L1~L8（8 项）+ 第 2 节 A~H（52 项）= 60 项；
 > 里程碑步骤 = M1 的 10 项 + M2 的 12 项 + M3 的 8 项 = 30 项。里程碑与 DoD 的归属见第 1.4 节。
 > 第 6 节的 50 个 Step 是 M1 十个里程碑步骤的执行粒度（Task↔M1.x 对照见第 6 节开头），
-> 不计入 30 项；M2/M3 的同粒度计划在各自里程碑开工前追加为第 7、8 节。
+> 第 7 节的 60 个 Step 是 M2 十二个里程碑步骤的执行粒度（Task↔M2.x 对照见第 7 节开头），两批都不计入
+> 30 项；M3 的同粒度计划在 M3 开工前追加为第 8 节。
 
 ---
 
@@ -3282,3 +3284,1906 @@ git commit -m "test: prove the control plane survives a kill mid-flight"
   已改为 Task 7 的行为断言，并把"崩在注册之前"的空 run_id 行显式允许；
   (3) 规格第 4 节要求抛 `UserError` 子类而 Core 无此类，已按 spec 第 6 节第 8 条落为
   `OrchestrationError(ValueError)`。
+
+---
+
+## 7. M2 任务级实施计划（writing-plans 产出，2026-11-03）
+
+> **For agentic workers:** REQUIRED SUB-SKILL: 用 `superpowers:subagent-driven-development`（推荐）或
+> `superpowers:executing-plans` 逐任务实施；每个 Step 是一步动作，勾选推进。
+> 本计划只覆盖 **M2**；M3 的同粒度计划在 M2 出口命令全绿后追加为第 8 节（规格使用规则 4）。
+
+**Goal:** 把 M1 的端到端骨架加宽成完整控制面——后续输入在暂停边界投递给 Worker（含唯一一处 Core
+兼容扩展）、取消、重试、依赖 DAG、真并发与优先级锁死、effect 失败治理与 Assignment deadline，
+`OrchestrationService` 十命令齐备并登记稳定错误码清单。Core 只动 `core/agent.py` 一处，`loop.py` 保持零 diff。
+
+**Architecture:** M1 的三层不变：单 asyncio 循环、Store 是唯一事实源、service 是唯一写入口。
+M2 新增的接缝只有一个——**暂停驻留（park）**：`PAUSED` 不再结束 Assignment，executor 保存活的 Agent
+实例并把 Ticket 翻到 `waiting|blocked`（槽位随协程返回释放，即 E2 的 "waiting/blocked 释放"半句）；
+`deliver_input` effect 由 Store 状态门控，只在驻留边界消费一条最旧的未消费 Input；
+崩溃后驻留丢失，投递退避直至超限派生 `blocked` Report，人工 `retry_ticket` 把未消费 Input 带进
+新 attempt 的 launch task（D6 的"空闲边界"）。投递绝不抢占运行中的 `advance()`。
+
+**Tech Stack:** 同第 6 节。
+
+**Spec:** [P4 实施规格](../specs/p4-ticket-orchestration-kernel.md)（第 6 节第 3、5、6 条是 M2 的直接依据）
+与 [ADR-04](../design-decisions/04-ticket-orchestration.md)（决策 6/7 与被否决方案表）。两份必须与本计划一起阅读。
+
+### Global Constraints（M2 特有增量；第 6 节 Global Constraints 全部继续生效）
+
+- M2 开工先建分支：`git checkout -b feat/p4-m2-width`（自 M1 出口提交 `9600a84`）。
+- **Core 只允许 Task 11 一处改动**：`Agent.resume()/aresume()` 增 `extra_input: str | None = None`
+  （L2/ADR-04 决策 6）。除此之外 `stableagent/core/` 与 `stableagent/context/` 一行不改；
+  每个 Task 的 Step 4 顺带跑 `git diff 2eaea4f^..HEAD --stat -- stableagent/core/`（只允许出现
+  `stableagent/core/agent.py`，且 diff 只来自 Task 11）。
+- `core/loop.py` 哈希测试（L1）每次出口必须保持绿——它是离线口径，不依赖 git 区间。
+- **Python 3.10 兼容**：`asyncio.timeout`（3.11+）禁用；E9 用 `asyncio.wait_for` 等价实现，
+  异常捕获写 `except (TimeoutError, asyncio.TimeoutError)`（3.10 上二者不同型，3.11+ 同型，都写不报错）。
+- **协议冻结**：`WorkerExecutor` 四方法签名不变（ADR-04 迁移条款，P5 要换实现）。
+  新回写能力一律加在 `AssignmentSink`/`service` 上（该协议未对外承诺）。
+- **effect kind 闭合**：`EffectKind` 只新增 `deliver_input`、`cancel_assignment`（C1 白名单到此为止）。
+- **schema 只做加列（兼容扩展规则：新字段一律带默认值）**：`assignments.deadline_at INTEGER`、
+  `inputs.state TEXT NOT NULL DEFAULT 'pending'`、`effects` 加 due 索引；
+  `ORCHESTRATION_SCHEMA_VERSION` 保持 `0.1.0`（未进公共面，P6 前无既有库要迁移的真实风险）。
+- 新增转换边只有三条，全部要在 `test_orchestration_model.py` 矩阵里显式登记：
+  `(BLOCKED, START)→RUNNING`（预算暂停后投递唤醒）、`(FAILED, RETRY)→QUEUED`（retry_ticket）、
+  `(QUEUED, BLOCK)→BLOCKED`（依赖 block 策略）。终态不复活（COMPLETED/CANCELLED 无出边）与
+  effect 幂等规则（C3）不变；`_ASSIGNMENT_TABLE` 与 `_EFFECT_TABLE` 零改动。
+- 幂等键格式追加两种：`deliver:{ticket_id}:{sequence}`、`cancel:{assignment_id}`；
+  `launch:{assignment_id}:{attempt}[:relaunch]` 沿用 M1。
+- 测试全离线：投递退避、deadline、依赖判定一律走注入 `FixedClock`/`SequenceIds`，
+  SIGKILL 演练不在 M2 重复（G2 已勾，M2 出口不重跑 `test_ticket_recovery.py` 以外的进程演练）。
+
+### 文件结构（M2）
+
+```text
+stableagent/core/agent.py             # 修改（M2 唯一 Core 改动：resume/aresume extra_input）
+stableagent/orchestration/
+  model.py                            # 修改：EffectKind +2、TicketAction +RETRY、Assignment.deadline_at、
+                                      #        TicketInput.state、转换表 +3 边
+  errors.py                           # 修改：CyclicDependencyError、DeferrableEffectError（G5 清单 +2）
+  store.py                            # 修改：_migrate()（加列+索引）、update_input/get_effect、
+                                      #        list_all_dependencies、inputs state 过滤
+  outbox.py                           # 修改：eligible 门控、Deferrable 回退（不耗 attempts）、
+                                      #        backoff 注入、on_exhausted 派生钩子
+  executor.py                         # 修改：park 集合与 PAUSED 分支、deliver、cancel、终态 Report
+  scheduler.py                        # 修改：三 kind handler、Store 门控、wait_for deadline、exhausted 接线
+  service.py                          # 修改：submit_input/retry_ticket/cancel_ticket/add_dependency、
+                                      #        wake_for_delivery/mark_input_consumed/expire_assignment、
+                                      #        依赖门控（enqueue_work 内）
+tests/
+  support.py                          # 修改：StubAgent.aresume、RecordingSink.consumed
+  unit/test_agent_recovery.py         # 增用例（Task 11）
+  unit/test_orchestration_model.py    # 增用例（kind 闭合、新边矩阵、deadline/state round-trip）
+  unit/test_orchestration_store.py    # 增用例（旧形库迁移、state 回填）
+  unit/test_outbox.py                 # 增用例（门控、回退、backoff 注入、超限钩子）
+  unit/test_agent_executor.py         # 增用例（park/deliver/cancel/五 kind Report）
+  unit/test_scheduler.py              # 增用例（保序/并发/不抢占/取消释放/优先级/deadline/recover 全语义）
+  unit/test_orchestration_service.py  # 增用例（四新命令 + G4 十命令与稳定错误矩阵）
+  unit/test_orchestration_boundaries.py # 增用例（G5 code 清单、planning 未被引入 = E3）
+```
+
+### 三处设计裁定（规格留白，计划在此定死；M3 回填 ADR-04"测试与证据"小节）
+
+1. **park 语义取代"PAUSED 即结束 Assignment"**。M1 实现里 `PAUSED → finish_assignment(END)`；
+   M2 改为：Assignment 保持 `RUNNING`、Ticket 进 `waiting|blocked`、executor 记住活 Agent 实例、
+   Worker 协程返回（槽位随之释放）。依据：E2 原文"到终态/waiting/blocked 释放"的宽口径、
+   D6"投递只发生在空闲/暂停边界"、ADR-04 决策 6（`deliver_input` handler 是 `aresume(extra_input)`
+   唯一调用方，需要活实例）。`test_agent_executor.py` 里 M1 的
+   `test_protocol_methods_not_in_scope_raise_clearly` 随 Task 13/15 替换为实现态断言。
+2. **门控只读 Store**。`deliver_input` 是否可领取，判据是 Ticket 状态 ∈
+   {`waiting`,`blocked`}（或已终态→handler 空转 succeed）；运行中的 Ticket 不领、不 claim、
+   不耗 attempts——内存驻留集合不参与可运行性判定（E1/L7 口径）。崩溃后驻留丢失时
+   `executor.deliver` 抛 `DeferrableEffectError`，dispatcher 退避且不记失败次数，超限经
+   `on_exhausted` 派生 `blocked` Report，此后唯一出路是人工 `retry_ticket`（新 attempt 的
+   launch task 会并入全部未消费 Input——D6 的"空闲边界"在新 run 起点兑现）。
+3. **每条 deliver effect 消费一条最旧 Input**（按 `sequence`）。effect 与 input 以计数配对
+   （`deliver:{ticket_id}:{sequence}` 每输入恰一条），跨 crash 重放不重复、不遗漏；
+   不同 Ticket 的投递在同一轮 `dispatch_due()` 里并行（C6 的后半）。
+
+### 任务 ↔ 里程碑步骤与 DoD 对照
+
+第 1 节的 `M2.x` 是记账单位；本节的 Task 是执行单位。一个 Task 的 5 个 Step 全勾完，才回来勾
+对应的 `M2.x`；勾 DoD 项以第 2 节每条自己写的验证命令为准。
+
+| Task | 里程碑步骤 | 本 Task 产生的 M2 归属 DoD 证据 |
+|---|---|---|
+| 11 | M2.3 | F2、F3 |
+| 12 | M2.1（前半） | F1（C2 后半的账在 M1 行 30 项里，此处只记执行落点） |
+| 13 | M2.1 收尾 + M2.2 | C6、D6（E2 形状前提的"waiting/blocked 释放"半边） |
+| 14 | M2.4 | —（G4 的 retry 命令在 21 收口） |
+| 15 | M2.5 | —（D7 后半"取消真实现"的账在 M1 行） |
+| 16 | M2.6 | C4 |
+| 17 | M2.7 | E3、E4、E5、E6 |
+| 18 | M2.8 | E2、E7 |
+| 19 | M2.9 + M2.10 | C5、D4、E8 |
+| 20 | M2.11 | E9 |
+| 21 | 横向收口（不勾 M2.x） | G4、G5、C7（清单核对） |
+| 22 | M2 出口 | L2、F4（并复核 L1） |
+
+第 1.4 节 M2 行的 21 项在这里全部有落点：L2、C4~C7、D4、D6、E2~E9、F1~F4、G4、G5。
+"后半/收尾"式条目（C2、D7）只在其收尾 Task 之后才勾。
+
+执行顺序说明：Task 11 必须先行（Task 13 的 `deliver` 以 `aresume(extra_input)` 为依赖）；
+Task 12 建立 kind/模型/迁移，13 才有门控对象；Task 16 的 `on_exhausted` 依赖 13 已注册的
+`DELIVER_INPUT` handler；其余任务相互独立、按序推进即可。Task 8/9（M1）式的"互为红绿"在本
+里程碑不出现——每个 Task 都能独立变绿。
+
+---
+
+### Task 11: Core 唯一兼容扩展——`resume/aresume(extra_input=…)`
+
+**Files:**
+- Modify: `stableagent/core/agent.py`（本里程碑唯一 Core 改动）
+- Test: `tests/unit/test_agent_recovery.py`（增用例）
+
+**Interfaces:**
+- Produces: `Agent.resume(extra_input: str | None = None) -> AgentState`、
+  `Agent.aresume(extra_input: str | None = None) -> AgentState`；语义：`extra_input` 非 `None` 时，
+  在 `_resume_state()` 产出的 **state 副本**上追加 `Message(role="user", content=extra_input)`，
+  再进 `_continue_pairs`；`None` 时与 M1 逐字节一致（L4 金标准复验）；无 PAUSED 态时沿用既有
+  `ValueError("没有可恢复的 PAUSED 状态")`——带不带 `extra_input` 都抛它（F2 验收原文）。
+- Consumes: 无（不依赖任何编排层符号，方向仍是 core ← orchestration，L4 不变）。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_agent_recovery.py 追加（并入既有导入块，不另起 import）
+async def test_aresume_extra_input_appends_user_message_to_state_copy() -> None:
+    provider = FakeProvider([final_response("追加线索后的终答")])
+    agent = Agent(name="extra", provider=provider, config=Config())
+    snapshot = AgentState(
+        run_id="r-extra",
+        agent_name="extra",
+        status=AgentStatus.PAUSED,
+        messages=[Message(role="user", content="原任务")],
+    )
+    agent._last_state = snapshot  # 白盒：构造"已在内存里暂停"的既有形状（与 d1 用例同构）
+    final = await agent.aresume(extra_input="追加线索")
+    assert final.status is AgentStatus.SUCCEEDED
+    sent = provider.calls[-1][0]
+    assert sent[-1] == Message(role="user", content="追加线索")  # 追加在副本末尾
+    assert snapshot.messages[-1].content == "原任务"             # 原快照对象未被就地改写
+
+
+async def test_aresume_without_paused_rejects_extra_input_too() -> None:
+    agent = Agent(name="x", provider=FakeProvider([final_response("用不到")]))
+    with pytest.raises(ValueError, match="没有可恢复的 PAUSED 状态"):
+        await agent.aresume(extra_input="追加线索")
+
+
+def test_resume_sync_signature_accepts_extra_input() -> None:
+    agent = Agent(name="x", provider=FakeProvider([]))
+    with pytest.raises(ValueError, match="没有可恢复的 PAUSED 状态"):
+        agent.resume(extra_input="追加线索")
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_agent_recovery.py -k extra -v`
+Expected: FAIL — `TypeError: aresume() got an unexpected keyword argument 'extra_input'`
+
+- [ ] **Step 3: 实现（`agent.py` 只改三个方法签名，循环体零改动）**
+
+```python
+# stableagent/core/agent.py（替换既有 aresume/resume/_resume_state 三处）
+    async def aresume(self, extra_input: str | None = None) -> AgentState:
+        return await self._continue(self._resume_state(extra_input))
+
+    def resume(self, extra_input: str | None = None) -> AgentState:
+        return asyncio.run(self.aresume(extra_input))
+
+    def _resume_state(self, extra_input: str | None = None) -> AgentState:
+        if self._last_state is None or self._last_state.status is not AgentStatus.PAUSED:
+            raise ValueError("没有可恢复的 PAUSED 状态")
+        state = self._last_state.model_copy(update={"status": AgentStatus.RUNNING})
+        if extra_input is not None:  # 追加到副本（ADR-04 决策 6：绝不回写 _last_state）
+            state = state.model_copy(
+                update={"messages": [*state.messages, Message(role="user", content=extra_input)]}
+            )
+        return state
+```
+
+- [ ] **Step 4: 跑到绿（含默认路径逐字节不变的复验）**
+
+Run:
+```bash
+.venv/bin/pytest -q tests/unit/test_agent_recovery.py tests/unit/test_pause_resume.py \
+    tests/unit/test_l4_default_equivalence.py --no-cov
+.venv/bin/mypy && .venv/bin/ruff check stableagent && .venv/bin/ruff format --check stableagent
+git diff 2eaea4f^..HEAD --stat -- stableagent/core/   # 只允许出现 agent.py 一行
+```
+Expected: PASS。`test_l4_default_equivalence` 绿即 F3 的"默认路径 payload 不变"成立
+（它就是拿当前代码重跑 dump 与 `46441f0` fixture 逐字节比对）；出口（Task 22）再留一份
+手工 dump diff 的实测记录。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/core/agent.py tests/unit/test_agent_recovery.py
+git commit -m "feat: let a paused worker take one more user turn without changing the default path"
+```
+
+**关闭 DoD：** F2、F3（L4 复验的实测输出在 Task 22 登记进 L2/F3/F4 条目后才整条勾 F4）。
+
+---
+
+### Task 12: 输入投递的落库面——EffectKind 闭合、submit_input、兼容加列
+
+**Files:**
+- Modify: `stableagent/orchestration/model.py`（`EffectKind` +2、`TicketInput.state`、
+  `Assignment.deadline_at`）
+- Modify: `stableagent/orchestration/store.py`（`_migrate()`、`update_input`/`get_effect`、
+  `list_inputs(pending_only)` 改按 `state`、DDL 两处加列 + `effects_due` 索引）
+- Modify: `stableagent/orchestration/service.py`（`submit_input`、`mark_input_consumed`）
+- Test: `tests/unit/test_orchestration_model.py` / `test_orchestration_store.py` /
+  `test_orchestration_service.py`（各追加）
+
+**Interfaces:**
+- Produces: `EffectKind.DELIVER_INPUT`/`CANCEL_ASSIGNMENT`（kind 全集到此 = C1 白名单闭合）；
+  `TicketInput.state: Literal["pending","consumed"] = "pending"`；
+  `Assignment.deadline_at: int | None = None`；
+  `Store.update_input(TicketInput) -> TicketInput`、`Store.get_effect(str) -> Effect | None`；
+  `service.submit_input(ticket_id, text) -> TicketInput`（同事务落 Input + `deliver_input` effect，
+  键 `deliver:{ticket_id}:{sequence}`；非运行中 Ticket 顺带 `woken_at`；终态拒绝）；
+  `service.mark_input_consumed(ticket_id, input_id) -> None`（sink 面，Task 13 起被 executor 调用）。
+- Consumes: Task 1~9 全部既有。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_orchestration_model.py 追加
+def test_m2_effect_kinds_close_the_whitelist() -> None:
+    assert {k.value for k in EffectKind} == {
+        "launch_assignment", "deliver_input", "cancel_assignment"
+    }  # C1：P4 不引入 P5/P6 种类，白名单就此闭合
+
+
+def test_deadline_and_input_state_are_defaulted_compat_fields() -> None:
+    assignment = Assignment(id="as-1", ticket_id="tk-1", attempt=1)
+    assert assignment.deadline_at is None  # 加列即默认值：旧构造不受影响（兼容扩展规则）
+    item = TicketInput(id="in-1", ticket_id="tk-1", sequence=1, payload="x", created_at=1)
+    assert item.state == "pending"
+    assert TicketInput.model_validate_json(item.model_dump_json()) == item
+```
+
+```python
+# tests/unit/test_orchestration_store.py 追加
+OLD_ASSIGNMENT_DDL = (
+    "CREATE TABLE assignments (id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL,"
+    " attempt INTEGER NOT NULL, status TEXT NOT NULL, worker_run_id TEXT,"
+    " started_at INTEGER, ended_at INTEGER, checkpoint_run_id TEXT, failure TEXT,"
+    " worker_config_version TEXT, worker_config TEXT NOT NULL DEFAULT '{}',"
+    " UNIQUE (ticket_id, attempt), UNIQUE (worker_run_id))"
+)
+OLD_INPUTS_DDL = (
+    "CREATE TABLE inputs (id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL,"
+    " sequence INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL,"
+    " created_at INTEGER NOT NULL, delivered_at INTEGER, consumed_at INTEGER,"
+    " UNIQUE (ticket_id, sequence))"
+)
+
+
+def test_m2_migration_adds_columns_and_backfills_state(tmp_path) -> None:
+    legacy = tmp_path / "legacy.db"
+    conn = sqlite3.connect(legacy)
+    conn.execute(OLD_ASSIGNMENT_DDL)
+    conn.execute(OLD_INPUTS_DDL)
+    conn.execute(
+        "INSERT INTO assignments (id,ticket_id,attempt,status) VALUES ('as-1','tk-1',1,'pending')"
+    )
+    conn.execute(
+        "INSERT INTO inputs (id,ticket_id,sequence,kind,payload,created_at,consumed_at)"
+        " VALUES ('in-1','tk-1',1,'text','x',1,9)"
+    )
+    conn.commit()
+    conn.close()
+    migrated = Store(legacy, clock=FixedClock())  # M1 形状的老库：重开即完成迁移
+    try:
+        columns = {row["name"] for row in migrated._conn.execute("PRAGMA table_info(assignments)")}
+        assert "deadline_at" in columns
+        assert migrated.get_assignment("as-1").deadline_at is None
+        assert migrated.list_inputs("tk-1")[0].state == "consumed"  # 由 consumed_at 回填
+    finally:
+        migrated.close()
+
+
+def test_update_input_and_get_effect_are_public(store: Store) -> None:
+    item = TicketInput(id="in-1", ticket_id="tk-1", sequence=1, payload="x", created_at=1)
+    store.insert_input(item)
+    store.update_input(item.model_copy(update={"state": "consumed", "consumed_at": 2}))
+    assert store.list_inputs("tk-1", pending_only=True) == []
+    assert store.get_effect("ef-missing") is None
+```
+
+```python
+# tests/unit/test_orchestration_service.py 追加
+def test_submit_input_persists_pending_row_and_effect(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("任务")
+    item = svc.submit_input(ticket.id, "追加线索")
+    assert (item.sequence, item.kind, item.state) == (1, "text", "pending")
+    effects = store.due_effects(clock.now_ms())
+    assert [e.kind for e in effects] == [EffectKind.DELIVER_INPUT]
+    assert effects[0].idempotency_key == f"deliver:{ticket.id}:1"
+    svc.mark_input_consumed(ticket.id, item.id)
+    fresh = svc.get_ticket(ticket.id).inputs[0]
+    assert (fresh.state, fresh.consumed_at is not None) == ("consumed", True)
+
+
+def test_submit_input_wakes_queued_and_refuses_terminal(service) -> None:
+    svc, store, _ = service
+    queued = svc.create_ticket("排队")
+    svc.queue_ticket(queued.id)
+    clock = svc._clock
+    other = svc.create_ticket("更早")
+    svc.queue_ticket(other.id)
+    clock.advance(-0)  # 顺序已由 SequenceIds 固定，见 Step 3 注
+    svc.submit_input(queued.id, "唤醒")
+    assert store.get_ticket(queued.id).woken_at is not None       # 优先级键生效（Task 18 锁死）
+    assert [t.id for t in store.list_runnable_tickets(clock.now_ms())] == [queued.id, other.id]
+    done = svc.create_ticket("已完成")
+    svc.queue_ticket(done.id)
+    svc.transition_ticket(done.id, TicketAction.START)
+    svc.transition_ticket(done.id, TicketAction.DELIVER)
+    svc.complete_ticket(done.id)
+    with pytest.raises(IllegalTransitionError):                   # 已结束写入（G4 一条腿）
+        svc.submit_input(done.id, "太晚了")
+    with pytest.raises(UnknownTicketError):
+        svc.submit_input("tk-missing", "未知")
+
+
+def test_second_input_sequence_increments_per_ticket(service) -> None:
+    svc, _, _ = service
+    ticket = svc.create_ticket("任务")
+    first = svc.submit_input(ticket.id, "线索一")
+    second = svc.submit_input(ticket.id, "线索二")
+    assert (first.sequence, second.sequence) == (1, 2)
+```
+
+（`clock.advance(-0)` 那行是占位提醒：FixedClock 不允许倒退；若实现里不需要调钟就删行——
+SequenceIds 的 `tk-0001/tk-0002` 已固定 `created_at` 同值、`queued_at` 同值，顺序只由
+`woken_at` 决定，无需让时钟走。）
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_store.py tests/unit/test_orchestration_service.py -k "whitelist or compat or migration or public or submit_input or sequence_increments" -v`
+Expected: FAIL —`AttributeError: DELIVER_INPUT` / `TypeError: submit_input` 一族。
+
+- [ ] **Step 3: 实现**
+
+```python
+# model.py：EffectKind 增两员；TicketInput 增 `state: Literal["pending", "consumed"] = "pending"`；
+# Assignment 增 `deadline_at: int | None = None`（放在 worker_config_version 之前，字段序与列序无关）。
+```
+
+```python
+# store.py：_SCHEMA 的 assignments DDL 追加 " deadline_at INTEGER"、inputs DDL 追加
+# " state TEXT NOT NULL DEFAULT 'pending'"（新库直接带新列）；__init__ 在 _create_schema 之后
+# 调 _migrate()：
+    def _migrate(self) -> None:
+        """加列与索引（兼容扩展：全部带默认值）；老库的 inputs.state 由时间戳回填。
+
+        预发布口径：ORCHESTRATION_SCHEMA_VERSION 保持 0.1.0——编排记录尚未对外承诺（ADR-04 决策 1）。
+        """
+        assignment_columns = {row["name"] for row in self._conn.execute(
+            "PRAGMA table_info(assignments)")}
+        input_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(inputs)")}
+        with self.transaction():
+            if "deadline_at" not in assignment_columns:
+                self._conn.execute("ALTER TABLE assignments ADD COLUMN deadline_at INTEGER")
+            if "state" not in input_columns:
+                self._conn.execute(
+                    "ALTER TABLE inputs ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'")
+                self._conn.execute("UPDATE inputs SET state = 'consumed' WHERE consumed_at IS NOT NULL")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS effects_due ON effects (due_at, kind, id)")
+```
+
+`_row_to_assignment` 增读 `deadline_at`、`insert_assignment` 增写该列；`_row_to_input` 读 `state`、
+`insert_input` 写 `state`；`list_inputs(..., pending_only=True)` 的 WHERE 改为 `state = 'pending'`
+（语义不变、实现换列）。新增 `update_input`（按 id 全行 UPDATE，返回入参）与 `get_effect`
+（按 id 单行读，Task 19 的 C5 用例要用公开读面）。`count_effects` 等既有方法不动。
+
+```python
+# service.py
+    def submit_input(self, ticket_id: str, text: str) -> TicketInput:
+        """落库未消费 Input 并入队 deliver_input effect（C2 后半：输入写入后建投递）。"""
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            if ticket.status in TERMINAL_TICKET_STATUSES:
+                raise IllegalTransitionError("ticket", ticket.status.value, "submit_input")
+            now = self._clock.now_ms()
+            sequence = len(self._store.list_inputs(ticket_id)) + 1
+            item = TicketInput(
+                id=self._ids.new_id("in"), ticket_id=ticket_id, sequence=sequence,
+                kind="text", payload=text, created_at=now,
+            )
+            self._store.insert_input(item)
+            if ticket.status is not TicketStatus.RUNNING:
+                self._store.update_ticket(
+                    ticket.model_copy(update={"woken_at": ticket.woken_at or now})
+                )
+            self._store.enqueue_effect(
+                Effect(
+                    id=self._ids.new_id("ef"), kind=EffectKind.DELIVER_INPUT,
+                    idempotency_key=f"deliver:{ticket_id}:{sequence}",
+                    payload={"ticket_id": ticket_id, "input_id": item.id, "sequence": sequence},
+                    due_at=now,
+                )
+            )
+            return item
+
+    def mark_input_consumed(self, ticket_id: str, input_id: str) -> None:
+        """sink 面：投递进 Worker（内存里的 state 副本）之后回写 consumed_at/state。"""
+        with self._store.transaction():
+            for item in self._store.list_inputs(ticket_id):
+                if item.id == input_id:
+                    now = self._clock.now_ms()
+                    self._store.update_input(item.model_copy(update={
+                        "delivered_at": item.delivered_at or now,
+                        "consumed_at": now,
+                        "state": "consumed",
+                    }))
+                    return
+```
+
+`AssignmentSink` 协议（executor.py）同步增 `mark_input_consumed(ticket_id, input_id)` 一员——
+协议扩展只发生在 sink 侧，`WorkerExecutor` 四方法签名不动（Global Constraints）。
+`tests/support.py` 的 `RecordingSink` 补 `self.consumed: list[tuple[str, str]]` 与同名方法。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_store.py tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py --no-cov`
+Expected: PASS；全量 `.venv/bin/pytest -q` 也须绿（`list_inputs` 语义未变，M1 用例不应受损）；
+`.venv/bin/mypy`、`.venv/bin/ruff check stableagent tests` 干净。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/ tests/support.py tests/unit/test_orchestration_model.py \
+    tests/unit/test_orchestration_store.py tests/unit/test_orchestration_service.py
+git commit -m "feat: queue human inputs as durable per-sequence deliveries"
+```
+
+**关闭 DoD：** F1。C2 的"输入写入后创建 `deliver_input`"半边自此成立（勾 C2 在 Task 22 复核
+证据后整条执行）。
+
+---
+
+### Task 13: park 语义与投递门控——不抢占、保序、跨 Ticket 并行
+
+**Files:**
+- Modify: `stableagent/orchestration/outbox.py`（`eligible` 门控 + `DeferrableEffectError` 回退）
+- Modify: `stableagent/orchestration/executor.py`（`_agents` 驻留、PAUSED 分支、`deliver`、
+  驻留报告 `waiting_for_human`）
+- Modify: `stableagent/orchestration/scheduler.py`（`_handle_deliver` + `_gate_deliver` +
+  launch handler 的在途去重门控；`_guarded` 的 launch 传入未消费 Input）
+- Modify: `stableagent/orchestration/errors.py`（`DeferrableEffectError`）
+- Modify: `stableagent/orchestration/model.py`（转换表 +`(BLOCKED, START)`）
+- Modify: `tests/support.py`（`StubAgent.aresume`）
+- Test: `tests/unit/test_outbox.py` / `test_agent_executor.py` / `test_scheduler.py` /
+  `test_orchestration_model.py`（追加；并替换 M1 的 `test_paused_needs_human_maps_to_waiting_and_budget_to_blocked`
+  与 `test_protocol_methods_not_in_scope_raise_clearly` 两条断言到新形状）
+
+**Interfaces:**
+- Produces: `DeferrableEffectError(code="orchestration.effect_deferred")`；
+  `EffectDispatcher(..., eligible: Mapping[EffectKind, Callable[[Effect], bool]] = {})`——
+  门控为 False 的 due effect **不领取、不记 attempts**；handler 抛 `DeferrableEffectError` 时
+  dispatcher 回退（`RETRY` 转态、`attempts` 还掉 claim 的那一次、`due_at = now + backoff_ms`），
+  与"真实失败"两条账；
+  `AgentExecutor.parked_assignments() -> set[str]`、`AgentExecutor.deliver(...)`（驻留实例
+  `aresume(extra_input="\n\n".join(payloads))`）；`service.wake_for_delivery(ticket_id)`
+  （`waiting|blocked → running`，START 边）；`Scheduler` 注册 `DELIVER_INPUT` handler：
+  每次 dispatch 消费该 Ticket 最旧一条未消费 Input（设计裁定 3）。
+- Consumes: Task 12 的 kind/state/键格式；Task 11 的 `aresume(extra_input)`。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_outbox.py 追加
+async def test_ineligible_effects_are_skipped_without_claim(store: Store) -> None:
+    async def handler(effect: Effect) -> None:
+        raise AssertionError("门控关闭时不该被调用")
+
+    with store.transaction():
+        store.enqueue_effect(_launch("ef-1", "k1"))
+    dispatcher = EffectDispatcher(store, {EffectKind.LAUNCH_ASSIGNMENT: handler},
+                                  clock=FixedClock(),
+                                  eligible={EffectKind.LAUNCH_ASSIGNMENT: lambda e: False})
+    assert await dispatcher.dispatch_due() == 0
+    row = store._effect_row("ef-1")
+    assert (row.state, row.attempts) == (EffectState.PENDING, 0)   # 不领取、不记 attempts
+
+
+async def test_deferrable_error_backs_off_without_burning_budget(store: Store) -> None:
+    from stableagent.orchestration.errors import DeferrableEffectError
+
+    async def defer(effect: Effect) -> None:
+        raise DeferrableEffectError("park lost")
+
+    with store.transaction():
+        store.enqueue_effect(_launch("ef-1", "k1"))
+    dispatcher = EffectDispatcher(store, {EffectKind.LAUNCH_ASSIGNMENT: defer},
+                                  clock=FixedClock(), max_attempts=1)
+    for _ in range(3):                                             # 退避三轮也不判死
+        assert await dispatcher.dispatch_due() == 0
+        row = store._effect_row("ef-1")
+        assert (row.state, row.attempts) == (EffectState.RETRY_WAIT, 0)
+        # 时钟由 FixedClock 固定、due_at=now+backoff：后两轮在 due 集合外，此断言只锁第一轮形状
+```
+
+（后两轮 effect 未到期，`dispatch_due` 直接返回 0——循环体因此同时验证"退避在 due 集合外"。
+若想要三轮都进 handler，把循环改成每次 `clock.advance(10_000)` 后再 dispatch，断言不变。）
+
+```python
+# tests/support.py 追加到 StubAgent
+        self.resumed_with: list[str | None] = []
+        self.next_state: Any = None
+
+    async def aresume(self, extra_input: str | None = None):
+        self.resumed_with.append(extra_input)
+        return self.next_state
+```
+
+```python
+# tests/unit/test_agent_executor.py 追加 + 替换两条 M1 用例
+async def test_paused_assignment_parks_instead_of_ending() -> None:
+    sink = RecordingSink()
+    paused = Event(type=EventType.PAUSED,
+                   data={"step": 2, "reason": "needs_human", "detail": None}, step=2)
+    executor, _ = _executor([paused], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert sink.finished == []                                     # 不再 finish_assignment(END)
+    assert sink.ticket_actions == [("tk-1", TicketAction.WAIT.value)]
+    assert [r[2] for r in sink.reports] == [ReportKind.WAITING_FOR_HUMAN.value]
+    assert executor.parked_assignments() == {"as-1"}
+
+
+async def test_deliver_resumes_parked_agent_and_consumes_input() -> None:
+    sink = RecordingSink()
+    paused = Event(type=EventType.PAUSED,
+                   data={"step": 2, "reason": "needs_human", "detail": None}, step=2)
+    executor, agent = _executor([paused], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    agent.next_state = AgentState(run_id="run-1", agent_name="stub",
+                                  status=AgentStatus.SUCCEEDED, messages=[])
+    item = TicketInput(id="in-1", ticket_id="tk-1", sequence=1, kind="text",
+                       payload="新线索", created_at=1)
+    await executor.deliver(_assignment(), _ticket(), [item])
+    assert agent.resumed_with == ["新线索"]
+    assert sink.consumed == [("tk-1", "in-1")]
+    assert sink.finished == [("as-1", AssignmentAction.END.value, None)]
+    assert sink.ticket_actions == [("tk-1", TicketAction.WAIT.value),
+                                   ("tk-1", TicketAction.DELIVER.value)]
+    assert executor.parked_assignments() == set()                  # 收口即除驻
+
+
+async def test_deliver_without_park_defers_instead_of_failing() -> None:
+    executor, _ = _executor([], RecordingSink())
+    with pytest.raises(DeferrableEffectError):
+        await executor.deliver(_assignment(), _ticket(), [])
+```
+
+（替换：`test_paused_needs_human_maps_to_waiting_and_budget_to_blocked` 的 budget 半段保留、
+两处"END"预期删除；`test_protocol_methods_not_in_scope_raise_clearly` 整体删——deliver/cancel
+都已是实现态，cancel 的行为断言归 Task 15。`AgentStatus`/`TicketInput`/`DeferrableEffectError`
+并入既有导入块。）
+
+```python
+# tests/unit/test_scheduler.py 追加（env fixture 不变；StubExecutor 增 deliver 记录 + 消费回写）
+class StubExecutor:
+    def __init__(self) -> None: ...
+    # 新增（不改动 launch）：
+    #   self.delivered: list[tuple[str, str]] = []
+    #   def __init__(self, service=None): self._service = service（env fixture 传 service 进来）
+    async def deliver(self, assignment, ticket, inputs) -> None:
+        for item in inputs:
+            self.delivered.append((ticket.id, item.payload))
+            self._service.mark_input_consumed(ticket.id, item.id)
+
+
+async def test_delivery_waits_for_park_boundary_and_keeps_sequence(env) -> None:
+    store, service, executor, scheduler, clock = env
+    executor.gate.set()                                  # 先让第一个 Worker 顺利跑完？不——
+    executor.gate.clear()                                # 保持阻塞，模拟"正在运行"
+    ticket = _queued(service, "运行中的活")
+    await scheduler.tick()                               # launch effect 已领取，Worker 卡住
+    await asyncio.sleep(0)
+    service.submit_input(ticket.id, "线索一")
+    clock.advance(1000)
+    service.submit_input(ticket.id, "线索二")
+    pending = [e for e in store.due_effects(clock.now_ms())
+               if e.kind is EffectKind.DELIVER_INPUT]
+    assert len(pending) == 2
+    await scheduler.tick()
+    assert executor.delivered == []                      # D6：运行中绝不投递
+    for row in pending:                                  # 且门控不领、不耗 attempts
+        assert store.get_effect(row.id).attempts == 0
+    # 模拟到达暂停边界：Ticket -> waiting（Task 15 后由真实 PAUSED 驱动，这里用 service 面）
+    service.transition_ticket(ticket.id, TicketAction.WAIT)
+    first_effect, second_effect = pending                # due_at：线索一更早
+    with store.transaction():
+        store.update_effect(second_effect.model_copy(update={"due_at": 0}))  # 反转领取顺序
+    executor.gate.set()                                  # Worker 收摊，槽位与门控都放行投递
+    await _wait_until_idle(scheduler)
+    await scheduler.tick()
+    await scheduler.tick()
+    assert [p for (t, p) in executor.delivered] == ["线索一", "线索二"]  # 领取乱序、消费保序
+    assert store.get_ticket(ticket.id).status is TicketStatus.RUNNING    # 投递唤醒过
+
+
+async def test_deliveries_of_different_tickets_run_in_one_round(env) -> None:
+    store, service, executor, scheduler, clock = env
+    for name in ("甲", "乙"):
+        ticket = _queued(service, f"任务{name}")
+        service.transition_ticket(ticket.id, TicketAction.START)   # queued->running
+        service.transition_ticket(ticket.id, TicketAction.WAIT)    # running->waiting（驻留形状）
+        service.submit_input(ticket.id, f"线索{name}")
+    result = await scheduler.tick()
+    assert result.dispatched == 2
+    assert {t for t, _ in executor.delivered} == {"tk-0001", "tk-0002"}  # 不同 Ticket 并行
+```
+
+（`_handle_deliver` 找不到驻留 Assignment 时会 `DeferrableEffectError`——StubExecutor 的
+deliver 不依赖真驻留；Ticket 状态翻转用的是合法边 START/WAIT，`SequenceIds` 保证 id 可断言。
+若 stub 世界需要 RUNNING Assignment 在场，用 `service.finish_assignment(assignment.id,
+AssignmentAction.LAUNCH)` 造出来，fixture 细节按 Step 3 实现落定后微调，断言不动。）
+
+```python
+# tests/unit/test_orchestration_model.py 追加
+def test_blocked_can_be_started_by_delivery_wakeup() -> None:
+    assert next_ticket_status(TicketStatus.BLOCKED, TicketAction.START) is TicketStatus.RUNNING
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py tests/unit/test_scheduler.py tests/unit/test_orchestration_model.py -k "ineligible or deferrable or parks or delivers or delivery_waits or blocked_can" -v`
+Expected: FAIL —`ImportError: DeferrableEffectError` / `TypeError: __init__() got 'eligible'`。
+
+- [ ] **Step 3: 实现**
+
+`outbox.py`：`__init__` 增 `eligible: Mapping[EffectKind, Callable[[Effect], bool]] | None = None`
+（缺省空表）；`dispatch_due` 循环里 handler 查询之后插 `if not self._eligible(effect): continue`；
+handler 调用包成
+
+```python
+            try:
+                await handler(claimed)
+            except DeferrableEffectError as exc:
+                self._defer(claimed, repr(exc))          # 回退：RETRY 转态、attempts-1、due_at 后移
+                continue
+            except Exception as exc:
+                self._fail_or_retry(claimed, repr(exc))
+                continue
+```
+
+`_defer()` 与 `_fail_or_retry()` 同形（短事务 `update_effect`），差异只在 `attempts =
+effect.attempts - 1` 且走 `self._backoff_ms` 固定退避（不进 `max_attempts` 判定）。
+
+`model.py`：`_TICKET_TABLE` 增 `(TicketStatus.BLOCKED, TicketAction.START): TicketStatus.RUNNING`。
+
+`executor.py`：`__init__` 增 `self._agents: dict[str, Agent] = {}`；`launch`/`recover` 成功后把
+实例记入 `_agents[assignment.id]`；PAUSED 分支替换为驻留三件套：
+
+```python
+            if event.type is EventType.PAUSED:
+                reason = str(event.data.get("reason", "needs_human"))
+                self._agents[assignment.id] = agent              # park：活实例才谈得上投递
+                self._sink.add_report(
+                    ticket_id=ticket.id, assignment_id=assignment.id,
+                    kind=ReportKind.WAITING_FOR_HUMAN if reason == "needs_human"
+                    else ReportKind.BLOCKED,
+                    summary=f"worker parked: {reason}", event_step=event.step,
+                    details=dict(event.data),
+                )
+                self._sink.transition_ticket(
+                    ticket.id,
+                    TicketAction.WAIT if reason == "needs_human" else TicketAction.BLOCK,
+                )
+                return                                            # Assignment 保持 RUNNING
+```
+
+`deliver()` 替换 `NotImplementedError`：
+
+```python
+    async def deliver(self, assignment, ticket, inputs):
+        agent = self._agents.get(assignment.id)
+        if agent is None:
+            raise DeferrableEffectError("驻留实例不在（进程崩溃后由 retry_ticket 走新 attempt）")
+        final = await agent.aresume(extra_input="\n\n".join(i.payload for i in inputs))
+        for item in inputs:
+            self._sink.mark_input_consumed(ticket.id, item.id)
+        self._finish_from_state(assignment, ticket, final)
+```
+
+`_finish_from_state`：`SUCCEEDED → finish_assignment(END)` + `DELIVER`；`FAILED → finish_assignment(FAIL, failure=str(final.error or "worker_error"))` + `FAIL`；
+`PAUSED →` 重回驻留（`_agents` 保留）+ `WAIT`；三种都经 `transition_ticket` 落 Ticket 态。
+**偏差登记（写入本 Task 证据）**：续段再暂停的原因分类不可得——`aresume` 不暴露事件流，
+`AgentState.error` 是自由文本，按 D4"不读自然语言"一律记 `WAITING_FOR_HUMAN`；
+首段流内 PAUSED 仍按 reason 分派 `WAIT|BLOCK`。
+
+`scheduler.py`：dispatcher 注册 `{LAUNCH: _handle_launch, DELIVER_INPUT: _handle_deliver}`，
+`eligible={LAUNCH: lambda e: e.payload["assignment_id"] not in self.running_assignments(),
+DELIVER_INPUT: self._gate_deliver}`；`_guarded` 的 launch 分支改为
+`inputs = [i for i in self._store.list_inputs(ticket.id, pending_only=True) if i.kind == "text"]`
+并传入 `executor.launch(assignment, ticket, inputs)`（D6 首形态：空闲边界=启动点，Input 进 task；
+launch handler 返回前不消费——由 `AgentExecutor.launch` 在第一个事件后逐条 `mark_input_consumed`）。
+`_handle_deliver` 按"设计裁定 2/3"实现：无未消费 Input → 空转 succeed；Ticket 已终态 → 空转；
+否则取 `pending[0]`、找该 Ticket 的 `RUNNING` Assignment（无 → `DeferrableEffectError`），
+`service.wake_for_delivery(ticket_id)` 后 `await self._executor.deliver(assignment, ticket, [oldest])`。
+`_gate_deliver(effect)`：Ticket 状态 ∈ {`WAITING`, `BLOCKED`} 或终态（空转）→ True；其余 False。
+
+`service.wake_for_delivery(ticket_id)`：单事务 `next_ticket_status(status, START)`→`update_ticket`
+（`woken_at` 沿用 `submit_input` 已置的值）。`AgentExecutor.launch` 消费回写：`_drive` 收到第一个
+事件时把 `inputs` 逐条 `self._sink.mark_input_consumed(...)`（测试断 `sink.consumed`）。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py tests/unit/test_scheduler.py tests/unit/test_orchestration_model.py --no-cov`
+Expected: PASS；全量绿（M1 两条被替换用例按 Step 1 注处理）；`mypy`、`ruff check`、
+`ruff format --check` 干净。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/ tests/support.py tests/unit/test_outbox.py \
+    tests/unit/test_agent_executor.py tests/unit/test_scheduler.py tests/unit/test_orchestration_model.py
+git commit -m "feat: park paused workers and feed them only at the pause boundary"
+```
+
+**关闭 DoD：** C6、D6。M2.1 自此整条可勾（落库面 Task 12 + 投递面本 Task）。
+
+---
+
+### Task 14: retry_ticket——新 attempt、不覆盖历史、幂等键含 attempt
+
+**Files:**
+- Modify: `stableagent/orchestration/model.py`（`TicketAction.RETRY` + `(FAILED, RETRY)→QUEUED`）
+- Modify: `stableagent/orchestration/service.py`（`retry_ticket`）
+- Test: `tests/unit/test_orchestration_model.py` / `test_orchestration_service.py`
+
+**Interfaces:**
+- Produces: `TicketAction.RETRY`；`service.retry_ticket(ticket_id) -> Assignment`——单事务内
+  `failed→queued`（RETRY 边）+ `woken_at` + 新 Assignment（`attempt = 既有数 + 1`）+
+  `launch:{assignment_id}:{attempt}` effect；COMPLETED/CANCELLED 拒绝（终态不复活）。
+- Consumes: Task 12 的 effect 形状。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_orchestration_model.py 追加
+def test_failed_can_retry_but_cancelled_never() -> None:
+    assert next_ticket_status(TicketStatus.FAILED, TicketAction.RETRY) is TicketStatus.QUEUED
+    with pytest.raises(IllegalTransitionError):
+        next_ticket_status(TicketStatus.CANCELLED, TicketAction.RETRY)
+    with pytest.raises(IllegalTransitionError):
+        next_ticket_status(TicketStatus.COMPLETED, TicketAction.RETRY)
+```
+
+```python
+# tests/unit/test_orchestration_service.py 追加
+def test_retry_ticket_adds_an_attempt_and_keeps_history(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("要重来的")
+    svc.queue_ticket(ticket.id)
+    first = store.list_assignments(ticket.id)[0]
+    svc.finish_assignment(first.id, AssignmentAction.LAUNCH)
+    svc.transition_ticket(ticket.id, TicketAction.FAIL)
+    svc.finish_assignment(first.id, AssignmentAction.FAIL)
+    retried = svc.retry_ticket(ticket.id)
+    assert (retried.attempt, retried.id) == (2, "as-0002")
+    assert store.get_ticket(ticket.id).status is TicketStatus.QUEUED
+    assert store.get_ticket(ticket.id).woken_at is not None
+    assert store.get_assignment(first.id).status is AssignmentStatus.FAILED  # 历史不覆盖
+    keys = [e.idempotency_key for e in store.due_effects(clock.now_ms())]
+    assert f"launch:{retried.id}:2" in keys                                   # 键含 attempt
+
+
+def test_retry_only_from_failed(service) -> None:
+    svc, _, _ = service
+    open_ticket = svc.create_ticket("还没排队")
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(open_ticket.id)
+    done = svc.create_ticket("已收口")
+    svc.queue_ticket(done.id)
+    svc.transition_ticket(done.id, TicketAction.START)
+    svc.transition_ticket(done.id, TicketAction.DELIVER)
+    svc.complete_ticket(done.id)
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(done.id)
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_service.py -k "retry" -v`
+Expected: FAIL —`ImportError: RETRY` / `AttributeError: retry_ticket`。
+
+- [ ] **Step 3: 实现**
+
+`model.py`：`TicketAction` 增 `RETRY = "retry"`；`_TICKET_TABLE` 增
+`(TicketStatus.FAILED, TicketAction.RETRY): TicketStatus.QUEUED`。
+
+`service.py`：
+
+```python
+    def retry_ticket(self, ticket_id: str) -> Assignment:
+        """failed -> queued + 新 Assignment（attempt+1）+ launch effect——一次重试一条新历史。"""
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            status = next_ticket_status(ticket.status, TicketAction.RETRY)
+            now = self._clock.now_ms()
+            self._store.update_ticket(ticket.model_copy(update={
+                "status": status, "queued_at": now, "woken_at": ticket.woken_at or now}))
+            attempt = len(self._store.list_assignments(ticket_id)) + 1
+            assignment = Assignment(id=self._ids.new_id("as"), ticket_id=ticket_id,
+                                    attempt=attempt)
+            self._store.insert_assignment(assignment)
+            self._store.enqueue_effect(
+                Effect(id=self._ids.new_id("ef"), kind=EffectKind.LAUNCH_ASSIGNMENT,
+                       idempotency_key=f"launch:{assignment.id}:{attempt}",
+                       payload={"assignment_id": assignment.id, "ticket_id": ticket_id},
+                       due_at=now))
+            return assignment
+```
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_model.py tests/unit/test_orchestration_service.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/model.py stableagent/orchestration/service.py \
+    tests/unit/test_orchestration_model.py tests/unit/test_orchestration_service.py
+git commit -m "feat: retry a failed ticket as a fresh attempt with history intact"
+```
+
+**关闭 DoD：** 无整项（M2.4 本体；G4 的 retry 命令与错误矩阵在 Task 21 收口）。
+
+---
+
+### Task 15: cancel_ticket 与 cancel_assignment——取消不删史，槽位即时归还
+
+**Files:**
+- Modify: `stableagent/orchestration/service.py`（`cancel_ticket`、`closeout_cancelled_assignment`）
+- Modify: `stableagent/orchestration/executor.py`（`cancel` 实现：清驻留）
+- Modify: `stableagent/orchestration/scheduler.py`（`_handle_cancel`；`_guarded` 捕
+  `CancelledError` 写 CANCEL 后 re-raise）
+- Test: `tests/unit/test_orchestration_service.py` / `test_scheduler.py` / `test_agent_executor.py`
+
+**Interfaces:**
+- Produces: `service.cancel_ticket(ticket_id, reason=None) -> Ticket`（未结束 Ticket → cancelled，
+  `ended_at` 落时钟；每个未终态 Assignment 各入队一条 `cancel:{assignment_id}` effect；
+  历史一行不删）；`service.closeout_cancelled_assignment(assignment_id)`（幂等收尾：已终态即 no-op）；
+  `AgentExecutor.cancel(assignment)` 清驻留实例；`Scheduler._handle_cancel` 优先取消在途任务
+  （`task.cancel()` + `gather` 等槽位归还），再 `executor.cancel` + closeout。
+- Consumes: Task 12 的 kind。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_orchestration_service.py 追加
+def test_cancel_ticket_keeps_history_and_enqueues_effect(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("要取消的")
+    svc.queue_ticket(ticket.id)
+    assignment = store.list_assignments(ticket.id)[0]
+    svc.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    svc.transition_ticket(ticket.id, TicketAction.START)
+    cancelled = svc.cancel_ticket(ticket.id, "用户撤回")
+    assert cancelled.status is TicketStatus.CANCELLED and cancelled.ended_at is not None
+    keys = [e.idempotency_key for e in store.due_effects(clock.now_ms())]
+    assert f"cancel:{assignment.id}" in keys
+    assert [a.id for a in store.list_assignments(ticket.id)] == [assignment.id]  # 不删历史
+    with pytest.raises(IllegalTransitionError):
+        svc.cancel_ticket(cancelled.id)                                          # 已结束写入
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(ticket.id)                                              # cancelled 不复活
+
+
+def test_closeout_is_idempotent(service) -> None:
+    svc, store, _ = service
+    ticket = svc.create_ticket("任务")
+    svc.queue_ticket(ticket.id)
+    assignment = store.list_assignments(ticket.id)[0]
+    svc.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    svc.closeout_cancelled_assignment(assignment.id)
+    svc.closeout_cancelled_assignment(assignment.id)
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
+```
+
+```python
+# tests/unit/test_scheduler.py 追加
+async def test_cancel_releases_the_slot_for_the_next_ticket(env) -> None:
+    store, service, executor, scheduler, clock = env
+    first = _queued(service, "长跑")
+    second = _queued(service, "等待")
+    await scheduler.tick()                      # 领走 first 的 launch（单槽被 gate 占住）
+    await asyncio.sleep(0)
+    service.cancel_ticket(first.id)
+    result = await scheduler.tick()             # 领走 cancel：任务被取消、槽位归还
+    assert result.dispatched >= 1
+    await _wait_until_idle(scheduler)
+    await scheduler.tick()                      # 槽位空了，second 才被领取并起跑
+    assert executor.launched == [
+        store.list_assignments(first.id)[0].id, store.list_assignments(second.id)[0].id]
+    assert store.get_assignment(store.list_assignments(first.id)[0].id).status is (
+        AssignmentStatus.CANCELLED)
+    assert store.get_ticket(first.id).status is TicketStatus.CANCELLED
+
+
+async def test_cancel_of_parked_worker_drops_the_park(env) -> None:
+    # StubExecutor.cancel 记 self.cancelled: list[str]；断 handler 会调用到（驻留路径无在途任务）
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "只排队")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)   # pending->running
+    service.cancel_ticket(ticket.id)
+    await scheduler.tick()
+    assert executor.cancelled == [assignment.id]
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py -k "cancel" -v`
+Expected: FAIL —`AttributeError: 'OrchestrationService' object has no attribute 'cancel_ticket'`。
+
+- [ ] **Step 3: 实现**
+
+`service.py`：
+
+```python
+    def cancel_ticket(self, ticket_id: str, reason: str | None = None) -> Ticket:
+        """只取消未结束 Ticket；每个未终态 Assignment 各入队 cancel_assignment，历史不删。"""
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            updated = ticket.model_copy(update={
+                "status": next_ticket_status(ticket.status, TicketAction.CANCEL),
+                "ended_at": self._clock.now_ms()})
+            self._store.update_ticket(updated)
+            for assignment in self._store.list_assignments(ticket_id):
+                if assignment.status in (AssignmentStatus.ENDED, AssignmentStatus.FAILED,
+                                         AssignmentStatus.CANCELLED):
+                    continue
+                self._store.enqueue_effect(
+                    Effect(id=self._ids.new_id("ef"), kind=EffectKind.CANCEL_ASSIGNMENT,
+                           idempotency_key=f"cancel:{assignment.id}",
+                           payload={"assignment_id": assignment.id, "ticket_id": ticket_id,
+                                    "reason": reason},
+                           due_at=self._clock.now_ms()))
+            return updated
+
+    def closeout_cancelled_assignment(self, assignment_id: str) -> None:
+        with self._store.transaction():
+            assignment = self._require_assignment(assignment_id)
+            if assignment.status not in (AssignmentStatus.PENDING, AssignmentStatus.RUNNING,
+                                         AssignmentStatus.INTERRUPTED):
+                return                                   # 幂等收尾：已终态即 no-op
+            self._store.update_assignment(assignment.model_copy(update={
+                "status": next_assignment_status(assignment.status, AssignmentAction.CANCEL),
+                "ended_at": self._clock.now_ms()}))
+```
+
+`executor.py`：`async def cancel(self, assignment) -> None: self._agents.pop(assignment.id, None)`
+——状态写回在 scheduler/service，executor 只负责丢驻留（docstring 写明）。
+
+`scheduler.py`：handler 表增 `EffectKind.CANCEL_ASSIGNMENT: self._handle_cancel`：
+
+```python
+    async def _handle_cancel(self, effect: Effect) -> None:
+        assignment_id = effect.payload["assignment_id"]
+        task = self._tasks.get(assignment_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)  # 槽位归还先于 handler 返回
+        assignment = self._store.get_assignment(assignment_id)
+        if assignment is None:
+            raise UnknownAssignmentError(assignment_id)
+        await self._executor.cancel(assignment)
+        self._service.closeout_cancelled_assignment(assignment_id)
+```
+
+`_guarded` 增 `except asyncio.CancelledError: self._service.finish_assignment(
+assignment.id, AssignmentAction.CANCEL); raise`（任务被取消的当场记 CANCEL；closeout 的幂等
+收尾保证两条路径殊途同归，`test_closeout_is_idempotent` 锁这层）。
+
+`tests/unit/test_agent_executor.py`：M1 的 `test_protocol_methods_not_in_scope_raise_clearly`
+若 Task 13 尚未整删，此处删除并补 `test_cancel_clears_park_without_touching_store`
+（executor 无 store 依赖，断 `parked_assignments()` 由 {as-1} 变 set()）。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py tests/unit/test_agent_executor.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/ tests/unit/test_orchestration_service.py \
+    tests/unit/test_scheduler.py tests/unit/test_agent_executor.py
+git commit -m "feat: cancel work in flight without touching the stored history"
+```
+
+**关闭 DoD：** 无整项（M2.5 本体；D7 后半的账在 M1 行，本 Task 使其"真实现"成立）。
+
+---
+
+### Task 16: effect 失败治理——注入式 backoff 与超限派生
+
+**Files:**
+- Modify: `stableagent/orchestration/outbox.py`（`backoff: Callable[[int], int] | None`、
+  `on_exhausted: Callable[[Effect, str], None] | None`）
+- Modify: `stableagent/orchestration/scheduler.py`（`_handle_exhausted` 接线）
+- Modify: `stableagent/orchestration/service.py`（`fail_unstarted_assignment`、
+  `block_ticket_for_delivery_failure`）
+- Test: `tests/unit/test_outbox.py` / `test_scheduler.py` / `test_orchestration_service.py`
+
+**Interfaces:**
+- Produces: `EffectDispatcher(..., backoff=None, on_exhausted=None)`——`backoff(attempts)` 返回
+  退避毫秒（缺省 `backoff_ms * attempts` 的 M1 形状不变）；`on_exhausted(effect, detail)` 只在
+  真实失败打满 `max_attempts` 时回调一次（Deferrable 路径永不触发，Task 13 已锁）；
+  `Scheduler._handle_exhausted` 按 kind 派生：`launch_assignment → service.fail_unstarted_assignment`
+  （Assignment FAILED + Ticket FAILED + `failed` Report），`deliver_input →
+  service.block_ticket_for_delivery_failure`（Ticket →`blocked` + `blocked` Report，
+  details 带 `{"effect_id", "reason"}` 结构化原因），`cancel_assignment →` 仅 `blocked` Report；
+  均只经 service 写入（唯一写入口）。
+- Consumes: Task 13 的门控与回退。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_outbox.py 追加
+async def test_backoff_fn_is_injected_and_exhaustion_fires_hook(store: Store) -> None:
+    seen: list[int] = []
+    exhausted: list[tuple[str, str]] = []
+
+    def backoff(attempts: int) -> int:
+        seen.append(attempts)
+        return 7 * attempts
+
+    async def boom(effect: Effect) -> None:
+        raise RuntimeError("provider down")
+
+    clock = FixedClock()
+    with store.transaction():
+        store.enqueue_effect(_launch("ef-1", "k1"))
+    dispatcher = EffectDispatcher(store, {EffectKind.LAUNCH_ASSIGNMENT: boom}, clock=clock,
+                                  max_attempts=2, backoff=backoff,
+                                  on_exhausted=lambda e, d: exhausted.append((e.id, d)))
+    assert await dispatcher.dispatch_due() == 0
+    row = store._effect_row("ef-1")
+    assert (row.state, row.due_at - clock.now_ms()) == (EffectState.RETRY_WAIT, 7)
+    clock.advance(100)
+    assert await dispatcher.dispatch_due() == 0
+    assert store._effect_row("ef-1").state is EffectState.FAILED
+    assert seen == [1, 2] and len(exhausted) == 1 and exhausted[0][0] == "ef-1"
+```
+
+```python
+# tests/unit/test_scheduler.py 追加
+async def test_exhausted_launch_fails_assignment_and_writes_failed_report(env) -> None:
+    store, service, executor, scheduler, clock = env
+    executor.fail_launches = True                       # StubExecutor.launch 抛 RuntimeError
+    ticket = _queued(service, "起不来的")
+    assignment = store.list_assignments(ticket.id)[0]
+    for _ in range(4):
+        await scheduler.tick()
+        clock.advance(10_000)                           # 越过 backoff 的 due_at
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.FAILED
+    assert store.get_ticket(ticket.id).status is TicketStatus.FAILED
+    assert ReportKind.FAILED in [r.kind for r in store.list_reports(ticket.id)]
+
+
+async def test_exhausted_delivery_blocks_ticket_with_reason(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "等投料的")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    service.transition_ticket(ticket.id, TicketAction.WAIT)   # running->waiting（驻留形状）
+    executor.defer_deliver = True                             # StubExecutor.deliver 抛 Deferrable
+    service.submit_input(ticket.id, "永远等不到的线索")
+    for _ in range(4):
+        await scheduler.tick()
+        clock.advance(10_000)
+    assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED
+    blocked = [r for r in store.list_reports(ticket.id) if r.kind is ReportKind.BLOCKED]
+    assert blocked and "effect" in blocked[0].details        # 结构化原因，非自然语言
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_scheduler.py -k "backoff or exhausted" -v`
+Expected: FAIL —`TypeError: __init__() got an unexpected keyword argument 'backoff'`。
+
+- [ ] **Step 3: 实现**
+
+`outbox.py`：`__init__` 增两参（`self._backoff = backoff`、`self._on_exhausted = on_exhausted`）；
+`_fail_or_retry` 里 `due_at` 计算改为
+`self._clock.now_ms() + (self._backoff(effect.attempts) if self._backoff else self._backoff_ms * effect.attempts)`；
+`state is EffectState.FAILED` 分支在事务提交后追加
+`if self._on_exhausted is not None: self._on_exhausted(updated, detail)`（钩子在事务外调用——
+L6：钩子里 service 会开自己的短事务）。
+
+`scheduler.py`：dispatcher 构造传 `on_exhausted=self._handle_exhausted`；
+
+```python
+    def _handle_exhausted(self, effect: Effect, detail: str) -> None:
+        payload = effect.payload
+        if effect.kind is EffectKind.LAUNCH_ASSIGNMENT:
+            self._service.fail_unstarted_assignment(payload["assignment_id"], detail)
+        elif effect.kind is EffectKind.DELIVER_INPUT:
+            self._service.block_ticket_for_delivery_failure(payload["ticket_id"], detail,
+                                                             effect_id=effect.id)
+        else:
+            self._service.note_cancel_failure(payload["ticket_id"], detail, effect_id=effect.id)
+```
+
+`service.py` 三个新方法（各单事务、全走转换表）：
+`fail_unstarted_assignment(assignment_id, detail)`：仅当 Assignment 仍 `RUNNING` 时
+`finish_assignment(FAIL, failure=detail)`；对应 Ticket 若 `RUNNING` 走 FAIL，若 `WAITING` 走
+FAIL 边（表内均有）；无论哪种都 `insert_report(kind=FAILED, summary="effect 耗尽",
+details={"effect_reason": detail})`（launch 侧 details 同含 `reason`）。
+`block_ticket_for_delivery_failure(ticket_id, detail, effect_id)`：Ticket `RUNNING|WAITING →
+BLOCK`（START 后的投递失败回 blocked），`READY/OPEN/QUEUED` 不动只写报告；
+`note_cancel_failure`：只写 `blocked` Report。三者 details 结构统一：
+`{"reason": "effect_exhausted", "effect_id": ..., "detail": ...}`（D4 口径：结构化判定不读文本）。
+
+`StubExecutor` 增 `self.fail_launches = False`（launch 抛 RuntimeError）与
+`self.defer_deliver = False`（deliver 抛 `DeferrableEffectError`）。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_scheduler.py tests/unit/test_orchestration_service.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/ tests/unit/test_outbox.py tests/unit/test_scheduler.py \
+    tests/unit/test_orchestration_service.py tests/support.py
+git commit -m "feat: turn exhausted effects into structured blocked and failed reports"
+```
+
+**关闭 DoD：** C4（"超限失败 + 派生报告"自此完整）。
+
+---
+
+### Task 17: DAG——add_dependency、环检测与 block/continue 两策略
+
+**Files:**
+- Modify: `stableagent/orchestration/store.py`（`list_all_dependencies()`）
+- Modify: `stableagent/orchestration/errors.py`（`CyclicDependencyError`）
+- Modify: `stableagent/orchestration/model.py`（`(QUEUED, BLOCK)→BLOCKED` 边）
+- Modify: `stableagent/orchestration/service.py`（`add_dependency` + `enqueue_work` 依赖门控）
+- Test: `tests/unit/test_orchestration_service.py` / `test_orchestration_model.py` /
+  `test_orchestration_boundaries.py`
+
+**Interfaces:**
+- Produces: `CyclicDependencyError(code="orchestration.cyclic_dependency")`；
+  `service.add_dependency(ticket_id, depends_on, *, on_failure="block") -> None`（自指仍由
+  `Dependency` 模型拒绝；直接环与间接环同码）；`Store.list_all_dependencies() -> list[Dependency]`；
+  `enqueue_work_for_runnable_tickets` 的依赖门控（E5/E6）：依赖未全部 `completed` → 不领；
+  上游 `failed|cancelled` → `block` 策略把本 Ticket `queued→blocked`（新边）并写 `blocked`
+  Report（details `{"reason": "dependency_failed", "dependency": <id>}`），`continue` 策略注入
+  一条 `[依赖失败:<id>]` 的未消费 Input（只注入一次，按 payload 前缀判重）并照常开跑；
+  子 Ticket 仅由 `create_ticket(..., parent_id=...)` 显式创建（E3，boundary 扫 `planning` 佐证）。
+- Consumes: Task 12/13 的 Input 与 launch 形状。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_orchestration_service.py 追加
+def test_add_dependency_rejects_direct_and_indirect_cycles(service) -> None:
+    svc, _, _ = service
+    a = svc.create_ticket("A")
+    b = svc.create_ticket("B")
+    c = svc.create_ticket("C")
+    svc.add_dependency(b.id, a.id)
+    with pytest.raises(CyclicDependencyError):
+        svc.add_dependency(a.id, b.id)                 # 直接环
+    svc.add_dependency(c.id, b.id)
+    with pytest.raises(CyclicDependencyError):
+        svc.add_dependency(a.id, c.id)                 # 间接环 a<-c<-b<-a
+    with pytest.raises(ValueError):
+        svc.add_dependency(a.id, a.id)                 # 自指：模型校验仍先于一切
+
+
+def test_downstream_waits_until_all_dependencies_completed(service) -> None:
+    svc, store, clock = service
+    parent = svc.create_ticket("父")
+    child = svc.create_ticket("子", parent_id=parent.id)   # E3：parent 关系只来自显式调用
+    svc.add_dependency(child.id, parent.id)
+    svc.queue_ticket(parent.id)
+    svc.queue_ticket(child.id)
+    started = svc.enqueue_work_for_runnable_tickets(clock.now_ms())
+    assert started == 1                                     # 只有父可运行（E5）
+    assignment = store.list_assignments(parent.id)[0]
+    svc.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    svc.transition_ticket(parent.id, TicketAction.START)    # 已在 enqueue_work 翻过则跳过此步
+    # 直接把父 Ticket 推到完成：running->ready->completed
+    svc.transition_ticket(parent.id, TicketAction.DELIVER)
+    svc.complete_ticket(parent.id)
+    assert svc.enqueue_work_for_runnable_tickets(clock.now_ms()) == 1  # 子解锁（E5）
+
+
+def test_block_policy_derives_blocked_with_structured_reason(service) -> None:
+    svc, store, clock = service
+    upstream = svc.create_ticket("上游")
+    downstream = svc.create_ticket("下游")
+    svc.add_dependency(downstream.id, upstream.id, on_failure="block")
+    svc.queue_ticket(downstream.id)
+    svc.finish_assignment(store.list_assignments(upstream.id) and _none(), ...)  # 见注①
+```
+
+注①：block 策略用例的完整摆位——给 `upstream` 手工建 Assignment 不需要；直接
+`svc.transition_ticket(upstream.id, TicketAction.FAIL)` 走不了（open 无 FAIL 边）。用例改为：
+`svc.queue_ticket(upstream.id)` + `svc.transition_ticket(upstream.id, START)` +
+`svc.transition_ticket(upstream.id, FAIL)`，随后 `enqueue_work` 应把 downstream
+`queued→blocked`（新边）并写 blocked Report，`started == 0`。
+
+```python
+def test_continue_policy_injects_failed_dependency_as_input(service) -> None:
+    svc, store, clock = service
+    upstream, downstream = svc.create_ticket("上游"), svc.create_ticket("下游")
+    svc.add_dependency(downstream.id, upstream.id, on_failure="continue")
+    svc.queue_ticket(upstream.id)
+    svc.transition_ticket(upstream.id, TicketAction.START)
+    svc.transition_ticket(upstream.id, TicketAction.FAIL)
+    svc.queue_ticket(downstream.id)
+    assert svc.enqueue_work_for_runnable_tickets(clock.now_ms()) == 1     # 照常开跑
+    payloads = [i.payload for i in store.list_inputs(downstream.id)]
+    assert any(p.startswith("[依赖失败:") for p in payloads)
+    svc.enqueue_work_for_runnable_tickets(clock.now_ms())                 # 再跑一轮
+    assert len([p for p in store.list_inputs(downstream.id)
+                if p.startswith("[依赖失败:")]) == 1                      # 只注入一次
+
+
+def test_child_tickets_come_only_from_explicit_calls(service) -> None:
+    svc, _, _ = service
+    parent = svc.create_ticket("父")
+    child = svc.create_ticket("子", parent_id=parent.id)
+    assert child.parent_id == parent.id
+```
+
+```python
+# tests/unit/test_orchestration_model.py 追加
+def test_queued_can_be_blocked_by_dependency_policy() -> None:
+    assert next_ticket_status(TicketStatus.QUEUED, TicketAction.BLOCK) is TicketStatus.BLOCKED
+```
+
+```python
+# tests/unit/test_orchestration_boundaries.py 追加
+def test_scheduler_and_service_never_import_planning() -> None:
+    for module in ("service", "scheduler"):
+        imports = _imports_of(ROOT / "orchestration" / f"{module}.py")
+        assert not any("planning" in item for item in imports)   # E3：无 LLM Planner
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py tests/unit/test_orchestration_model.py -k "cycle or dependencies or block_policy or continue_policy or child or planning or blocked_by" -v`
+Expected: FAIL —`ImportError: CyclicDependencyError` / `AttributeError: add_dependency`。
+
+- [ ] **Step 3: 实现**
+
+`errors.py`：
+
+```python
+class CyclicDependencyError(OrchestrationError):
+    def __init__(self, ticket_id: str, path: list[str]) -> None:
+        super().__init__(
+            "orchestration.cyclic_dependency",
+            f"为 {ticket_id} 添加依赖将成环：{' -> '.join(path)}",
+        )
+```
+
+`model.py`：`_TICKET_TABLE` 增 `(TicketStatus.QUEUED, TicketAction.BLOCK): TicketStatus.BLOCKED`。
+
+`store.py`：`list_all_dependencies()`（`SELECT * FROM dependencies ORDER BY ticket_id,
+depends_on_ticket_id`）。
+
+`service.py`：`add_dependency` 单事务：`_require` 两端 → 把新边并入既有边表 → 自
+`depends_on` BFS 找 `ticket_id`（找到即 `CyclicDependencyError(ticket_id, path)`）→
+`insert_dependency`。BFS 抽成静态方法 `_path_to(edges, start, target) -> list[str] | None`
+（父指针回溯路径，报错信息里给全链）。
+
+`enqueue_work_for_runnable_tickets` 循环体头部插入依赖门控：
+
+```python
+        for ticket in self._store.list_runnable_tickets(now_ms):
+            gate = self._dependency_gate(ticket)
+            if gate == "unmet":
+                continue
+            if gate.startswith("broken:"):
+                self._block_for_dependency(ticket, gate.split(":", 1)[1])
+                continue
+```
+
+`_dependency_gate(ticket) -> str`：遍历 `list_dependencies(ticket.id)`——上游 `COMPLETED` 跳过；
+上游 `FAILED|CANCELLED` 时按 `on_failure`：`block` → `f"broken:{dep.depends_on_ticket_id}"`，
+`continue` → `_inject_dependency_failure_input`（payload =
+`f"[依赖失败:{dep.depends_on_ticket_id}] 上游 {upstream.status.value}"`，判重靠
+`list_inputs` 里已有同前缀）后跳过该依赖；上游非终态 → `"unmet"`；全部过 → `"ready"`。
+`_block_for_dependency`：单事务 `next_ticket_status(QUEUED, BLOCK)` + `blocked` Report
+（details `{"reason": "dependency_failed", "dependency": dep_id}`）。Ticket 不在 QUEUED
+（例如已 RUNNING）时只写 Report 不转态。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_store.py tests/unit/test_orchestration_boundaries.py tests/unit/test_orchestration_model.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/ tests/unit/test_orchestration_service.py \
+    tests/unit/test_orchestration_store.py tests/unit/test_orchestration_boundaries.py \
+    tests/unit/test_orchestration_model.py
+git commit -m "feat: gate tickets on a dependency graph that refuses cycles"
+```
+
+**关闭 DoD：** E3、E4、E5、E6。
+
+---
+
+### Task 18: 真并发与优先级锁死——E2 全断言 + E7 契约
+
+**Files:**
+- Modify: `tests/unit/test_scheduler.py`（fixture 参数化并发度）
+- Test: `tests/unit/test_scheduler.py`
+- （无生产代码改动——槽位形状 M1 已备，Task 13 已补"waiting/blocked 释放"）
+
+**Interfaces:**
+- Consumes: 全部前序。
+- Produces: 无新符号；本 Task 把 E2（`max_concurrency` 从 effect 领取起占到终态/waiting/blocked）
+  与 E7（排序键 `(woken, queued_at, created_at)` 契约）用测试钉死。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_scheduler.py 追加（并发 fixture：max_concurrency=2）
+@pytest.fixture
+def env2(tmp_path):
+    clock, ids = FixedClock(), SequenceIds()
+    store = Store(tmp_path / "two.db", clock=clock)
+    service = OrchestrationService(store, clock=clock, ids=ids)
+    executor = CountingExecutor(service)              # 记 live/max_live，launch 卡 gate
+    scheduler = Scheduler(store=store, service=service, executor=executor,
+                          clock=clock, max_concurrency=2)
+    yield store, service, executor, scheduler, clock
+    store.close()
+
+
+async def test_two_slots_cap_concurrent_workers(env2) -> None:
+    store, service, executor, scheduler, clock = env2
+    for index in range(3):
+        _queued(service, f"任务{index}")
+    await scheduler.tick()
+    for _ in range(4):                                # 让 create_task 起跑（公开 API 轮询）
+        await asyncio.sleep(0)
+    assert executor.live == 2 and executor.max_live == 2      # 第三个在门外（E2）
+    executor.gate.set()
+    await _wait_until_idle(scheduler)
+    await scheduler.tick()
+    executor.gate.set()
+    await _wait_until_idle(scheduler)
+    assert len(executor.launched) == 3 and executor.max_live == 2
+
+
+async def test_woken_ticket_precedes_older_queued_ones(env) -> None:
+    store, service, executor, scheduler, clock = env
+    older = _queued(service, "先排的")
+    clock.advance(1000)
+    newer = _queued(service, "后排的")
+    service.submit_input(newer.id, "唤醒它")          # woken_at 置位（Task 12）
+    await scheduler.tick()
+    launched = [store.get_assignment(a).ticket_id for a in executor.launched]
+    assert launched == [newer.id]                     # E7：唤醒优先，不是 FIFO
+```
+
+`CountingExecutor`：launch 里 `self.live += 1; self.max_live = max(...); await self.gate.wait();
+self.live -= 1`，其余方法同 `StubExecutor`。
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py -k "two_slots or woken_ticket" -v`
+Expected: 若 M1/M2 形状已对，可能直接绿——**绿不代表无事发生**：本 Task 的产出就是这两条
+锁死断言；若 `max_live` 越界（信号量与 dispatch limit 错位），这里必红。先跑，红则按 Step 3
+修正接线，绿则跳过 Step 3 的实现改动、只补测试并提交（照实登记"实现未被本 Task 改动"）。
+
+- [ ] **Step 3: 修正接线（仅当 Step 2 有失败）**
+
+已知需要核对的两点：`tick()` 的 `dispatch_due(limit=self._max_concurrency)` 会跳过门控关闭的
+effect——limit 计的是领取数而非扫描数，跳过不补位（M1 语义，保留）；`_guarded` 的
+`async with self._slots` 必须在 `launch/deliver` 全程持有。若 `env2` 首跑即绿，本步在账本
+记"无需改动"，commit 只含测试文件。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py && .venv/bin/mypy && .venv/bin/ruff check stableagent tests`
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add tests/unit/test_scheduler.py
+git commit -m "test: lock the concurrency cap and the woken-first ordering"
+```
+
+**关闭 DoD：** E2（完整断言）、E7（排序键契约测试；`test_runnable_order_is_woken_then_queued_then_created`
+的 Store 半边自 M1 已在，本 Task 补 Service/Scheduler 半边后整条勾）。
+
+---
+
+### Task 19: Report 五态齐备、list_tickets 收口与 recover 全语义
+
+**Files:**
+- Modify: `stableagent/orchestration/executor.py`（DONE/ERROR 终态 Report、details 原样）
+- Modify: `stableagent/orchestration/service.py`（`RecoverySummary` docstring 定稿口径）
+- Test: `tests/unit/test_agent_executor.py` / `test_scheduler.py` / `test_orchestration_service.py`
+
+**Interfaces:**
+- Consumes: 全部前序。
+- Produces: 全 5 种 `ReportKind` 均有默认产出路径（progress=TOOL_RESULT；
+  waiting_for_human/blocked=PAUSED 驻留；ready=DONE；failed=ERROR）；
+  `RecoverySummary` 字段定稿为既有三员（测试钉死字段清单——改动即破约，ADR-04 决策 4）；
+  recover 全语义（E8/C5）：running→interrupted、pending/retry_wait 续跑、已 ended 不重跑、
+  新旧 effect 同一幂等规则；`Store.get_effect` 公开读（Task 12 已加，本 Task 使用其 C5 用例）。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_agent_executor.py 追加
+async def test_done_emits_ready_report_with_verbatim_diagnostic_payload() -> None:
+    sink = RecordingSink()
+    done = Event(type=EventType.DONE,
+                 data={"status": "succeeded", "text": "全部失败了"}, step=3)
+    executor, _ = _executor([done], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert sink.reports == [("tk-1", "as-1", ReportKind.READY.value, 3)]
+    assert sink.ticket_actions == [("tk-1", TicketAction.DELIVER.value)]   # D4：文本不参与判定
+    assert sink.finished == [("as-1", AssignmentAction.END.value, None)]
+
+
+async def test_error_emits_failed_report_keyed_on_reason_field() -> None:
+    sink = RecordingSink()
+    error = Event(type=EventType.ERROR, data={"reason": "provider_unavailable"}, step=2)
+    executor, _ = _executor([error], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert [r[2] for r in sink.reports] == [ReportKind.FAILED.value]
+    assert sink.finished[0][1] == AssignmentAction.FAIL.value
+    assert sink.finished[0][2] == "provider_unavailable"     # 只读 data.reason，不读正文文本
+```
+
+```python
+# tests/unit/test_orchestration_service.py 追加
+import dataclasses
+
+def test_recovery_summary_fields_are_final() -> None:
+    names = [f.name for f in dataclasses.fields(RecoverySummary)]
+    assert names == ["interrupted_assignments", "reclaimed_effects", "relaunched"]
+
+
+def test_list_tickets_filters_pages_and_carries_views(service) -> None:
+    svc, _, _ = service
+    ids = [svc.create_ticket(f"任务{i}") for i in range(6)]
+    for ticket in ids[:4]:
+        svc.queue_ticket(ticket.id)
+    queued = svc.list_tickets(status=TicketStatus.QUEUED, limit=2, offset=1)
+    assert [v.ticket.id for v in queued] == [ids[2].id, ids[3].id]
+    assert all(isinstance(view, TicketView) for view in queued)
+```
+
+```python
+# tests/unit/test_scheduler.py 追加（C5 两个 crash 位点 + E8 的 ended 不重跑）
+async def test_committed_effect_survives_reopen_and_dispatches(env, tmp_path) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "提交后崩")
+    assignment = store.list_assignments(ticket.id)[0]
+    store.close()
+    reopened = Store(tmp_path / "sched.db", clock=clock)      # 新"进程"：只重开库
+    executor2 = StubExecutor(None)
+    service2 = OrchestrationService(reopened, clock=clock, ids=SequenceIds())
+    scheduler2 = Scheduler(store=reopened, service=service2, executor=executor2,
+                           clock=clock, max_concurrency=1)
+    result = await scheduler2.tick()
+    assert result.dispatched == 1 and executor2.launched == [assignment.id]
+    assert reopened.get_effect(store.due_effects(clock.now_ms())[0].id).state is (
+        EffectState.SUCCEEDED)
+    reopened.close()
+
+
+async def test_orphan_running_effect_is_reclaimed_then_driven_once(env, tmp_path) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "handler 前崩")
+    assignment = store.list_assignments(ticket.id)[0]
+    effect = store.due_effects(clock.now_ms())[0]
+    with store.transaction():
+        store.update_effect(effect.model_copy(update={"state": EffectState.RUNNING,
+                                                      "attempts": 1}))   # 模拟领取后崩溃
+    store.close()
+    reopened = Store(tmp_path / "sched.db", clock=clock)
+    service2 = OrchestrationService(reopened, clock=clock, ids=SequenceIds())
+    summary = service2.recover()                              # reclaim 把它放回 pending
+    assert summary.reclaimed_effects == 1
+    executor2 = StubExecutor(service2)
+    scheduler2 = Scheduler(store=reopened, service=service2, executor=executor2,
+                           clock=clock, max_concurrency=1)
+    await scheduler2.tick()
+    assert executor2.launched.count(assignment.id) == 1       # 只重放一次（幂等键兜底）
+    reopened.close()
+
+
+async def test_recover_leaves_ended_tickets_alone(env, tmp_path) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "已完成")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    service.finish_assignment(assignment.id, AssignmentAction.END)
+    service.transition_ticket(ticket.id, TicketAction.DELIVER)
+    service.transition_ticket(ticket.id, TicketAction.COMPLETE)
+    summary = service.recover()
+    assert (summary.interrupted_assignments, summary.relaunched) == (0, 0)
+    assert executor.launched == []                            # E8：终态不复活
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_agent_executor.py tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py -k "ready_report or failed_report or summary_fields or list_tickets or survives_reopen or orphan or leaves_ended" -v`
+Expected: FAIL —DONE/ERROR 无终态 Report（`sink.reports == []`）。
+
+- [ ] **Step 3: 实现**
+
+`executor.py`：`_drive` 的终态分支在 `finish_assignment/transition_ticket` 之前插一条
+`self._sink.add_report(... kind=READY|FAILED, summary="worker delivered"|f"worker failed: {failure}",
+event_step=event.step, details=dict(event.data))`——**Report 先于状态转换**：sink 顺序即
+事件顺序，测试以 `sink.reports` 断。PAUSED 驻留分支（Task 13）与 TOOL_RESULT progress（M1）
+不动，五种 kind 自此齐备。`RecoverySummary` docstring 补定稿说明（"字段清单即契约"）。
+Scheduler/Service 无行为改动——若 Step 1 的三条 scheduler 用例有红，按失败面回看 Task 13/16
+接线，不在本 Task 新增语义。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_agent_executor.py tests/unit/test_orchestration_service.py tests/unit/test_scheduler.py tests/unit/test_orchestration_model.py && .venv/bin/mypy && .venv/bin/ruff check stableagent tests`
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/executor.py stableagent/orchestration/service.py \
+    tests/unit/test_agent_executor.py tests/unit/test_orchestration_service.py \
+    tests/unit/test_scheduler.py
+git commit -m "feat: complete the five report kinds and the recovery contract"
+```
+
+**关闭 DoD：** C5、D4、E8（M2.9 的 kind/分页/字段定稿随本 Task 完成，G4 收口在 Task 21）。
+
+---
+
+### Task 20: Assignment deadline（E9）——wait_for 包住 Worker，超时派生 blocked
+
+**Files:**
+- Modify: `stableagent/orchestration/scheduler.py`（`_guarded` 的 deadline 包装与超时处理）
+- Modify: `stableagent/orchestration/service.py`（`expire_assignment`、`queue_ticket(deadline_at=…)`）
+- Test: `tests/unit/test_scheduler.py` / `test_orchestration_store.py`
+
+**Interfaces:**
+- Consumes: Task 12 的 `Assignment.deadline_at`（列已迁移，本 Task 才消费）。
+- Produces: `service.queue_ticket(ticket_id, *, deadline_at: int | None = None)`（透写入
+  Assignment 行）；`Scheduler._guarded` 对有 deadline 的 Worker 用
+  `asyncio.wait_for(coro, max((deadline_at - clock.now_ms())/1000.0, 0.0))` 包裹；
+  超时 → `service.expire_assignment(assignment_id)`：Assignment `RUNNING→cancelled`、
+  Ticket `RUNNING→blocked`、`blocked` Report details
+  `{"reason": "deadline_exceeded", "assignment_id": ..., "deadline_at": ...}`。
+  **偏差登记**：账本 E9 原文的 `asyncio.timeout` 是 3.11+ API，本仓库 CI 含 3.10，
+  等价改用 `asyncio.wait_for`（超时取消语义一致），捕获
+  `except (TimeoutError, asyncio.TimeoutError)`——理由与结论记进 M2.11 证据。
+- Consumes: 不触碰 Core 调用点（Step 4 复核 `git diff --stat -- stableagent/core/` 只出现 agent.py）。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_scheduler.py 追加
+async def test_deadline_timeout_cancels_assignment_and_blocks_ticket(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("超预算的")
+    service.queue_ticket(ticket.id, deadline_at=clock.now_ms())   # 相对时限 0：必然超时
+    assignment = store.list_assignments(ticket.id)[0]
+    await scheduler.tick()
+    await _wait_until_idle(scheduler)                             # wait_for 在首个 await 处开火
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
+    assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED
+    blocked = [r for r in store.list_reports(ticket.id) if r.kind is ReportKind.BLOCKED]
+    assert blocked and blocked[0].details["reason"] == "deadline_exceeded"
+    assert executor.launched == [assignment.id]                   # 起跑过、被取消，非空转
+
+
+async def test_future_deadline_does_not_interfere(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("按时的")
+    service.queue_ticket(ticket.id, deadline_at=clock.now_ms() + 600_000)
+    assignment = store.list_assignments(ticket.id)[0]
+    await scheduler.tick()
+    executor.gate.set()
+    await _wait_until_idle(scheduler)
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.RUNNING
+    assert store.get_ticket(ticket.id).status is TicketStatus.RUNNING   # stub 未发终态事件
+
+
+async def test_negative_remaining_budget_clamps_to_zero(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = service.create_ticket("迟到的")
+    service.queue_ticket(ticket.id, deadline_at=clock.now_ms() - 5000)
+    await scheduler.tick()
+    await _wait_until_idle(scheduler)
+    assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED
+```
+
+```python
+# tests/unit/test_orchestration_store.py 追加
+def test_deadline_at_round_trips(store: Store) -> None:
+    store.insert_ticket(_ticket("tk-1", status=TicketStatus.QUEUED))
+    assignment = Assignment(id="as-1", ticket_id="tk-1", attempt=1, deadline_at=123)
+    store.insert_assignment(assignment)
+    assert store.get_assignment("as-1").deadline_at == 123
+    assert store.get_assignment("as-1") == assignment
+```
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_scheduler.py tests/unit/test_orchestration_store.py -k "deadline or budget" -v`
+Expected: FAIL —`TypeError: queue_ticket() got an unexpected keyword argument 'deadline_at'`。
+
+- [ ] **Step 3: 实现**
+
+`scheduler.py`：
+
+```python
+    async def _guarded(self, assignment: Assignment, ticket: Ticket) -> None:
+        async with self._slots:
+            try:
+                worker = self._run_worker(assignment, ticket)
+                if assignment.deadline_at is None:
+                    await worker
+                else:
+                    budget = max((assignment.deadline_at - self._clock.now_ms()) / 1000.0, 0.0)
+                    await asyncio.wait_for(worker, budget)
+            except (TimeoutError, asyncio.TimeoutError):
+                self._service.expire_assignment(assignment.id)
+            except asyncio.CancelledError:                      # Task 15 的取消路径（若在则并入）
+                raise
+```
+
+`service.expire_assignment(assignment_id)`：单事务——Assignment `RUNNING→CANCEL`（已终态即
+no-op，幂等），Ticket `RUNNING→BLOCK`（非 RUNNING 不动 Ticket 但仍写 Report——deadline
+到期而 Worker 恰在收口之间竞争时，报告仍要说得出话）；Report 按上方 details 形状。
+`queue_ticket` 增 keyword 参 `deadline_at` 并写入 Assignment。
+
+- [ ] **Step 4: 跑到绿**
+
+Run:
+```bash
+.venv/bin/pytest -q tests/unit/test_scheduler.py tests/unit/test_orchestration_store.py --no-cov
+git diff --stat -- stableagent/core/          # 只出现 agent.py（E9 原文要求的复核）
+.venv/bin/mypy && .venv/bin/ruff check stableagent tests
+```
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/scheduler.py stableagent/orchestration/service.py \
+    tests/unit/test_scheduler.py tests/unit/test_orchestration_store.py
+git commit -m "feat: bound each assignment with a scheduler-side deadline"
+```
+
+**关闭 DoD：** E9（3.10 兼容偏差按 Interfaces 里的登记写进 M2.11 证据）。
+
+---
+
+### Task 21: G4/G5 收口——十命令矩阵与稳定错误码清单
+
+**Files:**
+- Modify: `stableagent/orchestration/service.py`（`add_report` 的跨 Ticket 校验）
+- Test: `tests/unit/test_orchestration_service.py` / `test_orchestration_boundaries.py`
+
+**Interfaces:**
+- Consumes: 全部前序（十命令自此齐备）。
+- Produces: `add_report` 用 `assert_assignment_belongs_to` 拒绝跨 Ticket 挂载；
+  G5 测试枚举 `errors` 全部子类并断言 code 唯一、前缀、snake_case；账本 G5 条目在
+  Task 22 回填清单。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+# tests/unit/test_orchestration_service.py 追加
+def test_all_ten_commands_exist(service) -> None:
+    svc, _, _ = service
+    commands = {"create_ticket", "add_dependency", "queue_ticket", "submit_input",
+                "retry_ticket", "cancel_ticket", "complete_ticket", "recover",
+                "get_ticket", "list_tickets"}
+    assert commands <= {n for n in dir(svc)}
+
+
+def test_cross_ticket_report_is_refused(service) -> None:
+    svc, store, _ = service
+    a = svc.create_ticket("甲")
+    b = svc.create_ticket("乙")
+    svc.queue_ticket(a.id)
+    assignment = store.list_assignments(a.id)[0]
+    with pytest.raises(IllegalTransitionError):
+        svc.add_report(ticket_id=b.id, assignment_id=assignment.id,
+                       kind=ReportKind.PROGRESS, summary="挂错了", event_step=1)
+
+
+def test_stable_error_matrix(service) -> None:
+    svc, _, _ = service
+    cases = [
+        (lambda: svc.queue_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.get_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.submit_input("tk-none", "x"), UnknownTicketError),
+        (lambda: svc.retry_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.cancel_ticket("tk-none"), UnknownTicketError),
+        (lambda: svc.add_dependency("tk-none", "tk-none2"), UnknownTicketError),
+    ]
+    for invoke, expected in cases:
+        with pytest.raises(expected):
+            invoke()
+    ticket = svc.create_ticket("排队")
+    svc.queue_ticket(ticket.id)
+    with pytest.raises(IllegalTransitionError):
+        svc.queue_ticket(ticket.id)            # queued 再 queue 非法
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(ticket.id)            # queued 不可 retry
+```
+
+```python
+# tests/unit/test_orchestration_boundaries.py 追加
+from stableagent.orchestration import errors as error_module
+
+def _all_error_classes() -> list[type]:
+    return [obj for _, obj in vars(error_module).items()
+            if isinstance(obj, type) and issubclass(obj, OrchestrationError)]
+
+
+def test_error_code_inventory_is_unique_and_prefixed() -> None:
+    probes = {
+        "IllegalTransitionError": ("m", "c", "a"), "UnknownTicketError": ("x",),
+        "UnknownAssignmentError": ("x",), "ReentrantTransactionError": (),
+        "DuplicateLaunchError": ("x",), "WorkerConfigError": ("x",),
+        "IdempotencyConflictError": ("x", "y"), "CyclicDependencyError": ("x", ["a", "b"]),
+        "DeferrableEffectError": ("x",),
+    }
+    codes = {}
+    for name, args in probes.items():
+        error = getattr(error_module, name)(*args)
+        assert error.code.startswith("orchestration.")
+        tail = error.code.split(".", 1)[1]
+        assert tail.replace("_", "").isalnum() and tail == tail.lower()   # snake_case
+        codes[name] = error.code
+    assert len(set(codes.values())) == len(codes)                          # 唯一
+    assert {c.__name__ for c in _all_error_classes()} == {"OrchestrationError", *probes}
+```
+
+（`OrchestrationError` 基类自身的 `code` 是 `orchestration.error`，不进清单——它是兜底，
+不该被 raise。）
+
+- [ ] **Step 2: 跑到红**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py -k "ten_commands or cross_ticket or error_matrix or code_inventory" -v`
+Expected: FAIL（add_report 目前不校验归属；错误码枚举类清单未钉死）。
+
+- [ ] **Step 3: 实现**
+
+`service.add_report`：事务体内先 `assert_assignment_belongs_to(self._require(ticket_id),
+self._require_assignment(assignment_id))`。无其他生产改动。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `.venv/bin/pytest -q tests/unit/test_orchestration_service.py tests/unit/test_orchestration_boundaries.py && .venv/bin/mypy && .venv/bin/ruff check stableagent`
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/orchestration/service.py tests/unit/test_orchestration_service.py \
+    tests/unit/test_orchestration_boundaries.py
+git commit -m "test: prove the ten commands and pin the stable error codes"
+```
+
+**关闭 DoD：** G4、G5（G5 的账本登记动作本身在 Task 22 回填清单时完成，测试先立此存照）；
+C7 的七场景清单核对也在 Task 22。
+
+---
+
+### Task 22: M2 出口——全量门禁、L2/F4 复核与账本回填
+
+**Files:**
+- Modify: `docs/acceptance/p4-ticket-orchestration.md`（勾 M2.1~M2.11 + M2 出口；
+  L2、C2 整条、C4~C7、D4、D6、E2~E9、F1~F4、G4、G5 逐条填实测证据；G5 附 code 清单）
+- 无代码改动（发现问题回到对应 Task 修，不许出口处顺手改）
+
+- [ ] **Step 1: 跑出口命令全集并留档**
+
+```bash
+git checkout feat/p4-m2-width && git status                      # 必须 clean
+.venv/bin/pytest -q                                              # P0–M2 全绿，记条数与耗时
+.venv/bin/mypy                                                   # Success: no issues found …
+.venv/bin/ruff check stableagent tests examples benchmarks       # All checks passed!
+.venv/bin/ruff format --check stableagent tests examples benchmarks
+.venv/bin/pytest --cov=stableagent --cov-report=term-missing     # orchestration 各文件 ≥90%
+git diff 46441f0..HEAD -- stableagent/core/loop.py               # 必须 0 行（L1 复核）
+git diff 2eaea4f^..HEAD --stat -- stableagent/core/              # 只出现 stableagent/core/agent.py（L2/F4）
+.venv/bin/pytest -q tests/unit/test_agent_recovery.py tests/unit/test_l4_default_equivalence.py --no-cov
+PYTHONPATH=. .venv/bin/python -m tests.l4_default_stream_dump | diff - \
+    tests/fixtures/l4_p2_default_stream.json && echo L4-BYTE-EQUAL
+.venv/bin/pytest -q tests/unit/test_outbox.py tests/unit/test_agent_executor.py \
+    tests/unit/test_scheduler.py                                  # M2 出口点名的三个文件
+```
+
+把每条命令的实际输出记进第 1 节 M2 出口条目。`| diff -` 那条即 F3/L2 要求的"重新 dump
+与 fixture 逐字节相等"的手工复验（`test_l4_default_equivalence` 的自动化版已在 CI 绿）。
+
+- [ ] **Step 2: 账本勾选与证据回填**
+
+- 勾 M2.1~M2.11、M2 出口；DoD 勾 L2、C2（整条）、C4、C5、C6、C7、D4、D6、E2~E9、F1~F4、
+  G4、G5，每条附"（2026-11-XX，Task N）+ 实测命令输出/测试名"；**不得写"应该通过"**。
+- G5 条目贴 code 全集表（`orchestration.error` 基类兜底注明不入清单）。
+- C7 条目列七场景 → 测试名对照表（commit 后 crash = `test_committed_effect_survives_reopen_and_dispatches`；
+  handler 前 crash = `test_orphan_running_effect_is_reclaimed_then_driven_once`；重复 dispatch =
+  M1 `test_handler_never_sees_an_open_transaction` + 领取即置 running；失败重试 =
+  `test_backoff_fn_is_injected_and_exhaustion_fires_hook` 前半；超限失败 = 同测试后半；
+  同 Ticket 保序 = `test_delivery_waits_for_park_boundary_and_keeps_sequence`；
+  不同 Ticket 并发 = `test_deliveries_of_different_tickets_run_in_one_round`）。
+- 首屏计数同步：DoD 勾后应为 29+21=50/60（若中途已勾按实际），里程碑步骤 22/30。
+
+- [ ] **Step 3: 偏差复核**
+
+对照本计划 Global Constraints 与三处设计裁定，逐条确认实现与账本叙述一致；park 语义、
+`wait_for` 替 `asyncio.timeout`、续段暂停一律记 `waiting_for_human` 三处偏差必须已写进
+对应 M2.x 证据段。`git diff --stat -- stableagent/core/` 若出现 `agent.py` 之外的文件，
+停下回 Task 11 核查（L2 违例先改 ADR 再改代码，第 5 节归属规则）。
+
+- [ ] **Step 4: 连跑两次核对离线确定性（L8 的 M2 增量复跑）**
+
+`.venv/bin/pytest -q` 两次，除耗时外逐字一致；不一致的测试（真实 sleep、墙钟、随机）
+就地修掉再回来。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add docs/acceptance/p4-ticket-orchestration.md
+git commit -m "docs: close M2 with measured gates and the core-extension evidence"
+```
+
+**关闭 DoD：** L2、F4 + M2 行全部 21 项的账本收尾。M3（G1、G3、H1~H7 共 9 项 + 8 个
+里程碑步骤）的同粒度计划依规格使用规则 4，在本出口全绿后追加为第 8 节。
+
+---
+
+### 计划自检（writing-plans 产出后执行，2026-11-03）
+
+- **规格覆盖**：M2 计划覆盖 WP-4.3 全部（C2 后半~C7）、WP-4.4 的 deliver/cancel/终态 Report
+  （D4、D6）、WP-4.5 的并发/DAG/优先级/recover 全语义/deadline（E2~E9）、ADR-04 决策 6 的
+  Core 扩展（F1~F4、L2）、WP-4.6 的 G4/G5。G1/G3/H 组全部留 M3，未伪装完成。
+- **无占位符**：Task 13 的 `test_delivery_waits_for_park_boundary_and_keeps_sequence` 与
+  Task 18 的 fixture 变体在 Step 1 标注了"按实现落定微调摆位、断言不动"的边界——那是摆位
+  说明，不是留白；其余代码块可直接落地。
+- **类型一致**：幂等键三种格式（`launch:` / `deliver:` / `cancel:`）在 Task 12/14/15 的定义
+  与本节 Global Constraints 一致；`AssignmentSink` 新增 `mark_input_consumed` 一处，
+  `WorkerExecutor` 四方法签名全程未动（ADR-04 迁移条款）；`DeferrableEffectError` 只在
+  executor/outbox/scheduler 三处出现，语义一致（"现在不能消费"≠"失败"）。
+- **执行顺序**：11 → 12 → 13 有真实依赖（13 用 `aresume(extra_input)` 与投递 kind），其余
+  按序即可；Task 18 可能是"红都不用跑就绿"的锁死型任务，其产出是契约测试本身，照实登记。
+- **两处与第 1 节顺序的有意偏差**（执行时在对应 M2.x 条目说明）：
+  (1) M2.1 拆为 Task 12/13（落库面与投递面各自独立变绿，避免一个大红）；
+  (2) M2.9/M2.10 合并为 Task 19（Report 五态与 recover 全语义共用 StubExecutor 摆位，拆开
+  会重复 fixture）。
+- **自审改掉的两处真问题**：(1) 曾把 `deliver_input` 的"运行中不投递"实现为 handler 抛错回退
+  ——那会让一个长跑 Worker 把所有未消费 Input 的 attempts 磨光、误派生 `blocked`；改为
+  dispatcher 门控（不领、不记 attempts），`DeferrableEffectError` 只保留给"驻留丢失"。
+  (2) 曾考虑给 `stream_recover` 也加 `extra_input` 以覆盖崩溃后投递——违反 L2"仅一处扩展"，
+  改为设计裁定 2 的退避-超限-retry 闭环，并把续段暂停不再细分原因（`AgentState.error`
+  是自由文本，按 D4 不读）。
