@@ -165,6 +165,7 @@ class TicketAction(str, Enum):
     DELIVER = "deliver"
     BLOCK = "block"
     FAIL = "fail"
+    RETRY = "retry"
     CANCEL = "cancel"
     COMPLETE = "complete"
 
@@ -191,6 +192,7 @@ _TICKET_TABLE: dict[tuple[TicketStatus, TicketAction], TicketStatus] = {
     (TicketStatus.OPEN, TicketAction.QUEUE): TicketStatus.QUEUED,
     (TicketStatus.OPEN, TicketAction.CANCEL): TicketStatus.CANCELLED,
     (TicketStatus.QUEUED, TicketAction.START): TicketStatus.RUNNING,
+    (TicketStatus.QUEUED, TicketAction.FAIL): TicketStatus.FAILED,  # 启动前就炸：没有 START 可走
     (TicketStatus.QUEUED, TicketAction.CANCEL): TicketStatus.CANCELLED,
     (TicketStatus.RUNNING, TicketAction.WAIT): TicketStatus.WAITING,
     (TicketStatus.RUNNING, TicketAction.DELIVER): TicketStatus.READY,
@@ -204,6 +206,7 @@ _TICKET_TABLE: dict[tuple[TicketStatus, TicketAction], TicketStatus] = {
     (TicketStatus.BLOCKED, TicketAction.QUEUE): TicketStatus.QUEUED,
     (TicketStatus.BLOCKED, TicketAction.START): TicketStatus.RUNNING,
     (TicketStatus.BLOCKED, TicketAction.CANCEL): TicketStatus.CANCELLED,
+    (TicketStatus.FAILED, TicketAction.RETRY): TicketStatus.QUEUED,
     (TicketStatus.READY, TicketAction.COMPLETE): TicketStatus.COMPLETED,
     (TicketStatus.READY, TicketAction.CANCEL): TicketStatus.CANCELLED,
 }

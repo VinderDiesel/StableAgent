@@ -108,6 +108,35 @@ class OrchestrationService:
     def transition_ticket(self, ticket_id: str, action: TicketAction) -> Ticket:
         return self._apply(ticket_id, action)
 
+    def retry_ticket(self, ticket_id: str) -> Assignment:
+        """failed -> queued + 新 Assignment（attempt+1）+ launch effect——一次重试一条新历史。"""
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            status = next_ticket_status(ticket.status, TicketAction.RETRY)
+            now = self._clock.now_ms()
+            self._store.update_ticket(
+                ticket.model_copy(
+                    update={
+                        "status": status,
+                        "queued_at": now,
+                        "woken_at": ticket.woken_at or now,
+                    }
+                )
+            )
+            attempt = len(self._store.list_assignments(ticket_id)) + 1
+            assignment = Assignment(id=self._ids.new_id("as"), ticket_id=ticket_id, attempt=attempt)
+            self._store.insert_assignment(assignment)
+            self._store.enqueue_effect(
+                Effect(
+                    id=self._ids.new_id("ef"),
+                    kind=EffectKind.LAUNCH_ASSIGNMENT,
+                    idempotency_key=f"launch:{assignment.id}:{attempt}",
+                    payload={"assignment_id": assignment.id, "ticket_id": ticket_id},
+                    due_at=now,
+                )
+            )
+            return assignment
+
     def submit_input(self, ticket_id: str, text: str) -> TicketInput:
         """落库未消费 Input 并入队 deliver_input effect（C2 后半：输入写入后建投递）。"""
         with self._store.transaction():

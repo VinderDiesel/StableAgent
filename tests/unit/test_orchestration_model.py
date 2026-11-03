@@ -162,3 +162,11 @@ def test_deadline_and_input_state_are_defaulted_compat_fields() -> None:
 
 def test_blocked_can_be_started_by_delivery_wakeup() -> None:
     assert next_ticket_status(TicketStatus.BLOCKED, TicketAction.START) is TicketStatus.RUNNING
+
+
+def test_failed_can_retry_but_cancelled_never() -> None:
+    assert next_ticket_status(TicketStatus.FAILED, TicketAction.RETRY) is TicketStatus.QUEUED
+    with pytest.raises(IllegalTransitionError):
+        next_ticket_status(TicketStatus.CANCELLED, TicketAction.RETRY)
+    with pytest.raises(IllegalTransitionError):
+        next_ticket_status(TicketStatus.COMPLETED, TicketAction.RETRY)

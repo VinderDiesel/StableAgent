@@ -139,3 +139,34 @@ def test_second_input_sequence_increments_per_ticket(service) -> None:
     first = svc.submit_input(ticket.id, "线索一")
     second = svc.submit_input(ticket.id, "线索二")
     assert (first.sequence, second.sequence) == (1, 2)
+
+
+def test_retry_ticket_adds_an_attempt_and_keeps_history(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("要重来的")
+    svc.queue_ticket(ticket.id)
+    first = store.list_assignments(ticket.id)[0]
+    svc.finish_assignment(first.id, AssignmentAction.LAUNCH)
+    svc.transition_ticket(ticket.id, TicketAction.FAIL)
+    svc.finish_assignment(first.id, AssignmentAction.FAIL)
+    retried = svc.retry_ticket(ticket.id)
+    assert (retried.attempt, retried.id) == (2, "as-0002")
+    assert store.get_ticket(ticket.id).status is TicketStatus.QUEUED
+    assert store.get_ticket(ticket.id).woken_at is not None
+    assert store.get_assignment(first.id).status is AssignmentStatus.FAILED  # 历史不覆盖
+    keys = [e.idempotency_key for e in store.due_effects(clock.now_ms())]
+    assert f"launch:{retried.id}:2" in keys  # 键含 attempt
+
+
+def test_retry_only_from_failed(service) -> None:
+    svc, _, _ = service
+    open_ticket = svc.create_ticket("还没排队")
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(open_ticket.id)
+    done = svc.create_ticket("已收口")
+    svc.queue_ticket(done.id)
+    svc.transition_ticket(done.id, TicketAction.START)
+    svc.transition_ticket(done.id, TicketAction.DELIVER)
+    svc.complete_ticket(done.id)
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(done.id)
