@@ -189,6 +189,21 @@ class OrchestrationService:
                 )
             )
 
+    def wake_for_delivery(self, ticket_id: str) -> Ticket:
+        """waiting|blocked -> running（START 边）：投递真正进入 Worker 时才翻态。
+
+        已是 RUNNING（唤醒后连续投递）返回原票——woken_at 沿用 submit_input 已置的值。
+        """
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            if ticket.status is TicketStatus.RUNNING:
+                return ticket
+            updated = ticket.model_copy(
+                update={"status": next_ticket_status(ticket.status, TicketAction.START)}
+            )
+            self._store.update_ticket(updated)
+            return updated
+
     def mark_input_consumed(self, ticket_id: str, input_id: str) -> None:
         """sink 面：投递进 Worker（内存里的 state 副本）之后回写 consumed_at/state。"""
         with self._store.transaction():

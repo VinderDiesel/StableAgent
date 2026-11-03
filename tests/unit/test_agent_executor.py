@@ -5,8 +5,14 @@ from __future__ import annotations
 
 import pytest
 
-from stableagent.core.state import Config, Event, EventType
-from stableagent.orchestration.errors import WorkerConfigError
+from stableagent.core.state import (
+    AgentState,
+    AgentStatus,
+    Config,
+    Event,
+    EventType,
+)
+from stableagent.orchestration.errors import DeferrableEffectError, WorkerConfigError
 from stableagent.orchestration.executor import AgentExecutor
 from stableagent.orchestration.model import (
     Assignment,
@@ -15,6 +21,7 @@ from stableagent.orchestration.model import (
     ReportKind,
     Ticket,
     TicketAction,
+    TicketInput,
 )
 from tests.support import FixedClock, RecordingSink, StubAgent
 
@@ -76,18 +83,15 @@ async def test_run_id_is_registered_once_at_the_first_step_boundary() -> None:
     assert sink.ticket_actions == [("tk-1", TicketAction.DELIVER.value)]
 
 
-async def test_paused_needs_human_maps_to_waiting_and_budget_to_blocked() -> None:
+async def test_paused_budget_maps_to_blocked_and_parks() -> None:
     sink = RecordingSink()
-    paused = Event(type=EventType.PAUSED, data={"step": 2, "reason": "needs_human", "detail": None})
-    executor, _ = _executor([paused], sink)
-    await executor.launch(_assignment(), _ticket(), [])
-    assert sink.ticket_actions == [("tk-1", TicketAction.WAIT.value)]
-
-    sink2 = RecordingSink()
     budget = Event(type=EventType.PAUSED, data={"step": 3, "reason": "budget_exceeded"})
-    executor2, _ = _executor([budget], sink2)
-    await executor2.launch(_assignment(), _ticket(), [])
-    assert sink2.ticket_actions == [("tk-1", TicketAction.BLOCK.value)]
+    executor, _ = _executor([budget], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert sink.ticket_actions == [("tk-1", TicketAction.BLOCK.value)]
+    assert sink.finished == []  # park：预算暂停同样不终结 Assignment
+    assert [r[2] for r in sink.reports] == [ReportKind.BLOCKED.value]
+    assert executor.parked_assignments() == {"as-1"}
 
 
 async def test_error_event_maps_to_failed_assignment_with_reason() -> None:
@@ -124,10 +128,67 @@ async def test_thinking_and_tool_call_do_not_emit_reports_by_default() -> None:
     assert sink.reports == []  # D3：默认零噪音
 
 
-async def test_protocol_methods_not_in_scope_raise_clearly() -> None:
+async def test_paused_assignment_parks_instead_of_ending() -> None:
     sink = RecordingSink()
-    executor, _ = _executor([], sink)
-    with pytest.raises(NotImplementedError):
-        await executor.deliver(_assignment(), [_ticket()], [])
-    with pytest.raises(NotImplementedError):
-        await executor.cancel(_assignment())
+    paused = Event(
+        type=EventType.PAUSED, data={"step": 2, "reason": "needs_human", "detail": None}, step=2
+    )
+    executor, _ = _executor([paused], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert sink.finished == []  # 不再 finish_assignment(END)
+    assert sink.ticket_actions == [("tk-1", TicketAction.WAIT.value)]
+    assert [r[2] for r in sink.reports] == [ReportKind.WAITING_FOR_HUMAN.value]
+    assert executor.parked_assignments() == {"as-1"}
+
+
+async def test_deliver_resumes_parked_agent_and_consumes_input() -> None:
+    sink = RecordingSink()
+    paused = Event(
+        type=EventType.PAUSED, data={"step": 2, "reason": "needs_human", "detail": None}, step=2
+    )
+    executor, agent = _executor([paused], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    agent.next_state = AgentState(
+        run_id="run-1", agent_name="stub", status=AgentStatus.SUCCEEDED, messages=[]
+    )
+    item = TicketInput(
+        id="in-1", ticket_id="tk-1", sequence=1, kind="text", payload="新线索", created_at=1
+    )
+    await executor.deliver(_assignment(), _ticket(), [item])
+    assert agent.resumed_with == ["新线索"]
+    assert sink.consumed == [("tk-1", "in-1")]
+    assert sink.finished == [("as-1", AssignmentAction.END.value, None)]
+    assert sink.ticket_actions == [
+        ("tk-1", TicketAction.WAIT.value),
+        ("tk-1", TicketAction.DELIVER.value),
+    ]
+    assert executor.parked_assignments() == set()  # 收口即除驻
+
+
+async def test_reparked_segment_reports_waiting_for_human_without_classification() -> None:
+    sink = RecordingSink()
+    paused = Event(
+        type=EventType.PAUSED, data={"step": 2, "reason": "needs_human", "detail": None}, step=2
+    )
+    executor, agent = _executor([paused], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    agent.next_state = AgentState(
+        run_id="run-1", agent_name="stub", status=AgentStatus.PAUSED, messages=[]
+    )
+    item = TicketInput(
+        id="in-1", ticket_id="tk-1", sequence=1, kind="text", payload="再补一条", created_at=1
+    )
+    await executor.deliver(_assignment(), _ticket(), [item])
+    assert sink.finished == []  # 重新驻留：仍不终结
+    assert [r[2] for r in sink.reports] == [
+        ReportKind.WAITING_FOR_HUMAN.value,
+        ReportKind.WAITING_FOR_HUMAN.value,
+    ]  # 偏差登记：续段再暂停原因不可得，一律 waiting_for_human（D4 不读文本）
+    assert sink.ticket_actions == [("tk-1", TicketAction.WAIT.value)] * 2
+    assert executor.parked_assignments() == {"as-1"}
+
+
+async def test_deliver_without_park_defers_instead_of_failing() -> None:
+    executor, _ = _executor([], RecordingSink())
+    with pytest.raises(DeferrableEffectError):
+        await executor.deliver(_assignment(), _ticket(), [])

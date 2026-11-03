@@ -158,3 +158,7 @@ def test_deadline_and_input_state_are_defaulted_compat_fields() -> None:
     item = TicketInput(id="in-1", ticket_id="tk-1", sequence=1, payload="x", created_at=1)
     assert item.state == "pending"
     assert TicketInput.model_validate_json(item.model_dump_json()) == item
+
+
+def test_blocked_can_be_started_by_delivery_wakeup() -> None:
+    assert next_ticket_status(TicketStatus.BLOCKED, TicketAction.START) is TicketStatus.RUNNING

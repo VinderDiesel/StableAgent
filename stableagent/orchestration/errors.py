@@ -62,3 +62,10 @@ class WorkerConfigError(OrchestrationError):
 class IdempotencyConflictError(OrchestrationError):
     def __init__(self, kind: str, key: str) -> None:
         super().__init__("orchestration.idempotency_conflict", f"effect {kind}/{key} 已处于终态")
+
+
+class DeferrableEffectError(OrchestrationError):
+    """此刻不可执行而非失败：dispatcher 回退时还掉 claim 的那次 attempts，不侵蚀重试预算。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("orchestration.effect_deferred", f"effect 此刻顺延，不是失败：{reason}")

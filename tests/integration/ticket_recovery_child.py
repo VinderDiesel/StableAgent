@@ -122,6 +122,9 @@ class PrintingSink:
     def transition_ticket(self, ticket_id: str, action: TicketAction) -> None:
         self._service.transition_ticket(ticket_id, action)
 
+    def mark_input_consumed(self, ticket_id: str, input_id: str) -> None:
+        self._service.mark_input_consumed(ticket_id, input_id)
+
 
 def _registry() -> ToolRegistry:
     registry = ToolRegistry()

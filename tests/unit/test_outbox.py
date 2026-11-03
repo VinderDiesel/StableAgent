@@ -98,3 +98,38 @@ async def test_orphan_running_effects_are_reclaimed(store: Store) -> None:
 def test_transaction_wrapper_still_rejects_nesting(store: Store) -> None:
     with pytest.raises(ReentrantTransactionError), store.transaction(), store.transaction():
         pass
+
+
+async def test_ineligible_effects_are_skipped_without_claim(store: Store) -> None:
+    async def handler(effect: Effect) -> None:
+        raise AssertionError("门控关闭时不该被调用")
+
+    with store.transaction():
+        store.enqueue_effect(_launch("ef-1", "k1"))
+    dispatcher = EffectDispatcher(
+        store,
+        {EffectKind.LAUNCH_ASSIGNMENT: handler},
+        clock=FixedClock(),
+        eligible={EffectKind.LAUNCH_ASSIGNMENT: lambda e: False},
+    )
+    assert await dispatcher.dispatch_due() == 0
+    row = store._effect_row("ef-1")
+    assert (row.state, row.attempts) == (EffectState.PENDING, 0)  # 不领取、不记 attempts
+
+
+async def test_deferrable_error_backs_off_without_burning_budget(store: Store) -> None:
+    from stableagent.orchestration.errors import DeferrableEffectError
+
+    async def defer(effect: Effect) -> None:
+        raise DeferrableEffectError("park lost")
+
+    with store.transaction():
+        store.enqueue_effect(_launch("ef-1", "k1"))
+    dispatcher = EffectDispatcher(
+        store, {EffectKind.LAUNCH_ASSIGNMENT: defer}, clock=FixedClock(), max_attempts=1
+    )
+    for _ in range(3):  # 退避三轮也不判死
+        assert await dispatcher.dispatch_due() == 0
+        row = store._effect_row("ef-1")
+        assert (row.state, row.attempts) == (EffectState.RETRY_WAIT, 0)
+        # 时钟由 FixedClock 固定、due_at=now+backoff：后两轮在 due 集合外，此断言只锁第一轮形状

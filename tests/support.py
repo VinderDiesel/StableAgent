@@ -200,6 +200,8 @@ class StubAgent:
         self.last_state = None
         self.config = config or Config()
         self.recovered_with: list[str | None] = []
+        self.resumed_with: list[str | None] = []
+        self.next_state: Any = None
         self._run_id = run_id
 
     async def stream(self, task: str) -> AsyncIterator[Any]:
@@ -210,3 +212,7 @@ class StubAgent:
         self.recovered_with.append(run_id)
         for event in self._events:
             yield event
+
+    async def aresume(self, extra_input: str | None = None) -> Any:
+        self.resumed_with.append(extra_input)
+        return self.next_state

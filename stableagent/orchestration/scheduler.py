@@ -5,15 +5,21 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from stableagent.orchestration.errors import DuplicateLaunchError, UnknownAssignmentError
+from stableagent.orchestration.errors import (
+    DeferrableEffectError,
+    DuplicateLaunchError,
+    UnknownAssignmentError,
+)
 from stableagent.orchestration.executor import WorkerExecutor
 from stableagent.orchestration.model import (
+    TERMINAL_TICKET_STATUSES,
     Assignment,
     AssignmentStatus,
     Clock,
     Effect,
     EffectKind,
     Ticket,
+    TicketStatus,
 )
 from stableagent.orchestration.outbox import EffectDispatcher
 from stableagent.orchestration.service import OrchestrationService
@@ -47,15 +53,44 @@ class Scheduler:
         # 本字典只作取消与去重句柄，可运行性的事实源永远是 Store。
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._dispatcher = EffectDispatcher(
-            store, {EffectKind.LAUNCH_ASSIGNMENT: self._handle_launch}, clock=clock
+            store,
+            {
+                EffectKind.LAUNCH_ASSIGNMENT: self._handle_launch,
+                EffectKind.DELIVER_INPUT: self._handle_deliver,
+            },
+            clock=clock,
+            eligible={
+                EffectKind.LAUNCH_ASSIGNMENT: self._gate_launch,
+                EffectKind.DELIVER_INPUT: self._gate_deliver,
+            },
         )
 
     def running_assignments(self) -> set[str]:
         return {key for key, task in self._tasks.items() if not task.done()}
 
+    def _gate_launch(self, effect: Effect) -> bool:
+        live = self.running_assignments()
+        if effect.payload.get("assignment_id") in live:
+            return False  # L7：在途去重
+        return len(live) < self._max_concurrency  # E2：槽位按活任务数判，驻留不占位
+
+    def _gate_deliver(self, effect: Effect) -> bool:
+        """设计裁定 2：资格从 Store 推导——运行中的 Worker 绝不被抢占（D6）。"""
+        ticket = self._store.get_ticket(effect.payload["ticket_id"])
+        if ticket is None or ticket.status in TERMINAL_TICKET_STATUSES:
+            return True  # 无主/终态作废：领掉空转，不留永久 due 垃圾
+        if ticket.status in (TicketStatus.WAITING, TicketStatus.BLOCKED):
+            return True  # 暂停边界到了
+        if ticket.status is TicketStatus.RUNNING:
+            live = self.running_assignments()
+            # RUNNING 但无活 Worker：唤醒后连续投递的中间态（驻留协程已让位）
+            return not any(a.id in live for a in self._store.list_assignments(ticket.id))
+        return False  # open/queued：未消费 Input 随 launch 一并进 task，由启动点消费
+
     async def tick(self) -> TickResult:
         enqueued = self._service.enqueue_work_for_runnable_tickets(self._clock.now_ms())
-        dispatched = await self._dispatcher.dispatch_due(limit=self._max_concurrency)
+        # 并发上界由 _gate_launch 的活任务计数守住；窗口放宽，跨 Ticket 的投递才能同轮领掉
+        dispatched = await self._dispatcher.dispatch_due()
         return TickResult(
             enqueued=enqueued,
             dispatched=dispatched,
@@ -74,7 +109,14 @@ class Scheduler:
                 running = self._service.relaunch_assignment(assignment.id)
                 await self._executor.recover(running, ticket)
             else:
-                await self._executor.launch(assignment, ticket, [])
+                # D6 首形态（空闲边界=启动点）：未消费 Input 进 task，AgentExecutor 在
+                # 第一个事件处逐条回写消费。
+                pending = [
+                    item
+                    for item in self._store.list_inputs(ticket.id, pending_only=True)
+                    if item.kind == "text"
+                ]
+                await self._executor.launch(assignment, ticket, pending)
 
     async def _handle_launch(self, effect: Effect) -> None:
         payload = effect.payload
@@ -83,6 +125,31 @@ class Scheduler:
         if assignment is None or ticket is None:
             raise UnknownAssignmentError(payload["assignment_id"])
         await self.drive(assignment, ticket)
+
+    async def _handle_deliver(self, effect: Effect) -> None:
+        """设计裁定 3：一个 effect 只消费该 Ticket 最旧的未消费 Input（领取乱序、消费保序）。"""
+        ticket = self._store.get_ticket(effect.payload["ticket_id"])
+        if ticket is None or ticket.status in TERMINAL_TICKET_STATUSES:
+            return  # 空转领掉：投递对象已不存在或已收口
+        pending = [
+            item
+            for item in self._store.list_inputs(ticket.id, pending_only=True)
+            if item.kind == "text"
+        ]
+        if not pending:
+            return  # 被相邻 effect 按序号配对消费掉了
+        assignment = next(
+            (
+                a
+                for a in self._store.list_assignments(ticket.id)
+                if a.status is AssignmentStatus.RUNNING
+            ),
+            None,
+        )
+        if assignment is None:
+            raise DeferrableEffectError(f"ticket {ticket.id} 的 Worker 尚未驻留")
+        woken = self._service.wake_for_delivery(ticket.id)
+        await self._executor.deliver(assignment, woken, [pending[0]])
 
     async def drain(self, *, max_rounds: int = 50) -> list[TickResult]:
         results: list[TickResult] = []

@@ -8,10 +8,14 @@ import pytest
 
 from stableagent.orchestration.errors import DuplicateLaunchError, UnknownAssignmentError
 from stableagent.orchestration.model import (
+    AssignmentAction,
     AssignmentStatus,
     Effect,
     EffectKind,
+    EffectState,
     Ticket,
+    TicketAction,
+    TicketStatus,
 )
 from stableagent.orchestration.scheduler import Scheduler
 from stableagent.orchestration.service import OrchestrationService
@@ -20,9 +24,11 @@ from tests.support import FixedClock, SequenceIds
 
 
 class StubExecutor:
-    def __init__(self) -> None:
+    def __init__(self, service: OrchestrationService | None = None) -> None:
         self.launched: list[str] = []
         self.recovered: list[str] = []
+        self.delivered: list[tuple[str, str]] = []
+        self._service = service
         self.gate = asyncio.Event()
         self.started = asyncio.Event()
 
@@ -31,7 +37,11 @@ class StubExecutor:
         self.started.set()
         await self.gate.wait()
 
-    async def deliver(self, assignment, ticket, inputs) -> None: ...
+    async def deliver(self, assignment, ticket, inputs) -> None:
+        for item in inputs:
+            self.delivered.append((ticket.id, item.payload))
+            assert self._service is not None
+            self._service.mark_input_consumed(ticket.id, item.id)
 
     async def cancel(self, assignment) -> None: ...
 
@@ -44,7 +54,7 @@ def env(tmp_path):
     clock, ids = FixedClock(), SequenceIds()
     store = Store(tmp_path / "sched.db", clock=clock)
     service = OrchestrationService(store, clock=clock, ids=ids)
-    executor = StubExecutor()
+    executor = StubExecutor(service)
     scheduler = Scheduler(
         store=store, service=service, executor=executor, clock=clock, max_concurrency=1
     )
@@ -147,3 +157,55 @@ async def test_launch_effect_pointing_at_missing_assignment_raises(env) -> None:
     )
     with pytest.raises(UnknownAssignmentError):
         await scheduler._handle_launch(effect)
+
+
+async def test_delivery_waits_for_park_boundary_and_keeps_sequence(env) -> None:
+    store, service, executor, scheduler, clock = env
+    executor.gate.clear()  # 保持阻塞，模拟"正在运行"
+    ticket = _queued(service, "运行中的活")
+    await scheduler.tick()  # launch effect 已领取，Worker 卡住
+    await asyncio.sleep(0)
+    service.submit_input(ticket.id, "线索一")
+    clock.advance(1000)
+    service.submit_input(ticket.id, "线索二")
+    pending = [e for e in store.due_effects(clock.now_ms()) if e.kind is EffectKind.DELIVER_INPUT]
+    assert len(pending) == 2
+    await scheduler.tick()
+    assert executor.delivered == []  # D6：运行中绝不投递
+    for row in pending:  # 且门控不领、不耗 attempts
+        assert store.get_effect(row.id).attempts == 0
+    # 模拟到达暂停边界：Ticket -> waiting（Task 15 后由真实 PAUSED 驱动，这里用 service 面）
+    service.transition_ticket(ticket.id, TicketAction.WAIT)
+    first_effect, second_effect = pending  # due_at：线索一更早
+    with store.transaction():
+        store.update_effect(second_effect.model_copy(update={"due_at": 0}))  # 反转领取顺序
+    executor.gate.set()  # Worker 收摊，槽位与门控都放行投递
+    await _wait_until_idle(scheduler)
+    await scheduler.tick()
+    await scheduler.tick()
+    assert [p for (t, p) in executor.delivered] == ["线索一", "线索二"]  # 领取乱序、消费保序
+    assert store.get_ticket(ticket.id).status is TicketStatus.RUNNING  # 投递唤醒过
+
+
+async def test_deliveries_of_different_tickets_run_in_one_round(env) -> None:
+    store, service, executor, scheduler, clock = env
+    for name in ("甲", "乙"):
+        ticket = _queued(service, f"任务{name}")
+        assignment = store.list_assignments(ticket.id)[0]
+        service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)  # 造出驻留形状
+        service.transition_ticket(ticket.id, TicketAction.START)  # queued->running
+        service.transition_ticket(ticket.id, TicketAction.WAIT)  # running->waiting（驻留形状）
+        # 驻留形状下 launch effect 早已被真实 Worker 领掉：夹具把这条残账结清（fixture 面，
+        # 断言不动），否则本轮会多领一次冷启动。
+        leftover = [
+            e
+            for e in store.due_effects(clock.now_ms())
+            if e.kind is EffectKind.LAUNCH_ASSIGNMENT and e.payload["ticket_id"] == ticket.id
+        ]
+        assert len(leftover) == 1
+        with store.transaction():
+            store.update_effect(leftover[0].model_copy(update={"state": EffectState.SUCCEEDED}))
+        service.submit_input(ticket.id, f"线索{name}")
+    result = await scheduler.tick()
+    assert result.dispatched == 2
+    assert {t for t, _ in executor.delivered} == {"tk-0001", "tk-0002"}  # 不同 Ticket 并行

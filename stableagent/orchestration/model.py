@@ -202,6 +202,7 @@ _TICKET_TABLE: dict[tuple[TicketStatus, TicketAction], TicketStatus] = {
     (TicketStatus.WAITING, TicketAction.FAIL): TicketStatus.FAILED,
     (TicketStatus.WAITING, TicketAction.CANCEL): TicketStatus.CANCELLED,
     (TicketStatus.BLOCKED, TicketAction.QUEUE): TicketStatus.QUEUED,
+    (TicketStatus.BLOCKED, TicketAction.START): TicketStatus.RUNNING,
     (TicketStatus.BLOCKED, TicketAction.CANCEL): TicketStatus.CANCELLED,
     (TicketStatus.READY, TicketAction.COMPLETE): TicketStatus.COMPLETED,
     (TicketStatus.READY, TicketAction.CANCEL): TicketStatus.CANCELLED,
