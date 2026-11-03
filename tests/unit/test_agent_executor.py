@@ -192,3 +192,16 @@ async def test_deliver_without_park_defers_instead_of_failing() -> None:
     executor, _ = _executor([], RecordingSink())
     with pytest.raises(DeferrableEffectError):
         await executor.deliver(_assignment(), _ticket(), [])
+
+
+async def test_cancel_clears_park_without_touching_store() -> None:
+    sink = RecordingSink()
+    paused = Event(
+        type=EventType.PAUSED, data={"step": 2, "reason": "needs_human", "detail": None}, step=2
+    )
+    executor, _ = _executor([paused], sink)
+    await executor.launch(_assignment(), _ticket(), [])
+    assert executor.parked_assignments() == {"as-1"}
+    await executor.cancel(_assignment())
+    assert executor.parked_assignments() == set()  # executor 只丢驻留，状态写回在 service
+    assert sink.finished == []

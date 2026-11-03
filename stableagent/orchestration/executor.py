@@ -131,7 +131,8 @@ class AgentExecutor:
         self._finish_from_state(assignment, ticket, final)
 
     async def cancel(self, assignment: Assignment) -> None:
-        raise NotImplementedError("cancel_assignment 属于里程碑 M2")
+        """只丢驻留实例；Assignment/Ticket 的状态写回在 scheduler/service 面。"""
+        self._agents.pop(assignment.id, None)
 
     def _report_event(self, ticket: Ticket, assignment: Assignment, event: Event) -> None:
         kind = _REPORT_BY_EVENT.get(event.type)

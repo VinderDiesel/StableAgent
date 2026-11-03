@@ -28,6 +28,7 @@ class StubExecutor:
         self.launched: list[str] = []
         self.recovered: list[str] = []
         self.delivered: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
         self._service = service
         self.gate = asyncio.Event()
         self.started = asyncio.Event()
@@ -43,7 +44,8 @@ class StubExecutor:
             assert self._service is not None
             self._service.mark_input_consumed(ticket.id, item.id)
 
-    async def cancel(self, assignment) -> None: ...
+    async def cancel(self, assignment) -> None:
+        self.cancelled.append(assignment.id)
 
     async def recover(self, assignment, ticket) -> None:
         self.recovered.append(assignment.id)
@@ -209,3 +211,39 @@ async def test_deliveries_of_different_tickets_run_in_one_round(env) -> None:
     result = await scheduler.tick()
     assert result.dispatched == 2
     assert {t for t, _ in executor.delivered} == {"tk-0001", "tk-0002"}  # 不同 Ticket 并行
+
+
+async def test_cancel_releases_the_slot_for_the_next_ticket(env) -> None:
+    store, service, executor, scheduler, clock = env
+    first = _queued(service, "长跑")
+    second = _queued(service, "等待")
+    await scheduler.tick()  # 领走 first 的 launch（单槽被 gate 占住）
+    await asyncio.sleep(0)
+    service.cancel_ticket(first.id)
+    result = await scheduler.tick()  # 领走 cancel：任务被取消、槽位归还
+    assert result.dispatched >= 1
+    executor.gate.set()  # 窗口放宽后 second 可能同轮已被领走：放行桩 Worker 才能等到槽位空
+    await _wait_until_idle(scheduler)
+    await scheduler.tick()
+    await asyncio.sleep(0)
+    assert executor.launched == [
+        store.list_assignments(first.id)[0].id,
+        store.list_assignments(second.id)[0].id,
+    ]
+    assert store.get_assignment(store.list_assignments(first.id)[0].id).status is (
+        AssignmentStatus.CANCELLED
+    )
+    assert store.get_ticket(first.id).status is TicketStatus.CANCELLED
+
+
+async def test_cancel_of_parked_worker_drops_the_park(env) -> None:
+    # StubExecutor.cancel 记 self.cancelled：驻留路径无在途任务，handler 仍要调它清驻留
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "只排队")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)  # pending->running
+    service.cancel_ticket(ticket.id)
+    await scheduler.tick()
+    assert executor.cancelled == [assignment.id]
+    assert executor.launched == []  # 已取消的 Assignment 不再被冷启动
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED

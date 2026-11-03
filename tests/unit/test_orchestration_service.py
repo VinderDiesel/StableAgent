@@ -170,3 +170,32 @@ def test_retry_only_from_failed(service) -> None:
     svc.complete_ticket(done.id)
     with pytest.raises(IllegalTransitionError):
         svc.retry_ticket(done.id)
+
+
+def test_cancel_ticket_keeps_history_and_enqueues_effect(service) -> None:
+    svc, store, clock = service
+    ticket = svc.create_ticket("要取消的")
+    svc.queue_ticket(ticket.id)
+    assignment = store.list_assignments(ticket.id)[0]
+    svc.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    svc.transition_ticket(ticket.id, TicketAction.START)
+    cancelled = svc.cancel_ticket(ticket.id, "用户撤回")
+    assert cancelled.status is TicketStatus.CANCELLED and cancelled.ended_at is not None
+    keys = [e.idempotency_key for e in store.due_effects(clock.now_ms())]
+    assert f"cancel:{assignment.id}" in keys
+    assert [a.id for a in store.list_assignments(ticket.id)] == [assignment.id]  # 不删历史
+    with pytest.raises(IllegalTransitionError):
+        svc.cancel_ticket(cancelled.id)  # 已结束写入
+    with pytest.raises(IllegalTransitionError):
+        svc.retry_ticket(ticket.id)  # cancelled 不复活
+
+
+def test_closeout_is_idempotent(service) -> None:
+    svc, store, _ = service
+    ticket = svc.create_ticket("任务")
+    svc.queue_ticket(ticket.id)
+    assignment = store.list_assignments(ticket.id)[0]
+    svc.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    svc.closeout_cancelled_assignment(assignment.id)
+    svc.closeout_cancelled_assignment(assignment.id)
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED

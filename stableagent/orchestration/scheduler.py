@@ -14,6 +14,7 @@ from stableagent.orchestration.executor import WorkerExecutor
 from stableagent.orchestration.model import (
     TERMINAL_TICKET_STATUSES,
     Assignment,
+    AssignmentAction,
     AssignmentStatus,
     Clock,
     Effect,
@@ -57,6 +58,7 @@ class Scheduler:
             {
                 EffectKind.LAUNCH_ASSIGNMENT: self._handle_launch,
                 EffectKind.DELIVER_INPUT: self._handle_deliver,
+                EffectKind.CANCEL_ASSIGNMENT: self._handle_cancel,
             },
             clock=clock,
             eligible={
@@ -104,19 +106,23 @@ class Scheduler:
         self._tasks[assignment.id] = asyncio.create_task(self._guarded(assignment, ticket))
 
     async def _guarded(self, assignment: Assignment, ticket: Ticket) -> None:
-        async with self._slots:  # 槽位由 Worker 任务自己持有，直到终态或异常
-            if assignment.status is AssignmentStatus.INTERRUPTED:
-                running = self._service.relaunch_assignment(assignment.id)
-                await self._executor.recover(running, ticket)
-            else:
-                # D6 首形态（空闲边界=启动点）：未消费 Input 进 task，AgentExecutor 在
-                # 第一个事件处逐条回写消费。
-                pending = [
-                    item
-                    for item in self._store.list_inputs(ticket.id, pending_only=True)
-                    if item.kind == "text"
-                ]
-                await self._executor.launch(assignment, ticket, pending)
+        try:
+            async with self._slots:  # 槽位由 Worker 任务自己持有，直到终态或异常
+                if assignment.status is AssignmentStatus.INTERRUPTED:
+                    running = self._service.relaunch_assignment(assignment.id)
+                    await self._executor.recover(running, ticket)
+                else:
+                    # D6 首形态（空闲边界=启动点）：未消费 Input 进 task，AgentExecutor 在
+                    # 第一个事件处逐条回写消费。
+                    pending = [
+                        item
+                        for item in self._store.list_inputs(ticket.id, pending_only=True)
+                        if item.kind == "text"
+                    ]
+                    await self._executor.launch(assignment, ticket, pending)
+        except asyncio.CancelledError:
+            self._service.finish_assignment(assignment.id, AssignmentAction.CANCEL)
+            raise
 
     async def _handle_launch(self, effect: Effect) -> None:
         payload = effect.payload
@@ -124,7 +130,25 @@ class Scheduler:
         ticket = self._store.get_ticket(payload["ticket_id"])
         if assignment is None or ticket is None:
             raise UnknownAssignmentError(payload["assignment_id"])
+        if assignment.status in (
+            AssignmentStatus.ENDED,
+            AssignmentStatus.FAILED,
+            AssignmentStatus.CANCELLED,
+        ):
+            return  # 已收口/已取消：领掉 effect，不再冷启动
         await self.drive(assignment, ticket)
+
+    async def _handle_cancel(self, effect: Effect) -> None:
+        assignment_id = effect.payload["assignment_id"]
+        task = self._tasks.get(assignment_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)  # 槽位归还先于 handler 返回
+        assignment = self._store.get_assignment(assignment_id)
+        if assignment is None:
+            raise UnknownAssignmentError(assignment_id)
+        await self._executor.cancel(assignment)
+        self._service.closeout_cancelled_assignment(assignment_id)
 
     async def _handle_deliver(self, effect: Effect) -> None:
         """设计裁定 3：一个 effect 只消费该 Ticket 最旧的未消费 Input（领取乱序、消费保序）。"""

@@ -137,6 +137,57 @@ class OrchestrationService:
             )
             return assignment
 
+    def cancel_ticket(self, ticket_id: str, reason: str | None = None) -> Ticket:
+        """只取消未结束 Ticket；每个未终态 Assignment 各入队 cancel_assignment，历史不删。"""
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            now = self._clock.now_ms()
+            updated = ticket.model_copy(
+                update={
+                    "status": next_ticket_status(ticket.status, TicketAction.CANCEL),
+                    "ended_at": now,
+                }
+            )
+            self._store.update_ticket(updated)
+            for assignment in self._store.list_assignments(ticket_id):
+                if assignment.status in _ASSIGNMENT_ENDED_STATUSES:
+                    continue
+                self._store.enqueue_effect(
+                    Effect(
+                        id=self._ids.new_id("ef"),
+                        kind=EffectKind.CANCEL_ASSIGNMENT,
+                        idempotency_key=f"cancel:{assignment.id}",
+                        payload={
+                            "assignment_id": assignment.id,
+                            "ticket_id": ticket_id,
+                            "reason": reason,
+                        },
+                        due_at=now,
+                    )
+                )
+            return updated
+
+    def closeout_cancelled_assignment(self, assignment_id: str) -> None:
+        """幂等收尾：Worker 已被取消的路径由 _guarded 记账，驻留路径在这里补记。"""
+        with self._store.transaction():
+            assignment = self._require_assignment(assignment_id)
+            if assignment.status not in (
+                AssignmentStatus.PENDING,
+                AssignmentStatus.RUNNING,
+                AssignmentStatus.INTERRUPTED,
+            ):
+                return
+            self._store.update_assignment(
+                assignment.model_copy(
+                    update={
+                        "status": next_assignment_status(
+                            assignment.status, AssignmentAction.CANCEL
+                        ),
+                        "ended_at": self._clock.now_ms(),
+                    }
+                )
+            )
+
     def submit_input(self, ticket_id: str, text: str) -> TicketInput:
         """落库未消费 Input 并入队 deliver_input effect（C2 后半：输入写入后建投递）。"""
         with self._store.transaction():
