@@ -13,6 +13,7 @@ from stableagent.orchestration.model import (
     Effect,
     EffectKind,
     EffectState,
+    ReportKind,
     Ticket,
     TicketAction,
     TicketStatus,
@@ -29,6 +30,8 @@ class StubExecutor:
         self.recovered: list[str] = []
         self.delivered: list[tuple[str, str]] = []
         self.cancelled: list[str] = []
+        self.fail_launches = False
+        self.fail_deliver = False
         self._service = service
         self.gate = asyncio.Event()
         self.started = asyncio.Event()
@@ -36,9 +39,13 @@ class StubExecutor:
     async def launch(self, assignment, ticket, inputs) -> None:
         self.launched.append(assignment.id)
         self.started.set()
+        if self.fail_launches:
+            raise RuntimeError("worker refused to start")
         await self.gate.wait()
 
     async def deliver(self, assignment, ticket, inputs) -> None:
+        if self.fail_deliver:
+            raise RuntimeError("delivery exploded")
         for item in inputs:
             self.delivered.append((ticket.id, item.payload))
             assert self._service is not None
@@ -247,3 +254,42 @@ async def test_cancel_of_parked_worker_drops_the_park(env) -> None:
     assert executor.cancelled == [assignment.id]
     assert executor.launched == []  # 已取消的 Assignment 不再被冷启动
     assert store.get_assignment(assignment.id).status is AssignmentStatus.CANCELLED
+
+
+async def test_exhausted_launch_fails_assignment_and_writes_failed_report(env) -> None:
+    store, service, executor, scheduler, clock = env
+    executor.fail_launches = True
+    ticket = _queued(service, "起不来的")
+    assignment = store.list_assignments(ticket.id)[0]
+    for _ in range(4):
+        await scheduler.tick()
+        await asyncio.sleep(0)  # 让 create_task 的 Worker 起跑（起不来就在这一轮记账）
+        clock.advance(10_000)  # 越过 backoff 的 due_at
+    assert store.get_assignment(assignment.id).status is AssignmentStatus.FAILED
+    assert store.get_ticket(ticket.id).status is TicketStatus.FAILED
+    assert ReportKind.FAILED in [r.kind for r in store.list_reports(ticket.id)]
+
+
+async def test_exhausted_delivery_blocks_ticket_with_reason(env) -> None:
+    store, service, executor, scheduler, clock = env
+    ticket = _queued(service, "等投料的")
+    assignment = store.list_assignments(ticket.id)[0]
+    service.finish_assignment(assignment.id, AssignmentAction.LAUNCH)
+    service.transition_ticket(ticket.id, TicketAction.START)  # queued->running
+    service.transition_ticket(ticket.id, TicketAction.WAIT)  # running->waiting（驻留形状）
+    leftover = [
+        e
+        for e in store.due_effects(clock.now_ms())
+        if e.kind is EffectKind.LAUNCH_ASSIGNMENT and e.payload["ticket_id"] == ticket.id
+    ]
+    assert len(leftover) == 1
+    with store.transaction():  # 驻留形状下 launch 已被真实 Worker 领掉：夹具结清残账
+        store.update_effect(leftover[0].model_copy(update={"state": EffectState.SUCCEEDED}))
+    executor.fail_deliver = True  # 真实失败才打满；Deferrable 顺延永不判死（Task 13 已锁）
+    service.submit_input(ticket.id, "永远等不到的线索")
+    for _ in range(4):
+        await scheduler.tick()
+        clock.advance(10_000)
+    assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED
+    blocked = [r for r in store.list_reports(ticket.id) if r.kind is ReportKind.BLOCKED]
+    assert blocked and "effect_id" in blocked[0].details  # 结构化原因，非自然语言

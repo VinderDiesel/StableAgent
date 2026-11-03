@@ -133,3 +133,34 @@ async def test_deferrable_error_backs_off_without_burning_budget(store: Store) -
         row = store._effect_row("ef-1")
         assert (row.state, row.attempts) == (EffectState.RETRY_WAIT, 0)
         # 时钟由 FixedClock 固定、due_at=now+backoff：后两轮在 due 集合外，此断言只锁第一轮形状
+
+
+async def test_backoff_fn_is_injected_and_exhaustion_fires_hook(store: Store) -> None:
+    seen: list[int] = []
+    exhausted: list[tuple[str, str]] = []
+
+    def backoff(attempts: int) -> int:
+        seen.append(attempts)
+        return 7 * attempts
+
+    async def boom(effect: Effect) -> None:
+        raise RuntimeError("provider down")
+
+    clock = FixedClock()
+    with store.transaction():
+        store.enqueue_effect(_launch("ef-1", "k1"))
+    dispatcher = EffectDispatcher(
+        store,
+        {EffectKind.LAUNCH_ASSIGNMENT: boom},
+        clock=clock,
+        max_attempts=2,
+        backoff=backoff,
+        on_exhausted=lambda e, d: exhausted.append((e.id, d)),
+    )
+    assert await dispatcher.dispatch_due() == 0
+    row = store._effect_row("ef-1")
+    assert (row.state, row.due_at - clock.now_ms()) == (EffectState.RETRY_WAIT, 7)
+    clock.advance(100)
+    assert await dispatcher.dispatch_due() == 0
+    assert store._effect_row("ef-1").state is EffectState.FAILED
+    assert seen == [1, 2] and len(exhausted) == 1 and exhausted[0][0] == "ef-1"

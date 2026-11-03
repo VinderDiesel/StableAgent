@@ -28,6 +28,8 @@ class EffectDispatcher:
         max_attempts: int = 3,
         backoff_ms: int = 1000,
         eligible: Mapping[EffectKind, Callable[[Effect], bool]] | None = None,
+        backoff: Callable[[int], int] | None = None,
+        on_exhausted: Callable[[Effect, str], None] | None = None,
     ) -> None:
         self._store = store
         self._handlers = dict(handlers)
@@ -35,6 +37,8 @@ class EffectDispatcher:
         self._max_attempts = max_attempts
         self._backoff_ms = backoff_ms
         self._eligible = dict(eligible or {})
+        self._backoff = backoff
+        self._on_exhausted = on_exhausted
         self._outcomes: list[tuple[str, EffectState]] = []
 
     def outcomes(self) -> list[tuple[str, EffectState]]:
@@ -86,16 +90,17 @@ class EffectDispatcher:
     def _fail_or_retry(self, effect: Effect, detail: str) -> Effect:
         action = EffectAction.RETRY if effect.attempts < self._max_attempts else EffectAction.FAIL
         state = next_effect_status(effect.state, action)
-        due_at = (
-            self._clock.now_ms() + self._backoff_ms * effect.attempts
-            if state is EffectState.RETRY_WAIT
-            else effect.due_at
+        delay = (
+            self._backoff(effect.attempts) if self._backoff else self._backoff_ms * effect.attempts
         )
+        due_at = self._clock.now_ms() + delay if state is EffectState.RETRY_WAIT else effect.due_at
         with self._store.transaction():
             updated = self._store.update_effect(
                 effect.model_copy(update={"state": state, "last_error": detail, "due_at": due_at})
             )
         self._outcomes.append((updated.id, updated.state))
+        if state is EffectState.FAILED and self._on_exhausted is not None:
+            self._on_exhausted(updated, detail)  # 钩子在事务外：service 会开自己的短事务（L6）
         return updated
 
     def _defer(self, effect: Effect, detail: str) -> Effect:

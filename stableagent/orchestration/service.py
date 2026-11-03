@@ -220,6 +220,102 @@ class OrchestrationService:
             )
             return item
 
+    # ------------------------------------------------------------------ effect 失败派生
+    def fail_unstarted_assignment(
+        self, assignment_id: str, detail: str, *, reason: str = "effect_exhausted"
+    ) -> None:
+        """launch effect 打满重试或 Worker 起不来：Assignment/Ticket 一并落 failed。"""
+        with self._store.transaction():
+            assignment = self._store.get_assignment(assignment_id)
+            if assignment is None:
+                return
+            now = self._clock.now_ms()
+            if assignment.status is AssignmentStatus.RUNNING:
+                self._store.update_assignment(
+                    assignment.model_copy(
+                        update={
+                            "status": next_assignment_status(
+                                assignment.status, AssignmentAction.FAIL
+                            ),
+                            "failure": detail,
+                            "ended_at": now,
+                        }
+                    )
+                )
+            ticket = self._store.get_ticket(assignment.ticket_id)
+            if ticket is not None and ticket.status in (
+                TicketStatus.RUNNING,
+                TicketStatus.WAITING,
+            ):
+                self._store.update_ticket(
+                    ticket.model_copy(
+                        update={
+                            "status": next_ticket_status(ticket.status, TicketAction.FAIL),
+                            "ended_at": now,
+                        }
+                    )
+                )
+            self._store.insert_report(
+                Report(
+                    id=self._ids.new_id("rp"),
+                    ticket_id=assignment.ticket_id,
+                    assignment_id=assignment_id,
+                    kind=ReportKind.FAILED,
+                    summary="effect 耗尽",
+                    created_at=now,
+                    details={"reason": reason, "detail": detail},
+                )
+            )
+
+    def block_ticket_for_delivery_failure(
+        self, ticket_id: str, detail: str, *, effect_id: str
+    ) -> None:
+        """投递 effect 打满：运行中/暂停中的 Ticket 落 blocked，READY/OPEN/QUEUED 只留报告。"""
+        with self._store.transaction():
+            ticket = self._require(ticket_id)
+            now = self._clock.now_ms()
+            if ticket.status in (TicketStatus.RUNNING, TicketStatus.WAITING):
+                self._store.update_ticket(
+                    ticket.model_copy(
+                        update={"status": next_ticket_status(ticket.status, TicketAction.BLOCK)}
+                    )
+                )
+            self._store.insert_report(
+                Report(
+                    id=self._ids.new_id("rp"),
+                    ticket_id=ticket_id,
+                    assignment_id=self._latest_assignment_id(ticket_id),
+                    kind=ReportKind.BLOCKED,
+                    summary="投递 effect 耗尽",
+                    created_at=now,
+                    details={
+                        "reason": "effect_exhausted",
+                        "effect_id": effect_id,
+                        "detail": detail,
+                    },
+                )
+            )
+
+    def note_cancel_failure(self, ticket_id: str, detail: str, *, effect_id: str) -> None:
+        """cancel effect 打满：只留结构化受阻报告，收尾仍由 closeout 幂等补齐。"""
+        with self._store.transaction():
+            self._require(ticket_id)
+            self._store.insert_report(
+                Report(
+                    id=self._ids.new_id("rp"),
+                    ticket_id=ticket_id,
+                    assignment_id=self._latest_assignment_id(ticket_id),
+                    kind=ReportKind.BLOCKED,
+                    summary="取消 effect 耗尽",
+                    created_at=self._clock.now_ms(),
+                    details={
+                        "reason": "effect_exhausted",
+                        "effect_id": effect_id,
+                        "detail": detail,
+                    },
+                )
+            )
+
     # ------------------------------------------------------------------ sink（executor 的回写面）
     def register_run_id(self, assignment_id: str, worker_run_id: str) -> None:
         with self._store.transaction():
@@ -425,6 +521,12 @@ class OrchestrationService:
         if assignment is None:
             raise UnknownAssignmentError(assignment_id)
         return assignment
+
+    def _latest_assignment_id(self, ticket_id: str) -> str:
+        assignments = self._store.list_assignments(ticket_id)
+        if not assignments:
+            raise UnknownAssignmentError(ticket_id)
+        return assignments[-1].id
 
     def _apply(self, ticket_id: str, action: TicketAction, *, summary: str | None = None) -> Ticket:
         with self._store.transaction():

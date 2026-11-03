@@ -65,6 +65,7 @@ class Scheduler:
                 EffectKind.LAUNCH_ASSIGNMENT: self._gate_launch,
                 EffectKind.DELIVER_INPUT: self._gate_deliver,
             },
+            on_exhausted=self._handle_exhausted,
         )
 
     def running_assignments(self) -> set[str]:
@@ -123,6 +124,22 @@ class Scheduler:
         except asyncio.CancelledError:
             self._service.finish_assignment(assignment.id, AssignmentAction.CANCEL)
             raise
+        except Exception as exc:  # Worker 起不来就派生失败：重试一次坏掉的启动没有意义
+            self._service.fail_unstarted_assignment(
+                assignment.id, repr(exc), reason="worker_start_failed"
+            )
+
+    def _handle_exhausted(self, effect: Effect, detail: str) -> None:
+        """真实失败打满重试（Deferrable 永不走到这里）：按 kind 派生结构化记录。"""
+        payload = effect.payload
+        if effect.kind is EffectKind.LAUNCH_ASSIGNMENT:
+            self._service.fail_unstarted_assignment(payload["assignment_id"], detail)
+        elif effect.kind is EffectKind.DELIVER_INPUT:
+            self._service.block_ticket_for_delivery_failure(
+                payload["ticket_id"], detail, effect_id=effect.id
+            )
+        else:
+            self._service.note_cancel_failure(payload["ticket_id"], detail, effect_id=effect.id)
 
     async def _handle_launch(self, effect: Effect) -> None:
         payload = effect.payload
