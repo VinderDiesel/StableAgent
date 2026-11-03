@@ -135,10 +135,13 @@
 
 | 里程碑 | 心脏边界 | DoD 分组 |
 |---|---|---|
-| M1 | L3、L4、L5（授权侧） | A1~A5、B1~B4 |
-| M2 | L7、L8（部分） | C1~C8、D1~D3 |
-| M3 | L5、L6、L7（凭据侧） | E1~E4、F1~F6 |
+| M1 | L3、L4、L5（授权侧） | A1~A3、A5、B1~B4 |
+| M2 | L7、L8（部分） | C1~C8、D1~D3、A4（worktree 时机接线） |
+| M3 | L5、L6、L7（凭据侧） | E1~E4、F1~F6、A4（launch/recover/retry/push/MCP 接线） |
 | M4 | L1、L2、L8（收口） | G1~G4、H1~H4 |
+
+> 归属修正（2026-11-03，M1 任务级计划起草时定）：A4 的六个 revalidate **时机接线**分布在
+> M2（prepare_worktree）与 M3（其余五处），M1 只交付 `revalidate` 判定与审计本身。
 
 ## 2. DoD（A~H：38 项；与 L1~L8 合计 46）
 
@@ -225,3 +228,328 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 沿用 P4 约定：每个里程碑开工前，把该里程碑的步骤展开为 TDD 粒度的 Task/Step 追加为独立小节
 （M1 → 第 5 节，M2 → 第 6 节，M3 → 第 7 节，M4 → 第 8 节）。任务级 Step 不计入 40 个里程碑步骤。
+
+## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
+
+> **状态：待执行。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为 **9 个 Task / 45 个 Step**。
+> 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
+> `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
+> **兼容性扩展**（加列迁移、Mandate 加默认字段、Store 加方法），Scheduler/Service/Outbox
+> 既有方法签名与行为不动。
+>
+> 每个 Task 的固定节奏（沿用 P4）：Step 1 写失败测试 → Step 2 跑到红并记录命令与预期失败 →
+> Step 3 实现 → Step 4 目标文件跑绿 + 全量 `pytest -q` → Step 5 提交。Step 4/5 前必须
+> `mypy`、`ruff check stableagent tests examples benchmarks`、
+> `ruff format --check stableagent tests examples benchmarks` 全绿。
+> 证据写进第 1 节 M1 对应步骤与第 2 节 DoD 条目，不重写历史输出。
+
+### Task ↔ 里程碑步骤与 DoD 对照
+
+| Task | 步骤 | 本 Task 产生的 DoD 证据 |
+|---|---|---|
+| 1 | 1.1 | L2（前半：control 边界用例落位） |
+| 2 | 1.2 | A1（旧库升级）、L3（迁移在事务内） |
+| 3 | 1.3 | B1（digest 纯函数前提） |
+| 4 | 1.4 | A1（往返）、A2（p5-v1 字段形状） |
+| 5 | 1.5 | A5、L6、L4（行为半边） |
+| 6 | 1.6 | A3（审计先于接线） |
+| 7 | 1.7 | B1~B4 |
+| 8 | 1.8 | L2（收口）、A2（扫描半边） |
+| 9 | 1.9 | M1 出口 + 账本回填 |
+
+---
+
+### Task 1: `control/` 包骨架、版本常量与稳定错误家族（步骤 1.1）
+
+**Files:**
+- Create: `stableagent/control/__init__.py`、`stableagent/control/errors.py`
+- Test: `tests/unit/test_control_boundaries.py`（新建，首批 3 用例）
+
+**Interfaces:**
+- Produces: `CONTROL_SCHEMA_VERSION = "0.1.0"`（只在本包定义，顶层 `stableagent/__init__.py`
+  不重导出——沿用 ADR-05 决策 1）；`ControlError(ValueError)` 基类（`code = "control.error"`，
+  构造风格与 `OrchestrationError` 相同：`super().__init__(f"[{code}] {message}")`、`self.detail`），
+  8 个子类与稳定码：
+  `AdmissionRejectedError(reason)`→`control.admission_rejected`、
+  `UnknownMandateError(mandate_id)`→`control.unknown_mandate`、
+  `UnknownApprovalError(approval_id)`→`control.unknown_approval`、
+  `ApprovalDecidedError(approval_id, status)`→`control.approval_decided`、
+  `StaleApprovalError(approval_id)`→`control.stale_approval`、
+  `MandateExpiredError(mandate_id, expires_at, now)`→`control.mandate_expired`、
+  `NotGrantedError(action, mandate_id)`→`control.not_granted`、
+  `RevalidationFailedError(when, mandate_id)`→`control.revalidation_failed`。
+
+- [ ] **Step 1: 写失败的测试**——`tests/unit/test_control_boundaries.py`：
+      `test_control_version_is_independent_and_not_reexported`（常量等值 + `"ControlError" not in
+      dir(stableagent)`）；`test_control_error_code_inventory_is_unique_and_prefixed`（对照 P4 同名
+      用例：全部 `.code` 以 `control.` 开头、tail 为小写 snake_case、互不重复、类集合恰好 =
+      基类 + 8 个子类）；`test_control_error_bases_valueerror`。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_boundaries.py`
+      Expected: FAIL — `ModuleNotFoundError: stableagent.control`
+- [ ] **Step 3: 实现**两个文件（docstring 写明"授权事实源在 Store，判定逻辑在本包"）。
+- [ ] **Step 4: 跑到绿**：同命令 PASS + `.venv/bin/pytest -q` 全量不红。
+- [ ] **Step 5: 提交**：`git add stableagent/control/ tests/unit/test_control_boundaries.py`
+      `&& git commit -m "feat: open the control package with its own version and stable codes"`
+
+### Task 2: Store 迁移 `p5-control-v1`——加列与两新表（步骤 1.2）
+
+**Files:**
+- Modify: `stableagent/orchestration/store.py`（`_SCHEMA` 追加两表、`_migrate()` 加列）
+- Test: `tests/unit/test_control_migration.py`
+
+**Interfaces:**
+- Produces: `mandates` 加 11 列（全部带默认值，可空或 `[]`）：`repository TEXT`、
+  `base_ref TEXT`、`actions TEXT NOT NULL DEFAULT '[]'`、`allowed_paths TEXT NOT NULL
+  DEFAULT '[]'`、`allowed_commands TEXT NOT NULL DEFAULT '[]'`、`allowed_mcp TEXT NOT NULL
+  DEFAULT '[]'`、`network_profile TEXT`、`expires_at INTEGER`、`requires_approval INTEGER
+  NOT NULL DEFAULT 0`、`request_origin TEXT`、`request_digest TEXT`。
+  新表 `_SCHEMA["approval_requests"]`：`id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL,
+  assignment_id TEXT, action TEXT NOT NULL, resource_digest TEXT NOT NULL, reason TEXT NOT
+  NULL, requested_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', decided_by
+  TEXT, decided_at INTEGER`；`_SCHEMA["authorization_audit"]`：`id TEXT PRIMARY KEY, kind
+  TEXT NOT NULL, ticket_id TEXT, assignment_id TEXT, mandate_id TEXT, action TEXT,
+  resource_digest TEXT, policy_version TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT,
+  created_at INTEGER NOT NULL`。`_migrate()` 追加
+  `INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES ('p5-control-v1', ?)`。
+  迁移后 `Store.schema_version()` 返回 `"p5-control-v1"`（`ORDER BY applied_at DESC` 语义，
+  既有 P4 测试若断言 `"0.1.0"` 需在 Step 2 变红处确认后**改测试期望为版本行存在**而非返回值）。
+
+- [ ] **Step 1: 写失败的测试**——`tests/unit/test_control_migration.py`：
+      `test_legacy_p4_database_upgrades_without_touching_rows`：手工按 P4 原始 DDL 建一个临时库、
+      插入 1 条 `p4-local-v1` mandate；`Store(db, clock=FixedClock())` 打开后断言：
+      新列全在（PRAGMA table_info）、两新表存在、旧行 `policy_version` 仍为 `p4-local-v1` 且
+      新字段读为默认值（A1）；升级前后该行的 6 个原字段值逐等。
+      `test_migration_marker_is_idempotent`：重复打开同一库，`schema_migrations` 里
+      `p5-control-v1` 恰 1 行。
+      `test_migration_runs_inside_transaction`：monkeypatch `Store.transaction` 记录进入次数，
+      断言 `_migrate` 期间计数 +1（L3 迁移半边）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_migration.py`
+      Expected: FAIL — 旧库打开后 PRAGMA 里没有 `repository` 列（AssertionError）
+- [ ] **Step 3: 实现**：`_migrate()` 内 `PRAGMA table_info(mandates)` 取现有列名，逐列
+      `ALTER TABLE mandates ADD COLUMN ...`（每列 `if name not in columns` 守卫，照抄
+      `deadline_at` 先例）；`_SCHEMA` 补两表 DDL（新建库由 `_create_schema` 直接建齐）；
+      追加 `schema_migrations` 标记行。
+- [ ] **Step 4: 跑到绿**：目标文件 PASS + 全量 `pytest -q`（重点看 P4 的 store 测试无回归）。
+- [ ] **Step 5: 提交**：`git commit -am "feat: migrate the store to p5-control-v1 additively"`
+
+### Task 3: `control/model.py`——Action/Resource/Admission/Decision/ApprovalRequest + digest（步骤 1.3）
+
+**Files:**
+- Create: `stableagent/control/model.py`
+- Test: `tests/unit/test_control_model.py`
+
+**Interfaces:**
+- Produces:
+  - `Action(str, Enum)`：规格 2.1 的 13 个成员（`prepare_worktree` … `enable_auto_merge`）。
+    **注意**：`ENABLE_AUTO_MERGE` 存在于枚举是为了"点名拒绝"可测（规格原文），但 ADR-05
+    决策 5 与 L6 约束的是它**不进入任何可授权集合与 EffectKind**（Task 5 落地）。
+  - `Resource(BaseModel)`：`kind: str` + 可选 `path/command/server/tool/url: str | None` +
+    `extra: dict[str, Any] = {}`。
+  - `Admission(BaseModel)`：`admitted: bool`、`reason_code: str`、`requester: str`、
+    `repository: str`、`stable_id: str`、`request_digest: str`。
+  - `Decision(BaseModel)`：`allowed: bool`、`reason: str`、`policy_version: str`。
+  - `ApprovalStatus(str, Enum)`：`PENDING/APPROVED/DENIED/REVOKED`；`ApprovalRequest`
+    与表列一一对应（毫秒整数、ID 注入生成，沿用 P4 记录风格）。
+  - `resource_digest(action: Action, resource: Resource) -> str`：
+    `sha256(json.dumps({"action": action.value, "resource": resource.model_dump()},
+    sort_keys=True, ensure_ascii=False).encode())` 的 hexdigest。
+
+- [ ] **Step 1: 写失败的测试**——关键用例：
+      `test_resource_digest_is_stable_under_key_order`（extra 键乱序 → digest 相等）；
+      `test_resource_digest_changes_on_action_or_resource`（改 action、改 path、改 extra 值
+      各得不同 digest）；`test_action_enum_has_exactly_spec_thirteen_members`；
+      `test_approval_request_requires_ticket_and_digest`（缺字段 pydantic ValidationError）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_model.py`
+      Expected: FAIL — `ModuleNotFoundError`
+- [ ] **Step 3: 实现** `control/model.py`（文件头 docstring 写明"纯数据 + 纯函数，不 import
+      orchestration 之外的执行/集成层"）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量。
+- [ ] **Step 5: 提交**：`git commit -am "feat: describe actions, admissions and approvals as data"`
+
+### Task 4: Mandate 兼容扩展与 Store 往返（步骤 1.4）
+
+**Files:**
+- Modify: `stableagent/orchestration/model.py`（`Mandate` 加带默认值的字段）、
+  `stableagent/orchestration/store.py`（`insert_mandate`/`_row_to_mandate` 扩到 17 列）
+- Test: `tests/unit/test_mandate_extension.py`
+
+**Interfaces:**
+- Produces: `Mandate` 新字段（默认值 = "P4 本地授权无外部面"语义）：`repository/base_ref/
+  network_profile/request_origin/request_digest: str | None = None`、
+  `actions/allowed_paths/allowed_commands/allowed_mcp: list[str] = Field(default_factory=list)`、
+  `expires_at: int | None = None`、`requires_approval: bool = False`。
+  `origin_kind` 的 Literal 扩为 `Literal["local", "github"]`（默认仍 `"local"`）。
+  Store 写读 JSON 列表列（`sort_keys=True, ensure_ascii=False`，沿用 report details 先例）。
+
+- [ ] **Step 1: 写失败的测试**——
+      `test_p5_mandate_roundtrip_keeps_every_field`（含 `policy_version="p5-v1"`、11 个新字段
+      的满配构造 → 落库 → 读回逐字段相等）；
+      `test_p4_local_mandate_roundtrip_unchanged`（旧 6 字段构造，新字段读为默认——A1 往返半边）；
+      `test_mandate_ids_list_is_sorted_on_write`（写 `["b","a"]` 读回 `["a","b"]` 或原样——
+      以实现口径为准，钉死其一并断言）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_mandate_extension.py`
+      Expected: FAIL — `TypeError`/`ValidationError`（Mandate 无新字段）
+- [ ] **Step 3: 实现**：model 加字段 + store 两个读写函数扩列（INSERT 参数从 6 → 17）。
+- [ ] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_orchestration_store.py` 回归。
+- [ ] **Step 5: 提交**：`git commit -am "feat: carry p5 authorization fields on mandates"`
+
+### Task 5: `StaticPolicy` 与默认拒绝集（步骤 1.5）
+
+**Files:**
+- Create: `stableagent/control/policy.py`
+- Test: `tests/unit/test_static_policy.py`
+
+**Interfaces:**
+- Produces:
+  - `StaticPolicyConfig(BaseModel)`：`repository: str`、`actors: frozenset[str]`、
+    `grantable_actions: frozenset[Action]`、`allowed_commands: list[str]`、
+    `allowed_mcp: list[str]`、`network_profiles: dict[str, list[str]]`、
+    `default_validity_ms: int`。构造校验：`Action.ENABLE_AUTO_MERGE in grantable_actions`
+    → `AdmissionRejectedError("grantable_must_exclude_auto_merge")`（结构性拒绝的**构造期**
+    一道；运行期还有 Task 5.1.5 断言）。
+  - `StaticPolicy(config, *, clock, ids)`：
+    `admit_explicit(request: ExplicitRequest) -> Admission`——四道门顺序：
+    actor ∈ allowlist → 明确 mention → repository 精确匹配 → 生成 request_digest
+    （每道失败返回 `admitted=False` + 稳定 `reason_code`：`actor_not_allowlisted` /
+    `mention_required` / `repository_mismatch`）；**重复检测归 M3 Task 3.5**（稳定 ID 语义
+    依赖 GitHub 请求模型，本任务不实现，账本已注明）。
+    `create_mandate(admission, *, actions, allowed_paths, ...) -> Mandate`——**唯一**
+    `p5-v1` Mandate 构造点（A2），`expires_at = clock.now_ms() + default_validity_ms`，
+    内部把 `Action.ENABLE_AUTO_MERGE` 从传入 actions 里**剔除**并拒绝（双保险）。
+    `authorize(mandate, action, resource) -> Decision`——action ∈ mandate.actions ∧
+    resource 命中 allowlist（command 精确匹配 / path 前缀 / mcp server/tool ∉ allowed_mcp 拒）
+    ∧ 未过期；拒绝 reason 用稳定码。
+    `revalidate(mandate, *, when: str) -> Decision`——过期 / `mandate.policy_version !=
+    config 派生版本` → deny（when ∈ {"launch","recover","retry","worktree","external_write",
+    "mcp_call"} 全集校验，未知 when → `RevalidationFailedError`）。
+- [ ] **Step 1: 写失败的测试**——判定矩阵用例：
+      `test_admit_rejects_in_gate_order`（非 allowlist + 无 mention + 仓库不符同时踩 →
+      reason 按第一道门）；`test_grantable_excludes_auto_merge_by_construction`（构造期抛）；
+      `test_authorize_denies_every_action_not_granted`（含 `ENABLE_AUTO_MERGE` 恒 deny——
+      A5、L6 运行期半边）；`test_mandate_commands_allowlist_is_exact_match`（`ls` 过、
+      `ls -la /etc` 与 `rm` 拒）；`test_revalidate_flags_expiry_and_drift`；
+      `test_p5_mandate_is_only_constructable_via_policy`（`create_mandate` 是唯一返回
+      `policy_version=="p5-v1"` 的入口：对 `admit→create` 后直接 `Mandate(policy_version="p5-v1")`
+      的裸构造在本包外无引用——AST 断言放 Task 8，此处先行为半边：L4 用例，
+      请求文本携带 `"actions": ["enable_auto_merge"]` 字样不改变产出 Mandate 的 actions）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_static_policy.py`
+      Expected: FAIL — `ModuleNotFoundError: stableagent.control.policy`
+- [ ] **Step 3: 实现** `policy.py`（不 import `execution/integrations`；`ExplicitRequest`
+  放 `control/model.py` 作最小形状：`repository/requester/mentioned/stable_id/text`，
+  GitHub 富字段归 M3 Task 3.5 扩展——偏差届时记入账本 F1 条目）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量。
+- [ ] **Step 5: 提交**：`git commit -am "feat: admit explicit requests through a static deny-first policy"`
+
+### Task 6: 审计落库——每次决策一行、含 policy_version（步骤 1.6）
+
+**Files:**
+- Modify: `stableagent/orchestration/store.py`（`insert_audit`、`list_audit(*, ticket_id=None, kind=None)`、
+  `insert_approval`、`update_approval`、`get_approval`、`list_approvals(ticket_id, *, status=None)`）
+- Create: `stableagent/control/audit.py`
+- Test: `tests/unit/test_authorization_audit.py`
+
+**Interfaces:**
+- Produces: `AuditWriter(policy, store, *, clock, ids)`——方法 `admitted(admission)` /
+  `authorized(mandate, action, resource, decision)` / `revalidated(mandate, when, decision)` /
+  `decided(approval, decision)`，每个恰好写 1 行 `authorization_audit`，`kind ∈
+  {"admit","authorize","revalidate","approve"}`，`decision ∈ {"allow","deny"}`，
+  `policy_version` 写**决策当刻**的策略版本快照；`reason` 存稳定码，非自由文本。
+- [ ] **Step 1: 写失败的测试**——
+      `test_each_decision_kind_writes_exactly_one_row`（四类各一次 → 4 行，字段齐全，A3）；
+      `test_audit_snapshots_policy_version`（用两个不同 config 实例先后决策 → 两行版本不同）；
+      `test_audit_reason_is_stable_code_not_free_text`（deny 行 reason 匹配
+      `^[a-z][a-z0-9_]*$`）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_authorization_audit.py`
+      Expected: FAIL — `AttributeError: 'Store' object has no attribute 'insert_audit'`
+- [ ] **Step 3: 实现** store 方法 + `audit.py`。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量。
+- [ ] **Step 5: 提交**：`git commit -am "feat: persist every authorization decision with its version"`
+
+### Task 7: ApprovalService、Gate 与守卫式取消（步骤 1.7）
+
+**Files:**
+- Create: `stableagent/control/approval.py`
+- Test: `tests/unit/test_approval_service.py`、`tests/unit/test_guarded_cancel.py`
+
+**Interfaces:**
+- Produces:
+  - `ApprovalService(store, *, clock, ids)`：`submit(ticket_id, action, resource_digest,
+    reason, assignment_id=None) -> ApprovalRequest`（pending 唯一键 `(ticket_id, action,
+    resource_digest)` 已存在 pending 则返回既有行，不双开）；`decide(approval_id, approve:
+    bool, by)`——终态后再 decide → `ApprovalDecidedError`；`revoke_pending(ticket_id) -> int`。
+  - `ApprovalGate(policy, approvals, audit, store, *, clock)`：
+    `check(mandate, action, resource) -> Decision`——先 `policy.authorize`；要求审批的
+    （`mandate.requires_approval` 或 action ∈ 高危集）必须存在 `approved` 且
+    `(action, resource_digest)` 全等；digest 变了 → deny `approval_stale`（B1）；
+    同 action 有 `denied` 记录 → deny `approval_denied`，**不再自动放行**（B2 的 Gate 半边）。
+  - `GuardedTicketOps.cancel_ticket(store, service_ids, ticket_id, reason=None) -> Ticket`：
+    在**单个** `store.transaction()` 内完成：ticket `CANCEL` 转换（纯函数
+    `next_ticket_status`）+ 未终态 Assignment 各入队 `CANCEL_ASSIGNMENT` effect（键
+    `cancel:{assignment.id}`，与 P4 同形）+ `revoke_pending(ticket_id)`——真·同事务（B3），
+    P4 `OrchestrationService.cancel_ticket` 一字不动（约束 1）。
+- [ ] **Step 1: 写失败的测试**——
+      `test_approved_binding_breaks_on_resource_change`（approve 后同 action 换 path →
+      Gate deny `approval_stale`，B1）；
+      `test_denied_never_self_heals`（denied 后重新 submit+check → 仍 deny，B2）；
+      `test_decide_twice_is_rejected`；
+      `test_approval_survives_reopen`（关店重开 Store 后 Gate 仍判 approved，B4）；
+      `test_guarded_cancel_rolls_back_all_three_on_error`（在 revoke 处注入异常 →
+      ticket 未取消、effect 未入队、approval 仍 pending，证明原子性，B3 + L3）；
+      `test_guarded_cancel_revokes_pending_only`（approved 历史行保留——审计不删史）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_approval_service.py
+      tests/unit/test_guarded_cancel.py` Expected: FAIL — `ModuleNotFoundError`
+- [ ] **Step 3: 实现** `approval.py`。
+- [ ] **Step 4: 跑到绿**：目标两文件 + 全量。
+- [ ] **Step 5: 提交**：`git commit -am "feat: gate high-risk actions on digest-bound approvals"`
+
+### Task 8: 依赖方向矩阵——三新包 × 五旧包（步骤 1.8）
+
+**Files:**
+- Modify: `tests/unit/test_control_boundaries.py`
+- Test: 同文件（本 Task 无生产代码）
+
+**Interfaces:**
+- Produces: AST 矩阵测试 `test_no_legacy_package_imports_p5_layers`——
+  扫描 `core/context/providers/tools/orchestration` 五包全部 `.py`，断言不 import
+  `stableagent.control/execution/integrations`（后两包尚不存在 → `rglob` 空转但断言
+  常量表已含三者，M2/M3 落包后自动生效）；
+  `test_control_never_imports_execution_or_integrations`（方向锁：
+  `stableagent/control/*.py` 不得 import `stableagent.execution/integrations`）；
+  `test_p5_v1_mandate_construction_is_confined_to_control`——全库 AST 找
+  `Mandate(...)` 构造调用点，`policy_version="p5-v1"` 字面量只允许出现在
+  `stableagent/control/`（A2/L4 扫描半边；`orchestration/model.py` 默认值路径不含该字面量）。
+- [ ] **Step 1: 写失败的测试**：上述三个用例（第三个先对 `control/policy.py` 放行、
+      人为在 docstring 外构造一个越界样例进红）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_boundaries.py`
+      Expected: 前两例 PASS（现状即满足），第三例红——若字面量断言写法未收口，先记红再收。
+- [ ] **Step 3: 实现**：把 `policy.py` 的 `p5-v1` 收敛为单一模块常量
+      `POLICY_VERSION = "p5-v1"`，扫描按"该常量的 import 方只允许 control 包"断言。
+- [ ] **Step 4: 跑到绿**：目标文件 + `test_orchestration_boundaries.py` 同跑（新旧矩阵并绿）。
+- [ ] **Step 5: 提交**：`git commit -am "test: lock the p5 dependency direction across packages"`
+
+### Task 9: M1 出口——门禁、账本回填与归属修正（步骤 1.9）
+
+**Files:**
+- Modify: `docs/acceptance/p5-guarded-execution.md`（1.1~1.9 勾选 + A1~A3、A5、B1~B4、L3、L4、
+  L5（授权侧）证据回填）
+
+- [ ] **Step 1: 跑出口命令并收集输出**：
+
+```bash
+.venv/bin/pytest -q
+.venv/bin/mypy
+.venv/bin/ruff check stableagent tests examples benchmarks
+.venv/bin/ruff format --check stableagent tests examples benchmarks
+git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
+.venv/bin/pytest --cov=stableagent --cov-report=term-missing  # control 各文件 ≥90%
+```
+
+- [ ] **Step 2: 复核心脏边界**：L2/L3/L4/L5 授权侧用例名与输出记进第 0 节对应条目。
+- [ ] **Step 3: 回填账本**：第 1 节 M1 九步全勾 + 实测；第 2 节 A1~A3、A5、B1~B4 勾选共
+      **8 项**（A4 保持未勾——接线在 M2/M3，归属修正备注已有），计数改为 **DoD 8/46、
+      里程碑 9/40**。口径（沿用 P4）：L1~L8 只有在其事实被**全部里程碑**完整证明后才勾，
+      M1 只把边界用例名与输出写进对应条目，不提前勾选。
+- [ ] **Step 4: 提交**：`git add -A && git commit -m "docs: close p5 m1 with measured evidence"`
+- [ ] **Step 5: 汇报**：向维护者给出 M2 开工分支与是否继续的确认点（M2 属新里程碑，
+      按 P4 惯例出口后另行确认开工）。
+

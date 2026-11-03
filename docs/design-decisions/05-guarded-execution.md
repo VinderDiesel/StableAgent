@@ -47,10 +47,10 @@ integrations → execution → control → orchestration → core
 ### 2. Mandate：在原表兼容加列，旧行不迁移语义
 
 - P4 的 `Mandate` 只有 6 个字段（`policy_version="p4-local-v1"`）。P5 在同一张
-  `mandates` 表**兼容加列**（先例：P4 Task 12 的加列迁移）：`repository`、`base_ref`、
-  `allowed_paths`、`allowed_commands`、`allowed_mcp`、`network_profile`、`expires_at`、
-  `requires_approval`、`request_origin`、`request_digest`（后两列存 GitHub 请求的 URL/
-  source ID 与不可变文本摘要）。
+  `mandates` 表**兼容加列**（先例：P4 Task 12 的加列迁移）共 11 列：`repository`、
+  `base_ref`、`allowed_paths`、`allowed_commands`、`allowed_mcp`、`network_profile`、
+  `expires_at`、`requires_approval`、`request_origin`、`request_digest`（后两列存 GitHub
+  请求的 URL/source ID 与不可变文本摘要）与 `actions`（授权的 action 集合，JSON 数组）。
 - 旧行读出时新字段取默认值（`= None` / 空 allowlist，语义即"P4 本地 Mandate 无外部
   授权"），**不回写、不重写** `policy_version`；新建的 P5 Mandate 一律
   `policy_version="p5-v1"`。
