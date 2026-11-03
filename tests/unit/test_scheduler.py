@@ -293,3 +293,61 @@ async def test_exhausted_delivery_blocks_ticket_with_reason(env) -> None:
     assert store.get_ticket(ticket.id).status is TicketStatus.BLOCKED
     blocked = [r for r in store.list_reports(ticket.id) if r.kind is ReportKind.BLOCKED]
     assert blocked and "effect_id" in blocked[0].details  # 结构化原因，非自然语言
+
+
+class CountingExecutor(StubExecutor):
+    """E2：记录同时在跑的 Worker 数与峰值；launch 仍卡 gate。"""
+
+    def __init__(self, service: OrchestrationService | None = None) -> None:
+        super().__init__(service)
+        self.live = 0
+        self.max_live = 0
+
+    async def launch(self, assignment, ticket, inputs) -> None:
+        self.live += 1
+        self.max_live = max(self.max_live, self.live)
+        try:
+            await super().launch(assignment, ticket, inputs)
+        finally:
+            self.live -= 1
+
+
+@pytest.fixture
+def env2(tmp_path):
+    clock, ids = FixedClock(), SequenceIds()
+    store = Store(tmp_path / "two.db", clock=clock)
+    service = OrchestrationService(store, clock=clock, ids=ids)
+    executor = CountingExecutor(service)
+    scheduler = Scheduler(
+        store=store, service=service, executor=executor, clock=clock, max_concurrency=2
+    )
+    yield store, service, executor, scheduler, clock
+    store.close()
+
+
+async def test_two_slots_cap_concurrent_workers(env2) -> None:
+    store, service, executor, scheduler, clock = env2
+    for index in range(3):
+        _queued(service, f"任务{index}")
+    await scheduler.tick()
+    for _ in range(4):  # 让 create_task 起跑（公开 API 轮询）
+        await asyncio.sleep(0)
+    assert executor.live == 2 and executor.max_live == 2  # 第三个在门外（E2）
+    executor.gate.set()
+    await _wait_until_idle(scheduler)
+    await scheduler.tick()
+    executor.gate.set()
+    await _wait_until_idle(scheduler)
+    assert len(executor.launched) == 3 and executor.max_live == 2
+
+
+async def test_woken_ticket_precedes_older_queued_ones(env) -> None:
+    store, service, executor, scheduler, clock = env
+    _queued(service, "先排的")
+    clock.advance(1000)
+    newer = _queued(service, "后排的")
+    service.submit_input(newer.id, "唤醒它")  # woken_at 置位（Task 12）
+    await scheduler.tick()
+    await asyncio.sleep(0)  # 让 create_task 的 Worker 起跑，launch 记录可见
+    launched = [store.get_assignment(a).ticket_id for a in executor.launched]
+    assert launched == [newer.id]  # E7：唤醒优先，不是 FIFO

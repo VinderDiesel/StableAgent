@@ -23,6 +23,7 @@ from stableagent.orchestration.model import (
     Dependency,
     Effect,
     EffectKind,
+    EffectState,
     IdFactory,
     IllegalTransitionError,
     Mandate,
@@ -428,7 +429,9 @@ class OrchestrationService:
     def enqueue_work_for_runnable_tickets(self, now_ms: int) -> int:
         """QUEUED + PENDING Assignment + 依赖全过才可运行；启动即 Assignment/Ticket -> RUNNING。"""
         started = 0
-        for ticket in self._store.list_runnable_tickets(now_ms):
+        tickets = self._store.list_runnable_tickets(now_ms)
+        total = len(tickets)
+        for index, ticket in enumerate(tickets):
             gate = self._dependency_gate(ticket)
             if gate == "unmet":
                 continue
@@ -467,15 +470,20 @@ class OrchestrationService:
                     )
                 )
                 suffix = ":relaunch" if action is AssignmentAction.RELAUNCH else ""
-                self._store.enqueue_effect(
+                # E7：同轮可领取的 launch 按选择序重打 due_at（全部 <= now），让被唤醒的
+                # Ticket 先拿槽位——dispatcher 的 ORDER BY 只看 due_at/id，不认业务优先级。
+                priority_due = now_ms - (total - index)
+                launch = self._store.enqueue_effect(
                     Effect(
                         id=self._ids.new_id("ef"),
                         kind=EffectKind.LAUNCH_ASSIGNMENT,
                         idempotency_key=f"launch:{assignment.id}:{assignment.attempt}{suffix}",
                         payload={"assignment_id": assignment.id, "ticket_id": ticket.id},
-                        due_at=now_ms,
+                        due_at=priority_due,
                     )
                 )
+                if launch.state is EffectState.PENDING and launch.due_at != priority_due:
+                    self._store.update_effect(launch.model_copy(update={"due_at": priority_due}))
                 started += 1
         return started
 
