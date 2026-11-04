@@ -3,7 +3,7 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 0/46、里程碑步骤 1/40（M1 1/9）**，
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 0/46、里程碑步骤 2/40（M1 2/9）**，
 > 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
@@ -28,6 +28,9 @@
 - [ ] **L3 事务不变式（含新表）**：`Store.transaction()` 内禁止 `await`；授权判定、审批状态、
       Mandate+Ticket+effect 的原子写入全部在同步段完成，外部 I/O 在提交后。
       验证：源码扫描测试 + 崩溃注入用例。来源：ADR-04 决策 3、ADR-05 决策 3。
+      进度（2026-11-04，Task 2 迁移半边）：`test_migration_runs_inside_transaction` 钉死 `_migrate`
+      恰好开启 1 次 `Store.transaction()`（加列与 `p5-control-v1` marker 都在该事务体内）；
+      `await` 源码扫描与 Mandate+Ticket+effect 的崩溃注入用例分别属 Task 8 与本里程碑后续接线。
 - [ ] **L4 外部文本不扩权**：Issue/prompt/工具输出/MCP 返回中的任何文本不能创建或扩大
       Mandate；只有 `control.policy` 能构造 `p5-v1` Mandate。
       验证：行为测试（把指令文本放进请求正文，断言授权集不变）+ 构造入口扫描。
@@ -61,9 +64,29 @@
       Step 2 实测红因与计划偏差：占位包 `stableagent/control/` 自 2026-10-30 起已在库中，
       红为 `ImportError: cannot import name 'CONTROL_SCHEMA_VERSION'`（非计划预期的
       `ModuleNotFoundError: stableagent.control`）。
-- [ ] **1.2** `schema_migrations` 追加 `p5-control-v1`：`mandates` 兼容加 10 列（全带默认值）、
+- [x] **1.2** `schema_migrations` 追加 `p5-control-v1`：`mandates` 兼容加 11 列（全带默认值；
+      原文"10 列"按 ADR-05 决策 2 与第 5 节 Task 2 的实际列数订正：`repository`、`base_ref`、
+      `actions`、`allowed_paths`、`allowed_commands`、`allowed_mcp`、`network_profile`、
+      `expires_at`、`requires_approval`、`request_origin`、`request_digest`）、
       新建 `approval_requests`、`authorization_audit`。验证：旧 P4 库文件升级后可读、
       旧行语义不变（A1）。
+      证据（2026-11-04，Task 2，提交 `0e92dbd`）：`_MANDATE_ADD_COLUMNS` 11 项逐列
+      `if name not in columns` 守卫（照抄 `deadline_at` 先例），两新表进 `_SCHEMA`（新建库由
+      `_create_schema` 直接建齐，旧库由 `_migrate` 补列），marker 行 `INSERT OR IGNORE`。
+      `tests/unit/test_control_migration.py` = `4 passed`：旧库（本文件按 `234f620` 的 8 表 DDL
+      手工建出并插 1 条 `p4-local-v1`）升级后 11 列齐、两新表在、旧行 6 个原字段逐等且
+      `policy_version` 未回写、新字段读为 `None`/`'[]'`/`0`；重复打开 3 次 marker 恰 1 行；
+      `_migrate` 事务进入次数 +1。
+      连带口径：`schema_version()` 的 `ORDER BY applied_at DESC` 补 `rowid DESC` 定尾——
+      `FixedClock` 下两条迁移行同毫秒，原写法无法确定返回哪条，现返回最近插入的
+      `p5-control-v1`。P4 的 3 处表集合期望按 10 表更新（`test_orchestration_store.py`：
+      `TABLES` 加两表名、`test_all_eight_tables_exist_with_schema_version` →
+      `test_all_tables_exist_with_schema_version` 改断言"版本行含 `0.1.0` 且
+      `schema_version()` 为最新迁移"、L5 用例 docstring 去掉"8 张"字样）；P4 账本 B2
+      的"八张表齐备"是 P4 收口时的历史事实，不改写。
+      全量 `pytest -q` = `440 passed, 1 skipped`，`store.py` 覆盖率 100%（161 stmts，0 miss）；
+      `mypy` / `ruff check` / `ruff format --check`（90 files）全绿；
+      L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行。
 - [ ] **1.3** 模型：`Action`/`Resource`/`Admission`/`Decision`/`ApprovalRequest` +
       `resource_digest` 纯函数（规范化 JSON 排序哈希）。验证：digest 稳定性单测。
 - [ ] **1.4** Mandate 读写：`p5-v1` 新字段全量落库与还原；`p4-local-v1` 旧行缺省读取。
@@ -164,6 +187,9 @@
 ### A 授权与 Mandate 持久化（M1）
 
 - [ ] **A1** 旧 P4 库升级后 `p4-local-v1` Mandate 行缺省可读、语义不变、不回写。
+      进度（2026-11-04，Task 2 升级半边）：`test_legacy_p4_database_upgrades_without_touching_rows`
+      已断言旧行 6 字段逐等 + `policy_version` 不回写 + 新列取默认值；
+      "缺省可读"的模型往返半边属 Task 4（步骤 1.4）。
 - [ ] **A2** 只有 `control.policy` 能构造 `p5-v1` Mandate（构造入口扫描 + 行为用例）。
 - [ ] **A3** admit/authorize/revalidate/approve/deny 全部结构化落审计表，含 policy_version。
 - [ ] **A4** 六个 revalidate 时机逐个先于动作执行，时机清单以测试矩阵固化。
@@ -247,7 +273,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：执行中（Task 1 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **状态：执行中（Task 1~2 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
 > **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
@@ -336,7 +362,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
   迁移后 `Store.schema_version()` 返回 `"p5-control-v1"`（`ORDER BY applied_at DESC` 语义，
   既有 P4 测试若断言 `"0.1.0"` 需在 Step 2 变红处确认后**改测试期望为版本行存在**而非返回值）。
 
-- [ ] **Step 1: 写失败的测试**——`tests/unit/test_control_migration.py`：
+- [x] **Step 1: 写失败的测试**——`tests/unit/test_control_migration.py`：
       `test_legacy_p4_database_upgrades_without_touching_rows`：手工按 P4 原始 DDL 建一个临时库、
       插入 1 条 `p4-local-v1` mandate；`Store(db, clock=FixedClock())` 打开后断言：
       新列全在（PRAGMA table_info）、两新表存在、旧行 `policy_version` 仍为 `p4-local-v1` 且
@@ -345,14 +371,24 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
       `p5-control-v1` 恰 1 行。
       `test_migration_runs_inside_transaction`：monkeypatch `Store.transaction` 记录进入次数，
       断言 `_migrate` 期间计数 +1（L3 迁移半边）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_migration.py`
+      追加第 4 用例 `test_new_tables_have_the_authorization_columns`：两新表列名与 ADR-05 决策 3
+      逐一对应（Task 6/7 的仓储方法依赖这套列名，先钉死）。旧库 DDL 由本测试文件逐字抄录
+      `234f620` 的 8 表 `_SCHEMA`，不依赖当前 `_SCHEMA`（否则升级路径无从证明）。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_control_migration.py`
       Expected: FAIL — 旧库打开后 PRAGMA 里没有 `repository` 列（AssertionError）
-- [ ] **Step 3: 实现**：`_migrate()` 内 `PRAGMA table_info(mandates)` 取现有列名，逐列
+      Actual: FAIL — `3 failed, 1 passed`（三处同为缺列/缺表 AssertionError；
+      `test_migration_runs_inside_transaction` 天然先绿，它是事务口径的回归钉而非迁移红项）
+- [x] **Step 3: 实现**：`_migrate()` 内 `PRAGMA table_info(mandates)` 取现有列名，逐列
       `ALTER TABLE mandates ADD COLUMN ...`（每列 `if name not in columns` 守卫，照抄
       `deadline_at` 先例）；`_SCHEMA` 补两表 DDL（新建库由 `_create_schema` 直接建齐）；
-      追加 `schema_migrations` 标记行。
-- [ ] **Step 4: 跑到绿**：目标文件 PASS + 全量 `pytest -q`（重点看 P4 的 store 测试无回归）。
-- [ ] **Step 5: 提交**：`git commit -am "feat: migrate the store to p5-control-v1 additively"`
+      追加 `schema_migrations` 标记行。列清单落为模块常量 `_MANDATE_ADD_COLUMNS`（11 项），
+      `schema_version()` 补 `rowid DESC` 定尾（`FixedClock` 下同毫秒并列）。
+- [x] **Step 4: 跑到绿**：目标文件 PASS + 全量 `pytest -q`（重点看 P4 的 store 测试无回归）。
+      Actual：目标文件 `4 passed`；全量首跑 `3 failed, 437 passed`——红项正是 P4 的表集合断言
+      （`TABLES` 精确等、`schema_version() == "0.1.0"`、`set(ORCHESTRATION_TABLES) == TABLES`），
+      按计划口径改为 10 表 + "版本行含 `0.1.0`、返回值取最新迁移"后 `440 passed, 1 skipped`。
+- [x] **Step 5: 提交**：`git commit -am "feat: migrate the store to p5-control-v1 additively"`
+      Actual: `0e92dbd`（3 files：`store.py` + 新测试 + P4 表集合期望更新）。
 
 ### Task 3: `control/model.py`——Action/Resource/Admission/Decision/ApprovalRequest + digest（步骤 1.3）
 
