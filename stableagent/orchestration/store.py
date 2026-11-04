@@ -116,6 +116,11 @@ _MANDATE_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _mandate_list(values: list[str]) -> str:
+    """授权集合的规范写法：升序 + 规范化 JSON，同一集合两次落库字节相同。"""
+    return json.dumps(sorted(values), sort_keys=True, ensure_ascii=False)
+
+
 def _row_to_mandate(row: sqlite3.Row) -> Mandate:
     return Mandate(
         id=row["id"],
@@ -124,6 +129,17 @@ def _row_to_mandate(row: sqlite3.Row) -> Mandate:
         scope=row["scope"],
         policy_version=row["policy_version"],
         granted_at=row["granted_at"],
+        repository=row["repository"],
+        base_ref=row["base_ref"],
+        actions=json.loads(row["actions"]),
+        allowed_paths=json.loads(row["allowed_paths"]),
+        allowed_commands=json.loads(row["allowed_commands"]),
+        allowed_mcp=json.loads(row["allowed_mcp"]),
+        network_profile=row["network_profile"],
+        expires_at=row["expires_at"],
+        requires_approval=bool(row["requires_approval"]),
+        request_origin=row["request_origin"],
+        request_digest=row["request_digest"],
     )
 
 
@@ -291,8 +307,10 @@ class Store:
     def insert_mandate(self, mandate: Mandate) -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO mandates"
-            " (id, origin_kind, requester, scope, policy_version, granted_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            " (id, origin_kind, requester, scope, policy_version, granted_at,"
+            " repository, base_ref, actions, allowed_paths, allowed_commands, allowed_mcp,"
+            " network_profile, expires_at, requires_approval, request_origin, request_digest)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 mandate.id,
                 mandate.origin_kind,
@@ -300,6 +318,17 @@ class Store:
                 mandate.scope,
                 mandate.policy_version,
                 mandate.granted_at,
+                mandate.repository,
+                mandate.base_ref,
+                _mandate_list(mandate.actions),
+                _mandate_list(mandate.allowed_paths),
+                _mandate_list(mandate.allowed_commands),
+                _mandate_list(mandate.allowed_mcp),
+                mandate.network_profile,
+                mandate.expires_at,
+                int(mandate.requires_approval),
+                mandate.request_origin,
+                mandate.request_digest,
             ),
         )
 

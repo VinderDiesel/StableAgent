@@ -76,12 +76,29 @@ class ReportKind(str, Enum):
 
 
 class Mandate(BaseModel):
+    """授权记录。P4 的 6 个原字段不动；P5 的 11 个新字段一律带默认值（ADR-05 决策 2）。
+
+    默认值即"P4 本地授权无外部面"语义：旧行读出来不携带任何仓库、命令、MCP 或网络授权。
+    只有 `control.policy` 能构造 `policy_version="p5-v1"` 的 Mandate（A2）。
+    """
+
     id: str
-    origin_kind: Literal["local"] = "local"
+    origin_kind: Literal["local", "github"] = "local"
     requester: str = "local"
     scope: str = ""
     policy_version: str = "p4-local-v1"
     granted_at: int
+    repository: str | None = None
+    base_ref: str | None = None
+    actions: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=list)
+    allowed_commands: list[str] = Field(default_factory=list)
+    allowed_mcp: list[str] = Field(default_factory=list)
+    network_profile: str | None = None
+    expires_at: int | None = None
+    requires_approval: bool = False
+    request_origin: str | None = None
+    request_digest: str | None = None
 
 
 class Ticket(BaseModel):
