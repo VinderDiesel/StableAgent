@@ -3,7 +3,7 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 0/46、里程碑步骤 2/40（M1 2/9）**，
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 0/46、里程碑步骤 3/40（M1 3/9）**，
 > 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
@@ -87,8 +87,18 @@
       全量 `pytest -q` = `440 passed, 1 skipped`，`store.py` 覆盖率 100%（161 stmts，0 miss）；
       `mypy` / `ruff check` / `ruff format --check`（90 files）全绿；
       L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行。
-- [ ] **1.3** 模型：`Action`/`Resource`/`Admission`/`Decision`/`ApprovalRequest` +
+- [x] **1.3** 模型：`Action`/`Resource`/`Admission`/`Decision`/`ApprovalRequest` +
       `resource_digest` 纯函数（规范化 JSON 排序哈希）。验证：digest 稳定性单测。
+      证据（2026-11-04，Task 3，提交 `0d92da9`）：`control/model.py` = `Action(str, Enum)` 13 成员
+      （顺序逐字等于规格 2.1 的列举，`ENABLE_AUTO_MERGE` 只作点名拒绝的载体）+ `Resource`
+      （`kind` + 五个可选槽位 + `extra`）+ `Admission` + `Decision` + `ApprovalStatus` 4 值 +
+      `ApprovalRequest`（与 `approval_requests` 十列一一对应，ID 与毫秒时间注入）+
+      `resource_digest`（`sha256(json.dumps({"action","resource"}, sort_keys=True,
+      ensure_ascii=False))`）。
+      `tests/unit/test_control_model.py` = `5 passed`：extra 键乱序 → digest 相等且等于文档化口径
+      （64 hex）；改 action / 改 path / 改 extra 值 / 改 `kind` 各得不同 digest；
+      13 成员顺序钉死；缺 `ticket_id` 或缺 `resource_digest` → `ValidationError`；
+      `Admission`/`Decision` 字段形状。`control/model.py` 覆盖率 100%（58 stmts，0 miss）。
 - [ ] **1.4** Mandate 读写：`p5-v1` 新字段全量落库与还原；`p4-local-v1` 旧行缺省读取。
       验证：往返单测。来源：ADR-05 决策 2。
 - [ ] **1.5** `StaticPolicy`：单仓库 + actor allowlist + 明确 mention + 预定义 action 集合 +
@@ -198,6 +208,8 @@
 ### B 审批（M1）
 
 - [ ] **B1** `approved` 绑定 `(action, resource_digest)`；参数或资源变化后旧批准失效。
+      进度（2026-11-04，Task 3 前提半边）：`resource_digest` 的纯函数性质已被单测钉死
+      （乱序稳定 + 四种变化各得新值），"批准绑定后参数变化即失效"的行为用例属 Task 7（步骤 1.7）。
 - [ ] **B2** `denied` 使 Assignment `blocked|failed`，不得换动作绕过。
 - [ ] **B3** Ticket 取消同事务撤销 pending approval。
 - [ ] **B4** 需审批动作先记录后执行，且批准在进程重启（崩溃恢复）后仍可判定。
@@ -273,7 +285,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：执行中（Task 1~2 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **状态：执行中（Task 1~3 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
 > **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
@@ -412,17 +424,21 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
     `sha256(json.dumps({"action": action.value, "resource": resource.model_dump()},
     sort_keys=True, ensure_ascii=False).encode())` 的 hexdigest。
 
-- [ ] **Step 1: 写失败的测试**——关键用例：
+- [x] **Step 1: 写失败的测试**——关键用例：
       `test_resource_digest_is_stable_under_key_order`（extra 键乱序 → digest 相等）；
       `test_resource_digest_changes_on_action_or_resource`（改 action、改 path、改 extra 值
       各得不同 digest）；`test_action_enum_has_exactly_spec_thirteen_members`；
       `test_approval_request_requires_ticket_and_digest`（缺字段 pydantic ValidationError）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_model.py`
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_model.py`
       Expected: FAIL — `ModuleNotFoundError`
-- [ ] **Step 3: 实现** `control/model.py`（文件头 docstring 写明"纯数据 + 纯函数，不 import
+      Actual: FAIL — `ModuleNotFoundError: No module named 'stableagent.control.model'`
+- [x] **Step 3: 实现** `control/model.py`（文件头 docstring 写明"纯数据 + 纯函数，不 import
       orchestration 之外的执行/集成层"）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量。
-- [ ] **Step 5: 提交**：`git commit -am "feat: describe actions, admissions and approvals as data"`
+- [x] **Step 4: 跑到绿**：目标文件 + 全量。
+      Actual：目标文件 `5 passed`；全量 `445 passed, 1 skipped`；`mypy`（38 files）/
+      `ruff check` / `ruff format --check`（92 files）全绿；L1 core diff 仍 0 行。
+- [x] **Step 5: 提交**：`git commit -am "feat: describe actions, admissions and approvals as data"`
+      Actual: `0d92da9`（新文件需 `git add`：`control/model.py` + `test_control_model.py`）。
 
 ### Task 4: Mandate 兼容扩展与 Store 往返（步骤 1.4）
 
