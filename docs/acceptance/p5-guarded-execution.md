@@ -3,7 +3,7 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 6/46、里程碑步骤 7/40（M1 7/9）**，
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 6/46、里程碑步骤 8/40（M1 8/9）**，
 > 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
@@ -24,7 +24,7 @@
       integrations → execution → control → orchestration → core。
       验证：`test_orchestration_boundaries.py` AST 矩阵扩展。来源：ADR-05 决策 1。
       进度（2026-11-04，Task 1 前半）：`tests/unit/test_control_boundaries.py` 落位（版本常量 +
-      顶层不重导出 + 错误家族三用例）；四旧包 × 三新包的 AST 方向矩阵收口属 Task 8（步骤 1.8）。
+      顶层不重导出 + 错误家族三用例）；方向矩阵收口（2026-11-04，Task 8 步骤 1.8）：`test_no_legacy_package_imports_p5_layers` 扫 ROOT 下**全部非 P5 包**（实测 8 个目录：core/context/memory/orchestration/planning/providers/sandbox/tools/transport——比账本点名的四包更宽，语料按目录枚举自动跟随，无需改名单）断言零 import `stableagent.control/execution/integrations`；`test_control_never_imports_execution_or_integrations` 钉死反方向。两条腿都不是空转：临时注入 `orchestration/_p5_probe.py`（`from stableagent.control.policy import ...`）与`control/_probe_upstream.py`（`import stableagent.execution.sandbox`）各触发一次红，样例跑完即删、未入库。`execution/integrations` 两包尚不存在 → 该腿的语料空转，名单已含三者，M2/M4 落包后自动生效。勾选仍留 M1 出口（Task 9 Step 2 的心脏边界复核），沿 Task 5 对 L6 的先例。
 - [ ] **L3 事务不变式（含新表）**：`Store.transaction()` 内禁止 `await`；授权判定、审批状态、
       Mandate+Ticket+effect 的原子写入全部在同步段完成，外部 I/O 在提交后。
       验证：源码扫描测试 + 崩溃注入用例。来源：ADR-04 决策 3、ADR-05 决策 3。
@@ -200,7 +200,8 @@
       `git diff 234f620..HEAD -- stableagent/orchestration/service.py | wc -l` = 0；守卫式取消自己
       声明未终态 Assignment 终态集（那份常量是 service 私有的），并用同一 `(kind, cancel:{id})` 幂等
       键与同一 payload 形状证明与 P4 同形。
-- [ ] **1.8** L2 边界测试扩展：三新包 × 四旧包 AST 方向矩阵。验证：故意 import 的红测 + 常驻。
+- [x] **1.8** L2 边界测试扩展：三新包 × 四旧包 AST 方向矩阵。验证：故意 import 的红测 + 常驻。
+      证据（2026-11-04，Task 8，无生产代码改动）：`tests/unit/test_control_boundaries.py` 追加 3 用例（AST 扫描器 `_imports_of`/`_mandate_calls`/`_pins_p5_version`/`_imports_version_constant`/`_version_constant_names` 全在本文件，扫 `stableagent/` 生产包）——① L2 反向（旧包零 import 三新包，语料取 ROOT 下全部非 P5 目录并断言覆盖账本点名的五包）；② L2 正向（`control/*.py` 零 import `execution/integrations`）；③ A2/L4 扫描半边：`p5-v1` 字面量的模块常量赋值全库唯一 holder = `control/policy.py:P5_POLICY_VERSION`、该常量的 import 方只允许 control 包、control 包外把 `policy_version` 静态钉成字面量或该常量的 `Mandate(...)` 构造点为零，末尾一条「A2 构造点必须被看见」断言防扫描器空转。红因实测：先跑真实语料 6 例全绿（计划写的是「第三例红——若字面量断言写法未收口」，实测已收口：Task 5 落 `P5_POLICY_VERSION`、Task 6 把默认值接进 `StaticPolicyConfig.policy_version`，生产代码里 `p5-v1` 只剩一处字面量），再按账本要求**人为构造越界样例进红**：三份一次性探针分别打到 ①（`orchestration/_p5_probe.py` 里 `LEAK_VERSION = "p5-v1"`）、②＋L2 反向（同文件 import `stableagent.control.policy`）、③（同文件 `Mandate(..., policy_version="p5-v1")` → `[('stableagent/orchestration/_p5_probe.py', 7)]`），外加 `control/_probe_upstream.py` 打到 ②方向腿——四腿各有独立红，探针已删。步骤 3「收敛为单一模块常量」本轮零改动（已在位），常量名沿用 Task 5 的 `P5_POLICY_VERSION`而非计划建议的 `POLICY_VERSION`：带层前缀的导入名在调用点自述来源，且第 1 节 1.5/1.6 的证据已按此名记录。绿：`pytest -q tests/unit/test_control_boundaries.py tests/unit/test_orchestration_boundaries.py` = `19 passed`（P4 旧矩阵与新矩阵并绿）；全量 `475 passed, 1 skipped`、总覆盖 99.15%、`stableagent/control/*` 六文件仍 100%；`mypy` Success（41 files）、`ruff check` All checks passed、`ruff format --check` 100 files already formatted；L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行、约束 1 `service.py` = 0 行。
 - [ ] **1.9** **M1 出口**：`pytest -q` / `mypy` / `ruff check` / `ruff format --check` /
       L1 diff 0 行；账本 M1 步骤与 A、B 组证据回填。
 
@@ -299,7 +300,7 @@
       `test_p4_local_mandate_roundtrip_unchanged` 覆盖新建的本地 Mandate 路径。
 - [ ] **A2** 只有 `control.policy` 能构造 `p5-v1` Mandate（构造入口扫描 + 行为用例）。
       进度（2026-11-04，Task 4 字段形状半边）：`p5-v1` 的 17 字段形状已由满配往返用例钉死；
-      "唯一构造入口 = `control.policy.create_mandate`"的行为用例属 Task 5，构造入口扫描属 Task 8。
+      "唯一构造入口 = `control.policy.create_mandate`"的行为用例属 Task 5，构造入口扫描属 Task 8。      进度（2026-11-04，Task 8 扫描半边）：三处静态钉版形态（字面量 holder / 常量 import 方 / control 包外的 `Mandate(policy_version=p5-v1)` 构造点）各一道 AST 断言，越界样例注入实测能红；扫描范围是生产包 `stableagent/`，白盒用例（`test_mandate_extension.py` 直接构造 p5 Mandate 验往返）不计入越界——账本口径是"生产代码里外部文本产不出授权"。勾选留 M1 出口。
 - [x] **A3** admit/authorize/revalidate/approve/deny 全部结构化落审计表，含 policy_version。
       证据（2026-11-04，Task 6）：`AuditWriter.admitted/authorized/revalidated/decided` 各写
       1 行 `authorization_audit`，`kind ∈ {admit, authorize, revalidate, approve}`、
@@ -423,7 +424,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：执行中（Task 1~7 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **状态：执行中（Task 1~8 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
 > **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
@@ -781,14 +782,25 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
   `test_p5_v1_mandate_construction_is_confined_to_control`——全库 AST 找
   `Mandate(...)` 构造调用点，`policy_version="p5-v1"` 字面量只允许出现在
   `stableagent/control/`（A2/L4 扫描半边；`orchestration/model.py` 默认值路径不含该字面量）。
-- [ ] **Step 1: 写失败的测试**：上述三个用例（第三个先对 `control/policy.py` 放行、
+- [x] **Step 1: 写失败的测试**：上述三个用例（第三个先对 `control/policy.py` 放行、
       人为在 docstring 外构造一个越界样例进红）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_boundaries.py`
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_control_boundaries.py`
       Expected: 前两例 PASS（现状即满足），第三例红——若字面量断言写法未收口，先记红再收。
-- [ ] **Step 3: 实现**：把 `policy.py` 的 `p5-v1` 收敛为单一模块常量
+      Actual: 真实语料 `6 passed`（第三例没红：字面量写法在 Task 5/6 已收口，计划的条件分支走绿）；
+      改以越界样例外挂证明第三例不是空断言——四份探针各自的红：
+      `AssertionError: ['stableagent/control/policy.py', 'stableagent/orchestration/_p5_probe.py']`（holder 腿）、
+      `FAILED :: test_no_legacy_package_imports_p5_layers` + `assert ['stableagent/orchestration/_p5_probe.py'] == []`（import 腿）、
+      `FAILED :: test_control_never_imports_execution_or_integrations`（方向腿）、
+      `AssertionError: [('stableagent/orchestration/_p5_probe.py', 7)]`（钉版构造腿）；探针随后删除、未入库。
+- [x] **Step 3: 实现**：把 `policy.py` 的 `p5-v1` 收敛为单一模块常量
       `POLICY_VERSION = "p5-v1"`，扫描按"该常量的 import 方只允许 control 包"断言。
-- [ ] **Step 4: 跑到绿**：目标文件 + `test_orchestration_boundaries.py` 同跑（新旧矩阵并绿）。
-- [ ] **Step 5: 提交**：`git commit -am "test: lock the p5 dependency direction across packages"`
+      实际落位：本 Task 无生产代码改动——单一常量在 Task 5 已是 `P5_POLICY_VERSION = "p5-v1"`
+      （名字带层前缀，理由见第 1 节步骤 1.8），`grep -rn '"p5-v1"' stableagent/` 只剩该赋值与
+      `orchestration/model.py` 的一句 docstring（docstring 不是代码，AST 扫描不读它）；
+      import 方断言按计划的口径落地为 `_imports_version_constant`。
+- [x] **Step 4: 跑到绿**：目标文件 + `test_orchestration_boundaries.py` 同跑（新旧矩阵并绿）。
+      `19 passed`；全量 `475 passed, 1 skipped`、99.15%、mypy/ruff 三口绿；L1 与约束 1 各 0 行。
+- [x] **Step 5: 提交**：`git commit -am "test: lock the p5 dependency direction across packages"`
 
 ### Task 9: M1 出口——门禁、账本回填与归属修正（步骤 1.9）
 
