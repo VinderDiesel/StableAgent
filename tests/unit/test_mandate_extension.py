@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from stableagent.orchestration.model import Mandate
 from stableagent.orchestration.store import Store
@@ -81,6 +82,12 @@ def test_upgraded_legacy_row_reads_through_the_model_with_defaults(tmp_path: Pat
         policy_version="p4-local-v1",
         granted_at=1_000,
     )
+
+
+def test_mandate_rejects_unknown_fields() -> None:
+    """维护者确认（M1 出口后）：Mandate 收紧 extra="forbid"——拼错的授权字段必须炸，不能静默丢。"""
+    with pytest.raises(ValidationError):
+        Mandate(id="md-typo", granted_at=1, allowed_command=["pytest -q"])
 
 
 def test_mandate_list_columns_are_sorted_on_write(store: Store) -> None:

@@ -6,7 +6,7 @@ import uuid
 from enum import Enum
 from typing import Any, Literal, Protocol, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from stableagent.orchestration.errors import IllegalTransitionError
 
@@ -81,6 +81,9 @@ class Mandate(BaseModel):
     默认值即"P4 本地授权无外部面"语义：旧行读出来不携带任何仓库、命令、MCP 或网络授权。
     只有 `control.policy` 能构造 `policy_version="p5-v1"` 的 Mandate（A2）。
     """
+
+    # 授权字段拼错必须炸：P4 其余记录保持宽松，但 Mandate 静默丢字段等于悄悄改授权面。
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     origin_kind: Literal["local", "github"] = "local"
