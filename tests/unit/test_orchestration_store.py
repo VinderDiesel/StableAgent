@@ -32,6 +32,9 @@ TABLES = {
     "dependencies",
     "effects",
     "schema_migrations",
+    # P5（ADR-05 决策 1/3）授权侧两表：与 P4 八表同库同 transaction() 入口。
+    "approval_requests",
+    "authorization_audit",
 }
 
 # 本文件允许直接用 store._conn 写裸 SQL：Task 4 的验收对象就是 schema 与事务，仓储方法要到
@@ -45,7 +48,7 @@ def store(tmp_path: Path):
     handle.close()
 
 
-def test_all_eight_tables_exist_with_schema_version(store: Store) -> None:
+def test_all_tables_exist_with_schema_version(store: Store) -> None:
     names = {
         row[0]
         for row in store._conn.execute(
@@ -53,11 +56,15 @@ def test_all_eight_tables_exist_with_schema_version(store: Store) -> None:
         ).fetchall()
     }
     assert names >= TABLES
-    assert store.schema_version() == "0.1.0"
+    versions = {
+        row[0] for row in store._conn.execute("SELECT version FROM schema_migrations").fetchall()
+    }
+    assert "0.1.0" in versions  # P4 基线版本行仍在（p5-control-v1 是追加，不替换）
+    assert store.schema_version() == "p5-control-v1"  # 返回最近一次应用的迁移
 
 
 def test_p4_database_keeps_p2_checkpoint_tables_out(store: Store) -> None:
-    """L5：编排库只含自己的 8 张表——P2 的 `checkpoints` 不被带进来，两边各自演进。"""
+    """L5：编排库只含自己的表——P2 的 `checkpoints` 不被带进来，两边各自演进。"""
     names = {
         row[0]
         for row in store._conn.execute(

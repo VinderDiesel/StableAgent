@@ -42,6 +42,19 @@ _SCHEMA: dict[str, str] = {
         " scope TEXT NOT NULL DEFAULT '',"
         " policy_version TEXT NOT NULL, granted_at INTEGER NOT NULL)"
     ),
+    "approval_requests": (
+        "CREATE TABLE IF NOT EXISTS approval_requests ("
+        " id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, assignment_id TEXT,"
+        " action TEXT NOT NULL, resource_digest TEXT NOT NULL, reason TEXT NOT NULL,"
+        " requested_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',"
+        " decided_by TEXT, decided_at INTEGER)"
+    ),
+    "authorization_audit": (
+        "CREATE TABLE IF NOT EXISTS authorization_audit ("
+        " id TEXT PRIMARY KEY, kind TEXT NOT NULL, ticket_id TEXT, assignment_id TEXT,"
+        " mandate_id TEXT, action TEXT, resource_digest TEXT, policy_version TEXT NOT NULL,"
+        " decision TEXT NOT NULL, reason TEXT, created_at INTEGER NOT NULL)"
+    ),
     "tickets": (
         "CREATE TABLE IF NOT EXISTS tickets ("
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, task TEXT NOT NULL,"
@@ -85,6 +98,22 @@ _SCHEMA: dict[str, str] = {
     ),
 }
 ORCHESTRATION_TABLES = tuple(_SCHEMA)
+
+# P5（ADR-05 决策 2）：mandates 兼容加列，全部带默认值——旧行读出即为"P4 本地授权无外部面"语义。
+# 列名与类型只来自本常量，ALTER 语句不接受任何调用方输入。
+_MANDATE_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("repository", "TEXT"),
+    ("base_ref", "TEXT"),
+    ("actions", "TEXT NOT NULL DEFAULT '[]'"),
+    ("allowed_paths", "TEXT NOT NULL DEFAULT '[]'"),
+    ("allowed_commands", "TEXT NOT NULL DEFAULT '[]'"),
+    ("allowed_mcp", "TEXT NOT NULL DEFAULT '[]'"),
+    ("network_profile", "TEXT"),
+    ("expires_at", "INTEGER"),
+    ("requires_approval", "INTEGER NOT NULL DEFAULT 0"),
+    ("request_origin", "TEXT"),
+    ("request_digest", "TEXT"),
+)
 
 
 def _row_to_mandate(row: sqlite3.Row) -> Mandate:
@@ -191,11 +220,14 @@ class Store:
         """加列与索引（兼容扩展：全部带默认值）；老库的 inputs.state 由时间戳回填。
 
         预发布口径：ORCHESTRATION_SCHEMA_VERSION 保持 0.1.0——编排记录尚未对外承诺（ADR-04 决策 1）。
+        P5 的扩展同样只加不改：`p5-control-v1` 追加 mandates 的 11 列与 marker 行，
+        既有行的 policy_version 与 6 个原字段一律不回写（ADR-05 决策 2）。
         """
         assignment_columns = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(assignments)")
         }
         input_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(inputs)")}
+        mandate_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(mandates)")}
         with self.transaction():
             if "deadline_at" not in assignment_columns:
                 self._conn.execute("ALTER TABLE assignments ADD COLUMN deadline_at INTEGER")
@@ -206,8 +238,15 @@ class Store:
                 self._conn.execute(
                     "UPDATE inputs SET state = 'consumed' WHERE consumed_at IS NOT NULL"
                 )
+            for name, column_type in _MANDATE_ADD_COLUMNS:
+                if name not in mandate_columns:
+                    self._conn.execute(f"ALTER TABLE mandates ADD COLUMN {name} {column_type}")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS effects_due ON effects (due_at, kind, id)"
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                ("p5-control-v1", self._clock.now_ms()),
             )
 
     def _create_schema(self) -> None:
@@ -239,8 +278,11 @@ class Store:
             self._in_tx = False
 
     def schema_version(self) -> str:
+        """最近一次应用的迁移名。
+        同一毫秒内有多次迁移（FixedClock 下必然），故以插入次序（rowid）定尾。
+        """
         row = self._conn.execute(
-            "SELECT version FROM schema_migrations ORDER BY applied_at DESC LIMIT 1"
+            "SELECT version FROM schema_migrations ORDER BY applied_at DESC, rowid DESC LIMIT 1"
         ).fetchone()
         return row[0] if row else "0"
 
