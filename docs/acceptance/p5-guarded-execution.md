@@ -3,7 +3,7 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 3/46、里程碑步骤 6/40（M1 6/9）**，
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 6/46、里程碑步骤 7/40（M1 7/9）**，
 > 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
@@ -47,6 +47,10 @@
       进度（2026-11-04，Task 6 审计形状半边）：`revalidate` 判定已有对应审计行，行内
       `action` 槽记时机名（六时机在数据上可区分，不另加列）；"逐一先于动作执行"的接线
       与时机矩阵属 M2（worktree）/M3（其余五处），由 A4 收口。
+      进度（2026-11-04，Task 7 审批半边）："需审批的动作不得先执行后补记录"在 Gate 上是
+      结构性的——`ApprovalGate.check` 先落一行 authorize 审计才返回结论，没有全等批准行时
+      返回的是 deny（`approval_pending`/`approval_stale`/`approval_denied`），调用方拿不到
+      allow 也就没有"先做后记"的路径；接线点在 M2/M3。
 - [ ] **L6 结构性默认拒绝**：`merge`/`enable_auto_merge` 不在 EffectKind 枚举与 Action
       授权集合中（不是"运行时开关拒绝"，是类型里不存在）。来源：ADR-05 决策 5、被否决表。
       进度（2026-11-04，Task 5 授权集合半边）：`merge` 不在 `Action` 枚举里（13 成员无 merge），
@@ -170,8 +174,32 @@
       `*, ticket_id=None, assignment_id=None` 可选关键字（`decided` 从 approval 取），否则
       `list_audit(ticket_id=)` 是死过滤器。第 4 用例为计划 3 例之外的追加，覆盖 Task 7 依赖的
       审批行读写与过滤口径。
-- [ ] **1.7** `ApprovalService.decide()`：approved 绑定 `(action, resource_digest)`、参数变化
+- [x] **1.7** `ApprovalService.decide()`：approved 绑定 `(action, resource_digest)`、参数变化
       即失效、denied → blocked/failed 不可绕过、Ticket 取消同事务撤 pending。验证：B1~B4 用例。
+      证据（2026-11-04，Task 7，提交 `31cb377`）：`control/approval.py` 的
+      `ApprovalService`/`ApprovalGate`/`GuardedTicketOps` 三件套，两个测试文件 10 用例全绿
+      （`472 passed, 1 skipped`，总覆盖 99.15%，`approval.py` 94 stmts 100%）。
+      ① B1/B3/B4 关闭；B2 只到 Gate 半边（denied 在同一 `(ticket, action)` 上粘连、重新申请
+      换资源都不自愈），"使 Assignment `blocked|failed`"要有 Assignment 可管，归 M2/M3 接线。
+      ② 高危集 `HIGH_RISK_ACTIONS` 由 M1 写死为 push_branch / create_pull_request / comment_issue
+      / comment_pull_request / request_review（计划只写"高危集"未点名成员）：口径取"对外部系统
+      可见或难以撤销的写入"，与 ADR-05 决策 4 的 `external_write` 复检时机同一批动作；它是 Gate 的
+      第二道，`mandate.requires_approval=False` 关不掉。
+      ③ 计划签名两处调整：`ApprovalGate(policy, approvals, audit)` 去掉没有消费点的 `store`/`clock`
+      （审批行读取已由 `ApprovalService` 承担，时间口径归 `StaticPolicy` 的时钟；留着正是 ADR-05
+      批评 `permission_hook` 那种"声明字段而非执行边界"）；`GuardedTicketOps(store, approvals, *,
+      clock, ids)` 用实例方法代替计划里的静态 `cancel_ticket(store, service_ids, …)`，因为
+      `ended_at`/`due_at`/撤销售 `decided_at` 都要 `now_ms()`，静态签名没有时钟来源。
+      ④ `check(mandate, action, resource, *, ticket_id=None)` 追加票面关键字：审批行按 ticket
+      归属（`approval_requests` 无 mandate_id 列，列集由 ADR-05 决策 3 钉死），Gate 拿不到票面就
+      无法定位批准行，此时宁可 deny `approval_context_missing`，也不猜归属。
+      ⑤ 撤销售写 `decided_at`=撤销时刻、`decided_by` 留空：`decided_*` 是终态元数据而非"人工
+      裁决"专用字段；`decide()` 本身不写 approve 审计行（计划给 `ApprovalService` 的构造参数里没有
+      audit），`AuditWriter.decided` 的调用点归接线方，形状已由 Task 6 用例证明。
+      ⑥ P4 `OrchestrationService.cancel_ticket` 一字不动（约束 1）：
+      `git diff 234f620..HEAD -- stableagent/orchestration/service.py | wc -l` = 0；守卫式取消自己
+      声明未终态 Assignment 终态集（那份常量是 service 私有的），并用同一 `(kind, cancel:{id})` 幂等
+      键与同一 payload 形状证明与 P4 同形。
 - [ ] **1.8** L2 边界测试扩展：三新包 × 四旧包 AST 方向矩阵。验证：故意 import 的红测 + 常驻。
 - [ ] **1.9** **M1 出口**：`pytest -q` / `mypy` / `ruff check` / `ruff format --check` /
       L1 diff 0 行；账本 M1 步骤与 A、B 组证据回填。
@@ -296,12 +324,33 @@
 
 ### B 审批（M1）
 
-- [ ] **B1** `approved` 绑定 `(action, resource_digest)`；参数或资源变化后旧批准失效。
+- [x] **B1** `approved` 绑定 `(action, resource_digest)`；参数或资源变化后旧批准失效。
       进度（2026-11-04，Task 3 前提半边）：`resource_digest` 的纯函数性质已被单测钉死
-      （乱序稳定 + 四种变化各得新值），"批准绑定后参数变化即失效"的行为用例属 Task 7（步骤 1.7）。
+      （乱序稳定 + 四种变化各得新值）。
+      证据（2026-11-04，Task 7 收口）：`test_approved_binding_breaks_on_resource_change`——批准
+      `push_branch + digest(BRANCH_A)` 后，Gate 对同一动作换 `BRANCH_B` 直接 deny `approval_stale`，
+      换回 A 仍 allow（失效的是那份批准对新资源，不是批准被吃掉）；每次 check 都落一行 authorize，
+      `resource_digest` 与当刻请求逐等，审计能看出"批准绑定的是哪一个资源"。
 - [ ] **B2** `denied` 使 Assignment `blocked|failed`，不得换动作绕过。
-- [ ] **B3** Ticket 取消同事务撤销 pending approval。
-- [ ] **B4** 需审批动作先记录后执行，且批准在进程重启（崩溃恢复）后仍可判定。
+      进度（2026-11-04，Task 7 Gate 半边）：`test_denied_never_self_heals`——denied 后重新 submit、
+      推进时钟、连查三次都仍是 `approval_denied`（粘连在 `(ticket, action)` 上，先于批准匹配判定，
+      所以换 digest 也走不到放行）；换动作只得到 `approval_pending`，不是自动放行。
+      "使 Assignment `blocked|failed`"要有 Assignment 可管，属 M2/M3 接线，届时由本条收口。
+- [x] **B3** Ticket 取消同事务撤销 pending approval。
+      证据（2026-11-04，Task 7）：`test_guarded_cancel_rolls_back_all_three_on_error` 在
+      `ApprovalService.revoke_pending` 处注入异常 → 票仍 `queued`、`due_effects` 为空、审批行仍
+      `pending`、`store.in_transaction` 归 False（三件事真·同事务，L3 的事务体内只有同步库写与纯
+      函数）；`test_guarded_cancel_rejects_terminal_ticket` 再用状态机违规（COMPLETED 票取消 →
+      `IllegalTransitionError`）证明同一回滚从另一条路径成立。
+      `test_guarded_cancel_revokes_pending_only`：pending → revoked，approved/denied 历史行原样保留
+      （撤销只碰 pending，审计不删史），未终态 Assignment 各入队 `cancel:{assignment.id}`，已终态的
+      `interrupted` 不再入队。
+- [x] **B4** 需审批动作先记录后执行，且批准在进程重启（崩溃恢复）后仍可判定。
+      证据（2026-11-04，Task 7）：`test_approval_survives_reopen`——批准写入后 `store.close()`，
+      重开同一库文件、换新 `ApprovalService`/`ApprovalGate`，Mandate 也从库里 `get_mandate` 读回，
+      Gate 仍判 `approved`（事实源是行而不是内存）；"先记录后执行"由 Gate 结构保证：
+      `check` 先写 authorize 审计行才返回结论，没有全等批准行时返回的是 deny（见步骤 1.7 的 ⑤、L5
+      审批半边进度），调用方拿不到 allow 就没有"先做后记"的路径。
 
 ### C worktree 与命令（M2）
 
@@ -374,7 +423,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：执行中（Task 1~6 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **状态：执行中（Task 1~7 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
 > **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
@@ -680,7 +729,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
     `next_ticket_status`）+ 未终态 Assignment 各入队 `CANCEL_ASSIGNMENT` effect（键
     `cancel:{assignment.id}`，与 P4 同形）+ `revoke_pending(ticket_id)`——真·同事务（B3），
     P4 `OrchestrationService.cancel_ticket` 一字不动（约束 1）。
-- [ ] **Step 1: 写失败的测试**——
+- [x] **Step 1: 写失败的测试**——
       `test_approved_binding_breaks_on_resource_change`（approve 后同 action 换 path →
       Gate deny `approval_stale`，B1）；
       `test_denied_never_self_heals`（denied 后重新 submit+check → 仍 deny，B2）；
@@ -689,11 +738,32 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
       `test_guarded_cancel_rolls_back_all_three_on_error`（在 revoke 处注入异常 →
       ticket 未取消、effect 未入队、approval 仍 pending，证明原子性，B3 + L3）；
       `test_guarded_cancel_revokes_pending_only`（approved 历史行保留——审计不删史）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_approval_service.py
-      tests/unit/test_guarded_cancel.py` Expected: FAIL — `ModuleNotFoundError`
-- [ ] **Step 3: 实现** `approval.py`。
-- [ ] **Step 4: 跑到绿**：目标两文件 + 全量。
-- [ ] **Step 5: 提交**：`git commit -am "feat: gate high-risk actions on digest-bound approvals"`
+      实际另加三个：`test_submit_is_idempotent_on_the_pending_key`（pending 键去重、终态不占键、
+      撤销计数与 `decided_by` 留空）、`test_high_risk_actions_gate_without_the_flag`（高危集钉死成员
+      + 低危直通 + `approval_context_missing`）、`test_gate_passes_policy_denials_straight_through`
+      （策略先拒：`not_granted`/`mandate_expired` 到不了审批表，reason 保持策略侧码）。
+      两个文件从 `test_authorization_audit.py` 复用 `_policy`/`_request`（沿用 Task 4 起
+      `test_mandate_extension.py` 跨文件借用测试资产的先例）。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_approval_service.py
+      tests/unit/test_guarded_cancel.py`
+      Expected: FAIL — `ModuleNotFoundError`
+      Actual: FAIL — `ModuleNotFoundError: No module named 'stableagent.control.approval'`
+      （两个文件各自在收集期失败；M1 至此唯一一次计划预期红命中）
+- [x] **Step 3: 实现** `approval.py`。
+      实际落位：`ApprovalService.submit/get/for_ticket/decide/revoke_pending`、
+      `HIGH_RISK_ACTIONS`、`ApprovalGate.check`（deny 优先级 denied → 全等批准 → stale → pending）、
+      `GuardedTicketOps.cancel_ticket`。签名与本 Task 的五处取向见步骤 1.7 的 ②~⑥。
+      两处测试构造修正（生产代码未改）：一个进程内共享同一个 `SequenceIds`（否则审计行/审批行/effect
+      行各撞一次 `UNIQUE`）；同票第二个 Assignment 要递增 `attempt`（P4 的
+      `UNIQUE (ticket_id, attempt)`）。
+- [x] **Step 4: 跑到绿**：目标两文件 `10 passed` + 全量 `.venv/bin/pytest -q` →
+      `472 passed, 1 skipped`，总覆盖 99.15%（`control/approval.py` 94 stmts、`store.py` 192 stmts
+      均 100%）；`.venv/bin/mypy` Success（41 files）、`ruff check` All checks passed、
+      `ruff format --check` 100 files already formatted；心脏边界复测：L1
+      `git diff 234f620..HEAD -- stableagent/core/ | wc -l` = 0，约束 1
+      `git diff 234f620..HEAD -- stableagent/orchestration/service.py` = 0；L2 反向检查
+      `grep -rn stableagent.control stableagent/orchestration/` = 0 处（旧包不认识新包）。
+- [x] **Step 5: 提交**：`31cb377 feat: gate high-risk actions on digest-bound approvals`
 
 ### Task 8: 依赖方向矩阵——三新包 × 五旧包（步骤 1.8）
 
