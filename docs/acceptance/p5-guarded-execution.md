@@ -3,9 +3,10 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 7/46、里程碑步骤 9/40（M1 9/9、M2 0/12）**，分支 `feat/p5-m1-control-plane` 按 Task 推进，
-> M2 属新里程碑，开工待维护者确认（第 5 节 Task 9 Step 5）。
+> 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
+> **DoD 7/46、里程碑步骤 9/40（M1 9/9、M2 0/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
+> `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
 > 验收账本（第 0、2 节）。每个可勾选事项写明来源、验证方法或命令、证据占位；全部勾选且第 3 节
@@ -879,3 +880,331 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 - [x] **Step 5: 汇报**：向维护者给出 M2 开工分支与是否继续的确认点（M2 属新里程碑，
       按 P4 惯例出口后另行确认开工）。
 
+## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
+
+> **状态：待开工。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），展开为 **12 个 Task / 60 个 Step**。
+> 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
+> 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
+> （`EffectKind` 加成员属 ADR-05 决策 5 点名允许，`service.py` 一字不动——约束 1）；`control/`
+> 在 M2 不动（revalidate 接线在 M3）。
+>
+> 每个 Task 的固定节奏同第 5 节：Step 1 写失败测试 → Step 2 跑到红（命令 + 预期失败 + 实测
+> Actual）→ Step 3 实现 → Step 4 目标文件 + 边界矩阵 + 全量跑绿 → Step 5 提交。Step 4/5 前
+> `mypy`、`ruff check stableagent tests examples benchmarks`、`ruff format --check` 必须全绿。
+>
+> 写计划时已核实的现状（2026-11-04，`main@5e94377`）：`stableagent/execution/` 与
+> `stableagent/integrations/` **不存在**；`stableagent/sandbox/` 只有一行占位 docstring；
+> `EffectKind` 三成员（`launch_assignment`/`deliver_input`/`cancel_assignment`）在
+> `orchestration/model.py:64-67`，`effects.kind` 是无 CHECK 的 TEXT；effect handler 类型是
+> **async-only**（`outbox.py:18`），`EffectDispatcher` 断言不在事务内（L3 天然满足）；
+> `pyproject.toml` **没有** `markers` 键；`stableagent/` 内 **零** `subprocess` 调用；仓库内
+> 没有 slug / 短 id / 路径收口助手。
+>
+> 六处取向（先写理由，避免执行期再讨论）：
+> ① `git` 经注入协议 `Git` 调用，真实实现用 argv 数组 + `shell=False`；测试用**真实临时仓库**
+> （本机 git，离线，不违反 L8），不 mock git 输出。
+> ② 路径收口只有一个实现 `execution.paths.confine()`，所有吃路径的 API 入口先过它（C4）。
+> ③ 命名是纯函数、只吃 `Ticket`，签名里没有 request 文本，结构上做不到直通（C5）。
+> ④ prepare 的幂等键 `prepare:{assignment_id}`，与 P4 的 `launch:{assignment_id}:{attempt}`、
+> `cancel:{assignment_id}` 同形。
+> ⑤ 任务顺序把 2.7（environment）提到 2.6（CommandRunner）之前：后者的 `env=` 参数要用前者。
+> ⑥ 子进程环境在白名单四变量外只放 `PATH`（解析可执行文件必需）与固定 `LANG`，其余宿主变量
+> 一律不继承——这是对规格 2.4 的一处细化，理由与实测写进 Task 6 证据。
+
+### Task ↔ 里程碑步骤与 DoD 对照
+
+| Task | 步骤 | 本 Task 产生的 DoD 证据 |
+|---|---|---|
+| 1 | 2.1 | C4、L2（execution 侧边界落位） |
+| 2 | 2.2 | C5 |
+| 3 | 2.3 | C3 |
+| 4 | 2.4 | C2 |
+| 5 | 2.5 | 生命周期口径（保留 + 显式清理） |
+| 6 | 2.7 | C8、L7（环境半边） |
+| 7 | 2.6 | C7 |
+| 8 | 2.8 | D1 |
+| 9 | 2.9 | C6 |
+| 10 | 2.10 | D2 |
+| 11 | 2.11 | D3、L8（Docker 半边） |
+| 12 | 2.12 | C1、M2 出口 |
+
+---
+
+### Task 1: `execution/` 包骨架、独立版本与路径收口（步骤 2.1 前半）
+
+**Files:**
+- Create: `stableagent/execution/__init__.py`、`stableagent/execution/errors.py`、
+  `stableagent/execution/paths.py`
+- Test: `tests/unit/test_execution_boundaries.py`（新建）、`tests/unit/test_worktree.py`（新建，
+  C4 首例）
+
+**Interfaces:**
+- Produces: `EXECUTION_SCHEMA_VERSION = "0.1.0"`（不进 `stableagent` 顶层重导出，同 control 口径）；
+  `confine(root: Path, candidate: str | Path) -> Path`——`candidate.resolve()` 必须
+  `is_relative_to(root.resolve())`，否则 `PathEscapeError`；`errors.py` 稳定 `.code` 家族
+  （`execution.path_escape`/`worktree_reuse`/`command_denied`/`cleanup_unconfirmed`）。
+- 边界：`execution/` 只允许 import `stableagent.control`/`orchestration`/`core`（方向
+  execution → control → orchestration → core）；不得 import `stableagent.integrations`
+  （尚不存在，名单先含）；`test_control_boundaries.py` 的 L2 语料按目录枚举自动把新包纳入
+  旧包侧扫描，无需改名单。
+- [ ] **Step 1: 写失败的测试**：`test_execution_version_is_independent_and_not_reexported`；
+  `test_execution_never_imports_integrations`；`test_confine_rejects_escape`
+  （`../x`、绝对路径外部、指向外部的 symlink）、`test_confine_accepts_inside`。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_execution_boundaries.py
+  tests/unit/test_worktree.py` Expected: FAIL — `ModuleNotFoundError: No module named
+  'stableagent.execution'`（若收集期在更上游失败，按实测记 Actual）。
+- [ ] **Step 3: 实现** `__init__.py`（docstring 写明"执行层不认识集成层"）、`errors.py`、
+  `paths.py`；symlink 用例先 `Path.symlink_to` 造出真实链接再断言。
+- [ ] **Step 4: 跑到绿**：目标两文件 + `tests/unit/test_control_boundaries.py`（新包入矩阵后
+  仍绿）+ 全量 `pytest -q`；`mypy`/`ruff check`/`ruff format --check` 全绿。
+- [ ] **Step 5: 提交**：`git commit -am "feat: open the execution package with path confinement"`
+
+### Task 2: 命名纯函数（步骤 2.2）
+
+**Files:**
+- Create: `stableagent/execution/naming.py`
+- Test: `tests/unit/test_worktree.py`（追加 C5 用例）
+
+**Interfaces:**
+- Produces: `ticket_short_id(ticket_id: str) -> str`（去掉 `tk-` 前缀后的前 8 个十六进制字符）；
+  `slugify(title: str) -> str`（只留 `[a-z0-9-]`，折叠连字符、截到 40、空则 `ticket`）；
+  `workspace_name(ticket: Ticket) -> str` = `sa-{short}-{slug}`；`WORKSPACE_RE` 常量形如
+  `^sa-[0-9a-f]{8}-[a-z0-9-]{1,40}$`。三个函数都是纯函数、签名里没有 request/Issue 原文。
+- [ ] **Step 1: 写失败的测试**：注入语料 `["main; rm -rf /", "../../etc/passwd",
+  "修复登录 bug", "🎉", "A"*200, "  ", "-leading-dash"]` → 每个结果都匹配 `WORKSPACE_RE`、
+  不含语料里的 `/`/`;`/空格、不空；同 title 两次调用逐字节相同（确定性）；长度上限生效。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  Expected: FAIL — `ImportError: cannot import name 'workspace_name'`。
+- [ ] **Step 3: 实现** `naming.py`；CJK/emoji 全部被过滤后回落到 `ticket`（不许为空）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: derive branch and worktree names from the ticket alone"`
+
+### Task 3: `Git` 协议 + `prepare` 与复用四要素（步骤 2.3）
+
+**Files:**
+- Create: `stableagent/execution/git.py`、`stableagent/execution/worktree.py`
+- Test: `tests/unit/test_worktree.py`（追加 C3 用例，用真实临时仓库）
+
+**Interfaces:**
+- Produces: `Git` 协议（`run(args: Sequence[str], *, cwd: Path) -> GitResult`）+
+  `SubprocessGit(timeout_s=30.0)`（argv 数组、`shell=False`、失败抛 `GitError` 带 returncode）；
+  `WorktreeHandle`（`path`/`branch`/`ticket_id`/`base_ref`/`repository`/`ownership_file`）；
+  `GitWorktreeManager(root: Path, *, git: Git, clock: Clock)`；
+  `prepare(ticket: Ticket, *, repository: str, base_ref: str) -> WorktreeHandle`——`git worktree
+  add -b <branch> <path> <base_ref>`，并在 worktree 根写 `.stableagent-worktree.json`
+  （`ticket_id`/`branch`/`base_ref`/`repository`/`created_at`，**不含**任何凭据或宿主变量，L7）；
+  复用判定读 ownership 文件 + `git remote get-url`，四要素（remote / ticket_id / base_ref /
+  ownership 文件存在且可解析）全等才复用，否则 `WorktreeReuseError(diagnostics: dict)` 且
+  **不清理**现场。
+- [ ] **Step 1: 写失败的测试**：`test_prepare_creates_worktree_and_ownership`；
+  `test_prepare_reuses_identical_worktree`；`test_reuse_rejects_each_of_the_four_elements`
+  （逐要素破坏：改 remote、改 ownership 的 ticket_id、改 base_ref、删/坏 ownership 文件
+  → 四种拒绝 + 诊断字段齐全 + 目录仍在）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  Expected: FAIL — `ImportError: cannot import name 'GitWorktreeManager'`。
+- [ ] **Step 3: 实现** `git.py` + `worktree.py`；prepare 入口先 `confine(root, path)`；
+  所有路径参数化（root 由调用方给临时目录）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁；`git diff 234f620..HEAD --
+  stableagent/core/` = 0（L1）。
+- [ ] **Step 5: 提交**：`git commit -am "feat: prepare reusable worktrees with four-element reuse checks"`
+
+### Task 4: `PREPARE_WORKTREE` effect 与崩溃重放（步骤 2.4）
+
+**Files:**
+- Modify: `stableagent/orchestration/model.py`（`EffectKind` 加 `PREPARE_WORKTREE = "prepare_worktree"`）
+- Create: `stableagent/execution/effects.py`
+- Test: `tests/unit/test_worktree.py`（追加 C2 用例）
+
+**Interfaces:**
+- Produces: `prepare_worktree_handler(manager: GitWorktreeManager) -> EffectHandler`——payload
+  形状 `{"ticket_id", "assignment_id", "repository", "base_ref"}`，幂等键
+  `prepare:{assignment_id}`；handler 是 `async def`（P4 handler 类型如此），内部直接调同步
+  `manager.prepare`（dispatcher 保证不在事务内，L3 不受影响）。
+- [ ] **Step 1: 写失败的测试**：`test_prepare_effect_is_idempotent_on_replay`——真实 `Store` +
+  真实临时仓库，同一 effect 入队、dispatch 两次（模拟崩溃后重放）→ 账上只有一条
+  `prepare:` effect、`git worktree list` 只有一行、目录/分支名不变。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  Expected: FAIL — `AttributeError: PREPARE_WORKTREE`（枚举缺成员）。
+- [ ] **Step 3: 实现** 枚举成员 + `effects.py`；不碰 `store.py`（`kind` 是无 CHECK 的 TEXT）
+  与 `service.py`（约束 1）。
+- [ ] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_outbox.py` / `test_scheduler.py`（既有
+  effect 语义不受影响）+ 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: drive worktree preparation through an outbox effect"`
+
+### Task 5: 生命周期——默认保留、显式清理（步骤 2.5）
+
+**Files:**
+- Modify: `stableagent/execution/worktree.py`
+- Test: `tests/unit/test_worktree.py`（追加用例）
+
+**Interfaces:**
+- Produces: `GitWorktreeManager.cleanup(handle, *, confirm: bool = False,
+  delete_branch: bool = False) -> None`——`confirm=False` 抛 `CleanupNotConfirmedError`
+  （code `execution.cleanup_unconfirmed`）；`confirm=True` 走 `git worktree remove`，分支默认
+  保留供审查，`delete_branch=True` 才 `git branch -D`。manager 无析构、无定时清理。
+- [ ] **Step 1: 写失败的测试**：`test_worktree_survives_ticket_end`（把一个 Ticket 推到处终态后
+  目录仍在）；`test_cleanup_requires_confirmation`；`test_cleanup_keeps_branch_by_default`。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  Expected: FAIL — `AttributeError: 'GitWorktreeManager' object has no attribute 'cleanup'`。
+- [ ] **Step 3: 实现** `cleanup`；拒绝消息带可执行的下一步（显式命令 + `confirm=True`）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: keep worktrees after tickets and require explicit cleanup"`
+
+### Task 6: 环境变量白名单（步骤 2.7）
+
+**Files:**
+- Create: `stableagent/execution/environment.py`
+- Test: `tests/unit/test_command_runner.py`（新建，C8 用例）
+
+**Interfaces:**
+- Produces: `build_child_env(*, ticket_id, assignment_id, worktree: Path, repository: str,
+  base_ref: str, host: Mapping[str, str] | None = None) -> dict[str, str]`——只产出
+  `STABLEAGENT_TICKET_ID`/`STABLEAGENT_ASSIGNMENT_ID`/`STABLEAGENT_WORKTREE`/
+  `STABLEAGENT_REPOSITORY`/`STABLEAGENT_BASE_REF` + `PATH`（取自宿主，非敏感、解析可执行文件
+  必需）+ 固定 `LANG=C.UTF-8`；`host` 注入只为测试断言"其余变量一个不漏"。
+- [ ] **Step 1: 写失败的测试**：`test_child_env_is_an_allowlist`——宿主环境塞
+  `GITHUB_TOKEN`/`AWS_SECRET_ACCESS_KEY`/`PYTHONPATH`/`SSH_AUTH_SOCK` → 子进程环境里一个都
+  没有，只剩五加二；`test_child_env_has_no_secrets_from_arguments`（ticket_id 等按原值透传）。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
+  Expected: FAIL — `ModuleNotFoundError: No module named 'stableagent.execution.environment'`。
+- [ ] **Step 3: 实现** `environment.py`；`PATH` 与 `LANG` 的取舍写进 docstring（对规格 2.4 的
+  细化，账本 Task 6 证据里同样记录）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: hand the child process an allowlisted environment"`
+
+### Task 7: `CommandRunner`——allowlist、cwd、超时、输出上限、脱敏（步骤 2.6）
+
+**Files:**
+- Create: `stableagent/execution/command.py`
+- Test: `tests/unit/test_command_runner.py`（追加 C7 用例）
+
+**Interfaces:**
+- Produces: `CommandRequest(argv: tuple[str, ...], cwd: Path, timeout_s: float | None = None)`；
+  `CommandResult`（`argv`/`exit_code: int | None`/`stdout`/`stderr`/`started_at`/`ended_at`/
+  `truncated`/`timed_out`/`denied_reason: str | None`）；
+  `CommandRunner(allowlist: frozenset[str], *, worktree_root: Path, max_output_bytes=64*1024,
+  timeout_s=60.0, redact: tuple[str, ...] = ())`，`run(request) -> CommandResult`：
+  ① `confine(worktree_root, request.cwd)`；② `argv[0]` 精确命中 allowlist；③
+  `subprocess.run(list, cwd, env=build_child_env(...), timeout, capture_output=True,
+  shell=False)`；④ stdout/stderr 先按 `redact` 逐个替换为 `***` 再截断（保留头部 +
+  `...[truncated N bytes]` 尾标）。拒绝**不抛异常**：返回 `denied_reason` 非空的
+  `CommandResult`（规格 2.4 要求被拒绝原因在结果里），且不 spawn。
+- [ ] **Step 1: 写失败的测试**（C7 五项各一）：allowlist 外的命令名被拒且无副作用；
+  cwd 越出 worktree root 被拒（复用 Task 1 的 confine）；`sys.executable -c "import time;
+  time.sleep(2)"` 配 `timeout_s=0.2` → `timed_out=True` 且 `exit_code is None`；打印 200KB
+  → `truncated=True` 且长度 ≤ 上限；`redact=("tk-secret-value",)` → 输出里是 `***`。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
+  Expected: FAIL — `ImportError: cannot import name 'CommandRunner'`。
+- [ ] **Step 3: 实现** `command.py`；不提供 `shell` 参数（结构性禁 `shell=True`）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: run allowlisted commands with timeouts and redaction"`
+
+### Task 8: `LocalRestrictedRunner` 与叙事纪律（步骤 2.8）
+
+**Files:**
+- Create: `stableagent/execution/sandbox.py`
+- Test: `tests/unit/test_sandbox.py`（新建，D1 用例）
+
+**Interfaces:**
+- Produces: `SandboxRunner` 协议（`async def run(self, request: CommandRequest) ->
+  CommandResult`，规格 2.4 原样）；`LocalRestrictedRunner(runner: CommandRunner)`——类文档
+  明确"local-restricted 不是安全沙箱，DockerRunner 才是边界"；`CommandResult.summary() ->
+  str` 生成 Report 用的一句话（含 `local-restricted`、退出码、是否截断，不含 stdout 原文、
+  不含 "sandbox"）。
+- [ ] **Step 1: 写失败的测试**：`test_local_restricted_never_says_sandbox`——`inspect.getdoc`
+  取类文档、拒绝消息语料（allowlist 拒绝、cwd 拒绝）、`summary()` 三处都断言小写化后不含
+  `"sandbox"` 且含 `"local-restricted"`；`test_runner_delegates_to_command_runner`。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
+  Expected: FAIL — `ModuleNotFoundError: No module named 'stableagent.execution.sandbox'`。
+- [ ] **Step 3: 实现** `sandbox.py`。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: add the local-restricted runner without sandbox claims"`
+
+### Task 9: shell 语法拒绝与审计（步骤 2.9）
+
+**Files:**
+- Modify: `stableagent/execution/command.py`
+- Test: `tests/unit/test_command_runner.py`（追加 C6 用例）
+
+**Interfaces:**
+- Produces: `SHELL_METACHARACTERS`（`;`、`&`、`|`、`$`、反引号、换行、回车）；任一 argv 元素包含其一
+  → `denied_reason="shell_syntax"`、不 spawn、并经可注入的 `audit(request, reason)` 回调落
+  一次拒绝记录（默认 no-op；M3 接到 Report/审计）。`inspect.signature(CommandRunner.run)`
+  里没有 `shell` 形参（结构性）。
+- [ ] **Step 1: 写失败的测试**：表驱动注入语料 `["echo; rm -rf /", "a|b", "a&b", "a$HOME",
+  "`id`", "line\nbreak"]` 全部拒绝；audit 回调收到 6 次
+  `(request, "shell_syntax")`；`test_run_has_no_shell_switch`。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
+  Expected: FAIL — 首个语料 `echo; rm -rf /` 未被拒（`denied_reason is None`）。
+- [ ] **Step 3: 实现** 字符表 + 审计回调；`shell_syntax` 进 `errors.py` 的稳定码家族说明
+  （拒绝原因码表写进 `command.py` docstring）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: reject shell syntax at the command boundary"`
+
+### Task 10: `DockerRunner` 参数装配（步骤 2.10）
+
+**Files:**
+- Create: `stableagent/execution/docker.py`
+- Test: `tests/unit/test_sandbox.py`（追加 D2 用例）
+
+**Interfaces:**
+- Produces: `DockerRunner(image, *, allowlist, worktree_root, network_profiles: Mapping[str,
+  Sequence[str]], cpus=1.0, memory="512m", pids_limit=128, timeout_s=300.0)`；
+  `build_argv(request, *, network_profile: str | None = None) -> list[str]` 为纯函数：
+  `docker run --rm --network <none|profile 名> --read-only --tmpfs /tmp --pids-limit N
+  --memory M --cpus C --security-opt no-new-privileges --cap-drop ALL -v <worktree>:/workspace
+  -w /workspace -e ... <image> <argv...>`；结构性不出现 `--privileged`、docker socket 挂载、
+  `--net=host`。类 docstring 给 digest pin 指南（`image@sha256:...`）。
+- [ ] **Step 1: 写失败的测试**：`test_docker_argv_defaults_are_locked_down`（逐项断言
+  `--network none`、`--read-only`、`--pids-limit`、`--memory`、`--cpus`、
+  `no-new-privileges`、`--cap-drop ALL`、只挂本 worktree）；`test_docker_argv_never_contains_dangerous_flags`
+  （argv 全文不含 `--privileged`、`docker.sock`、`host` 网络）；`test_network_profile_only_when_defined`
+  （未定义 profile 抛 `CommandRejectedError`，定义后取 profile 名）。全部**不启动容器**。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
+  Expected: FAIL — `ModuleNotFoundError: No module named 'stableagent.execution.docker'`。
+- [ ] **Step 3: 实现** `docker.py`；镜像 pin 指南进 docstring（D2 的证据之一）。
+- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "feat: assemble locked-down docker run arguments"`
+
+### Task 11: Docker 测试双条件与 marker（步骤 2.11）
+
+**Files:**
+- Modify: `pyproject.toml`（`[tool.pytest.ini_options]` 增加 `markers`）
+- Create: `tests/integration/test_docker_runner.py`
+- Test: `tests/unit/test_sandbox.py`（追加 D3 用例）
+
+**Interfaces:**
+- Produces: marker `docker: 需要真实 Docker 守护进程（同时设置 STABLEAGENT_DOCKER=1 才运行）`；
+  `execution.docker.docker_tests_enabled(env: Mapping | None = None) -> bool`——两个条件
+  （`STABLEAGENT_DOCKER == "1"`）就位才返回真；集成用例 `pytestmark = [pytest.mark.docker,
+  pytest.mark.skipif(...)]`，skip 原因写明环境变量名。
+- [ ] **Step 1: 写失败的测试**：`test_docker_marker_is_registered`（读 `pyproject.toml` 断言
+  marker 文本在位——注册缺失时 `--strict-markers` 之外不报错，只能这样钉）；
+  `test_docker_tests_require_both_conditions`（`{}` → False、`{"STABLEAGENT_DOCKER": "1"}` →
+  True）；集成文件在默认环境下被 skip。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
+  Expected: FAIL — marker 未注册 / `docker_tests_enabled` 不存在。
+- [ ] **Step 3: 实现** marker 与开关函数。
+- [ ] **Step 4: 跑到绿**：`pytest -q -rs` 输出 skip 原因可见（`STABLEAGENT_DOCKER`），全量绿
+  （L8：核心门禁不受 Docker 可用性影响）+ 三口径门禁。
+- [ ] **Step 5: 提交**：`git commit -am "test: gate docker cases on a marker and an env var"`
+
+### Task 12: M2 出口——并发目录互不污染与账本回填（步骤 2.12）
+
+**Files:**
+- Create: `tests/integration/test_worktree_concurrency.py`
+- Modify: `docs/acceptance/p5-guarded-execution.md`（2.1~2.12 勾选 + C1~C8、D1~D3、L3/L7/L8
+  对应证据；第 3 节命令表补并发用例）
+- Test: 同文件
+
+**Interfaces:** 无新生产接口。
+- [ ] **Step 1: 写失败的测试**：`test_parallel_tickets_get_disjoint_worktrees`——同一仓库同一
+  base ref 的两个 Ticket 用 `asyncio.gather` 并发 prepare：目录名/分支名不同、
+  `git worktree list` 恰两行、两份 ownership 文件各自正确、互不覆盖；再并发跑两条命令，
+  stdout 各自只在自 worktree。
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/integration/test_worktree_concurrency.py`
+  Expected: FAIL — 首次运行暴露的共享状态（若无共享态则记为"一次即绿"，如实记录）。
+- [ ] **Step 3: 实现**：按红因修 `GitWorktreeManager`；若一次即绿，不改生产代码。
+- [ ] **Step 4: 跑到绿**：出口命令全套（第 3 节 + `pytest -q`、`mypy`、ruff 两口、L1 diff 0、
+  `service.py` diff 0、`execution/` 覆盖率逐个 ≥90%）。
+- [ ] **Step 5: 提交**：`git add -A && git commit -m "feat: close p5 m2 with parallel worktree evidence"`
