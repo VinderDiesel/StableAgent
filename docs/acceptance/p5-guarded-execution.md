@@ -328,6 +328,9 @@
       `Store.get_mandate`，读回的对象与"只给 6 个原字段构造的 `Mandate`"逐字段相等
       （`actions=[]`、`requires_approval=False`、五个可空字段 `None`）——旧行不回写、语义不变；
       `test_p4_local_mandate_roundtrip_unchanged` 覆盖新建的本地 Mandate 路径。
+      M1 出口后维护者确认（2026-11-04，M2 分支首笔）：`Mandate` 收紧 `extra="forbid"`——
+      授权字段拼错（如 `allowed_command=`）从"静默丢字段"变为 `ValidationError`，`test_mandate_rejects_unknown_fields`
+      钉死；P4 其余记录保持宽松，本行只记 Mandate 一处的例外与理由（静默丢字段等于悄悄改授权面）。
 - [x] **A2** 只有 `control.policy` 能构造 `p5-v1` Mandate（构造入口扫描 + 行为用例）。
       进度（2026-11-04，Task 4 字段形状半边）：`p5-v1` 的 17 字段形状已由满配往返用例钉死；
       "唯一构造入口 = `control.policy.create_mandate`"的行为用例属 Task 5，构造入口扫描属 Task 8。
