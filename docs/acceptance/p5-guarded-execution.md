@@ -3,7 +3,8 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 0/46、里程碑步骤 0/40**。
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 0/46、里程碑步骤 1/40（M1 1/9）**，
+> 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
 > 验收账本（第 0、2 节）。每个可勾选事项写明来源、验证方法或命令、证据占位；全部勾选且第 3 节
@@ -22,6 +23,8 @@
       `control/execution/integrations` 的 import；方向只能是
       integrations → execution → control → orchestration → core。
       验证：`test_orchestration_boundaries.py` AST 矩阵扩展。来源：ADR-05 决策 1。
+      进度（2026-11-04，Task 1 前半）：`tests/unit/test_control_boundaries.py` 落位（版本常量 +
+      顶层不重导出 + 错误家族三用例）；四旧包 × 三新包的 AST 方向矩阵收口属 Task 8（步骤 1.8）。
 - [ ] **L3 事务不变式（含新表）**：`Store.transaction()` 内禁止 `await`；授权判定、审批状态、
       Mandate+Ticket+effect 的原子写入全部在同步段完成，外部 I/O 在提交后。
       验证：源码扫描测试 + 崩溃注入用例。来源：ADR-04 决策 3、ADR-05 决策 3。
@@ -43,8 +46,21 @@
 
 ### M1：结构化授权落地（规格 WP-5.1；ADR-05 决策 1/2/3/10）
 
-- [ ] **1.1** `control/` 包骨架：`CONTROL_SCHEMA_VERSION = "0.1.0"` 不进顶层重导出；
+- [x] **1.1** `control/` 包骨架：`CONTROL_SCHEMA_VERSION = "0.1.0"` 不进顶层重导出；
       `errors.py` 稳定 `.code` 错误家族。验证：包导入测试 + 顶层 `__init__` 无新增导出。
+      证据（2026-11-04，Task 1，提交 `76538e7`）：`stableagent/control/__init__.py` 的 Phase 6 占位
+      docstring 换为 P5 控制平面口径（"授权事实源在 Store、判定逻辑在本包、不顶层重导出"）+
+      `CONTROL_SCHEMA_VERSION`；`errors.py` = `ControlError(ValueError)` 基类 + 8 个子类
+      （`control.admission_rejected`/`unknown_mandate`/`unknown_approval`/`approval_decided`/
+      `stale_approval`/`mandate_expired`/`not_granted`/`revalidation_failed`）。
+      `pytest -q --no-cov tests/unit/test_control_boundaries.py` = `3 passed`；全量 `pytest -q` =
+      `436 passed, 1 skipped`，`stableagent/control/*` 覆盖率 100%（3 + 32 stmts，0 miss）；
+      `mypy` = `Success: no issues found in 37 source files`，`ruff check stableagent tests examples
+      benchmarks` = `All checks passed!`，`ruff format --check` = `89 files already formatted`；
+      L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行。
+      Step 2 实测红因与计划偏差：占位包 `stableagent/control/` 自 2026-10-30 起已在库中，
+      红为 `ImportError: cannot import name 'CONTROL_SCHEMA_VERSION'`（非计划预期的
+      `ModuleNotFoundError: stableagent.control`）。
 - [ ] **1.2** `schema_migrations` 追加 `p5-control-v1`：`mandates` 兼容加 10 列（全带默认值）、
       新建 `approval_requests`、`authorization_audit`。验证：旧 P4 库文件升级后可读、
       旧行语义不变（A1）。
@@ -231,7 +247,8 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：待执行。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为 **9 个 Task / 45 个 Step**。
+> **状态：执行中（Task 1 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
 > **兼容性扩展**（加列迁移、Mandate 加默认字段、Store 加方法），Scheduler/Service/Outbox
@@ -279,17 +296,22 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
   `NotGrantedError(action, mandate_id)`→`control.not_granted`、
   `RevalidationFailedError(when, mandate_id)`→`control.revalidation_failed`。
 
-- [ ] **Step 1: 写失败的测试**——`tests/unit/test_control_boundaries.py`：
+- [x] **Step 1: 写失败的测试**——`tests/unit/test_control_boundaries.py`：
       `test_control_version_is_independent_and_not_reexported`（常量等值 + `"ControlError" not in
       dir(stableagent)`）；`test_control_error_code_inventory_is_unique_and_prefixed`（对照 P4 同名
       用例：全部 `.code` 以 `control.` 开头、tail 为小写 snake_case、互不重复、类集合恰好 =
       基类 + 8 个子类）；`test_control_error_bases_valueerror`。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_control_boundaries.py`
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_control_boundaries.py`
       Expected: FAIL — `ModuleNotFoundError: stableagent.control`
-- [ ] **Step 3: 实现**两个文件（docstring 写明"授权事实源在 Store，判定逻辑在本包"）。
-- [ ] **Step 4: 跑到绿**：同命令 PASS + `.venv/bin/pytest -q` 全量不红。
-- [ ] **Step 5: 提交**：`git add stableagent/control/ tests/unit/test_control_boundaries.py`
+      Actual: FAIL — `ImportError: cannot import name 'CONTROL_SCHEMA_VERSION' from
+      'stableagent.control'`（占位包 2026-10-30 起已存在，见步骤 1.1 证据）
+- [x] **Step 3: 实现**两个文件（docstring 写明"授权事实源在 Store，判定逻辑在本包"）。
+- [x] **Step 4: 跑到绿**：同命令 PASS + `.venv/bin/pytest -q` 全量不红。
+      Actual：目标文件 `3 passed`；全量 `436 passed, 1 skipped`；`mypy` / `ruff check` /
+      `ruff format --check` 全绿。
+- [x] **Step 5: 提交**：`git add stableagent/control/ tests/unit/test_control_boundaries.py`
       `&& git commit -m "feat: open the control package with its own version and stable codes"`
+      Actual: `76538e7`（3 files, +147 −1）。
 
 ### Task 2: Store 迁移 `p5-control-v1`——加列与两新表（步骤 1.2）
 
