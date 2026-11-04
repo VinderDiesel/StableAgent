@@ -39,7 +39,11 @@ def request_digest(text: str) -> str:
 
 
 class StaticPolicyConfig(BaseModel):
-    """operator 一次性写定的配置。集合字段默认空，即"什么都不允许"（deny-first）。"""
+    """operator 一次性写定的配置。集合字段默认空，即"什么都不允许"（deny-first）。
+
+    `policy_version` 是这一版配置的口径标签：它写进产出的 Mandate，也是审计行的版本快照来源
+    （Task 6：快照记的是"决策当刻生效的策略版本"，不是 Mandate 自述的版本）。
+    """
 
     repository: str
     actors: frozenset[str] = frozenset()
@@ -48,6 +52,7 @@ class StaticPolicyConfig(BaseModel):
     allowed_mcp: list[str] = Field(default_factory=list)
     network_profiles: dict[str, list[str]] = Field(default_factory=dict)
     default_validity_ms: int = Field(ge=1)
+    policy_version: str = P5_POLICY_VERSION
 
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
@@ -62,6 +67,11 @@ class StaticPolicy:
         self._config = config
         self._clock = clock
         self._ids = ids
+
+    @property
+    def policy_version(self) -> str:
+        """本实例的口径版本：审计快照与 Mandate 打版都取这一个值，不看被判定对象的自述。"""
+        return self._config.policy_version
 
     def admit_explicit(self, request: ExplicitRequest) -> Admission:
         """四道门：actor 白名单 → 显式 mention → 仓库精确匹配 → 生成请求摘要。
@@ -101,7 +111,8 @@ class StaticPolicy:
         base_ref: str | None = None,
         requires_approval: bool = False,
     ) -> Mandate:
-        """唯一的 `p5-v1` Mandate 构造点（A2）：产出一定是 config 的子集，且不含 auto merge。"""
+        """唯一的 P5 Mandate 构造点（A2）：版本是 config 的口径标签（默认 `p5-v1`），
+        产出一定是 config 的子集，且不含 auto merge。"""
         if not admission.admitted:
             raise AdmissionRejectedError(f"request_not_admitted:{admission.reason_code}")
         requested = {item.value if isinstance(item, Action) else item for item in actions}
@@ -124,7 +135,7 @@ class StaticPolicy:
             origin_kind="github",
             requester=admission.requester,
             scope=admission.stable_id,
-            policy_version=P5_POLICY_VERSION,
+            policy_version=self.policy_version,
             granted_at=granted_at,
             repository=admission.repository,
             base_ref=base_ref,
@@ -151,7 +162,7 @@ class StaticPolicy:
         """动作执行前的复检：版本漂移优先于过期（漂移意味着 Mandate 不属于本 Policy）。"""
         if when not in REVALIDATE_TIMINGS:
             raise RevalidationFailedError(when, mandate.id)
-        if mandate.policy_version != P5_POLICY_VERSION:
+        if mandate.policy_version != self.policy_version:
             return self._decision(mandate, False, "policy_version_drift")
         if self._is_expired(mandate):
             return self._decision(mandate, False, "mandate_expired")

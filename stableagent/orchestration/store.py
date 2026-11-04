@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from stableagent.orchestration import ORCHESTRATION_SCHEMA_VERSION
 from stableagent.orchestration.errors import ReentrantTransactionError
@@ -335,6 +336,125 @@ class Store:
     def get_mandate(self, mandate_id: str) -> Mandate | None:
         row = self._conn.execute("SELECT * FROM mandates WHERE id = ?", (mandate_id,)).fetchone()
         return _row_to_mandate(row) if row else None
+
+    # P5 授权侧（ADR-05 决策 3）：审批与审计行的读写。参数一律是列名 + 原语，本模块不认识
+    # `control.model` 的 Action/Decision——依赖方向是 control → orchestration（L2），所以
+    # 枚举取值、词汇表校验都由 control 的调用方负责；读侧返回行字典，映射回模型同样归 control。
+
+    def insert_audit(
+        self,
+        *,
+        id: str,
+        kind: str,
+        policy_version: str,
+        decision: str,
+        reason: str,
+        created_at: int,
+        ticket_id: str | None = None,
+        assignment_id: str | None = None,
+        mandate_id: str | None = None,
+        action: str | None = None,
+        resource_digest: str | None = None,
+    ) -> None:
+        """写一行授权审计（追加式，无 UPDATE 路径）。`action` 槽按 kind 取值：
+        `authorize`/`approve` 存动作名，`revalidate` 存复检时机名，`admit` 留空。
+        """
+        self._conn.execute(
+            "INSERT INTO authorization_audit"
+            " (id, kind, ticket_id, assignment_id, mandate_id, action, resource_digest,"
+            " policy_version, decision, reason, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                id,
+                kind,
+                ticket_id,
+                assignment_id,
+                mandate_id,
+                action,
+                resource_digest,
+                policy_version,
+                decision,
+                reason,
+                created_at,
+            ),
+        )
+
+    def list_audit(
+        self, *, ticket_id: str | None = None, kind: str | None = None
+    ) -> list[dict[str, Any]]:
+        clauses, params = [], []
+        if ticket_id is not None:
+            clauses.append("ticket_id = ?")
+            params.append(ticket_id)
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM authorization_audit {where} ORDER BY created_at ASC, id ASC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def insert_approval(
+        self,
+        *,
+        id: str,
+        ticket_id: str,
+        action: str,
+        resource_digest: str,
+        reason: str,
+        requested_at: int,
+        assignment_id: str | None = None,
+        status: str = "pending",
+        decided_by: str | None = None,
+        decided_at: int | None = None,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO approval_requests"
+            " (id, ticket_id, assignment_id, action, resource_digest, reason, requested_at,"
+            " status, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                id,
+                ticket_id,
+                assignment_id,
+                action,
+                resource_digest,
+                reason,
+                requested_at,
+                status,
+                decided_by,
+                decided_at,
+            ),
+        )
+
+    def update_approval(
+        self, approval_id: str, *, status: str, decided_by: str | None, decided_at: int | None
+    ) -> int:
+        """审批终态写入；返回受影响行数，0 表示 id 不存在（调用方判成未知审批）。"""
+        cursor = self._conn.execute(
+            "UPDATE approval_requests SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            (status, decided_by, decided_at, approval_id),
+        )
+        return cursor.rowcount
+
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM approval_requests WHERE id = ?", (approval_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_approvals(self, ticket_id: str, *, status: str | None = None) -> list[dict[str, Any]]:
+        clauses, params = ["ticket_id = ?"], [ticket_id]
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        rows = self._conn.execute(
+            f"SELECT * FROM approval_requests WHERE {' AND '.join(clauses)}"
+            " ORDER BY requested_at ASC, id ASC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def insert_ticket(self, ticket: Ticket) -> None:
         self._conn.execute(
