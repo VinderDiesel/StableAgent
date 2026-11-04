@@ -3,7 +3,7 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 0/46、里程碑步骤 3/40（M1 3/9）**，
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 1/46、里程碑步骤 4/40（M1 4/9）**，
 > 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
@@ -99,8 +99,19 @@
       （64 hex）；改 action / 改 path / 改 extra 值 / 改 `kind` 各得不同 digest；
       13 成员顺序钉死；缺 `ticket_id` 或缺 `resource_digest` → `ValidationError`；
       `Admission`/`Decision` 字段形状。`control/model.py` 覆盖率 100%（58 stmts，0 miss）。
-- [ ] **1.4** Mandate 读写：`p5-v1` 新字段全量落库与还原；`p4-local-v1` 旧行缺省读取。
+- [x] **1.4** Mandate 读写：`p5-v1` 新字段全量落库与还原；`p4-local-v1` 旧行缺省读取。
       验证：往返单测。来源：ADR-05 决策 2。
+      证据（2026-11-04，Task 4，提交 `9207146`）：`Mandate` 的 `origin_kind` 扩为
+      `Literal["local", "github"]`（默认 `"local"`）+ 11 个新字段全带默认值；
+      `insert_mandate` INSERT 参数 6 → 17 列，`_row_to_mandate` 读满 17 列。
+      写入口径：四个列表列经 `_mandate_list` 规范化为**升序 + 规范化 JSON**（`sorted` 后再
+      `json.dumps(sort_keys=True, ensure_ascii=False)`）——授权集来自 `frozenset`，不排序则同一
+      Mandate 两次落库字节不同、审计比对失去意义；`test_mandate_list_columns_are_sorted_on_write`
+      同时钉死库内原文 `actions == '["a", "b"]'`。`requires_approval` 写 `int`、读回 `bool`。
+      `tests/unit/test_mandate_extension.py` = `4 passed`（p5 满配往返逐字段等、p4 旧 6 字段往返、
+      旧库升级行经模型读取、列表列排序口径）；`tests/unit/test_orchestration_store.py` +
+      `test_control_migration.py` 回归 `27 passed`；全量 `449 passed, 1 skipped`，
+      `store.py` 覆盖率 100%（163 stmts，0 miss）；A1 同批勾选。
 - [ ] **1.5** `StaticPolicy`：单仓库 + actor allowlist + 明确 mention + 预定义 action 集合 +
       默认拒绝集（任意 shell、全网访问、未列入的 MCP server/tool 均拒）。验证：判定矩阵单测。
 - [ ] **1.6** 审计落库：admit/authorize/revalidate/approve/deny 每决策一行，含
@@ -196,11 +207,17 @@
 
 ### A 授权与 Mandate 持久化（M1）
 
-- [ ] **A1** 旧 P4 库升级后 `p4-local-v1` Mandate 行缺省可读、语义不变、不回写。
-      进度（2026-11-04，Task 2 升级半边）：`test_legacy_p4_database_upgrades_without_touching_rows`
-      已断言旧行 6 字段逐等 + `policy_version` 不回写 + 新列取默认值；
-      "缺省可读"的模型往返半边属 Task 4（步骤 1.4）。
+- [x] **A1** 旧 P4 库升级后 `p4-local-v1` Mandate 行缺省可读、语义不变、不回写。
+      证据（2026-11-04，Task 2 升级半边 + Task 4 往返半边，提交 `0e92dbd`/`9207146`）：
+      `test_legacy_p4_database_upgrades_without_touching_rows` 断言旧行 6 个原字段逐等、
+      `policy_version` 仍为 `p4-local-v1`、11 个新列取默认值；
+      `test_upgraded_legacy_row_reads_through_the_model_with_defaults` 用同一旧库文件走
+      `Store.get_mandate`，读回的对象与"只给 6 个原字段构造的 `Mandate`"逐字段相等
+      （`actions=[]`、`requires_approval=False`、五个可空字段 `None`）——旧行不回写、语义不变；
+      `test_p4_local_mandate_roundtrip_unchanged` 覆盖新建的本地 Mandate 路径。
 - [ ] **A2** 只有 `control.policy` 能构造 `p5-v1` Mandate（构造入口扫描 + 行为用例）。
+      进度（2026-11-04，Task 4 字段形状半边）：`p5-v1` 的 17 字段形状已由满配往返用例钉死；
+      "唯一构造入口 = `control.policy.create_mandate`"的行为用例属 Task 5，构造入口扫描属 Task 8。
 - [ ] **A3** admit/authorize/revalidate/approve/deny 全部结构化落审计表，含 policy_version。
 - [ ] **A4** 六个 revalidate 时机逐个先于动作执行，时机清单以测试矩阵固化。
 - [ ] **A5** 默认拒绝集生效：auto merge、任意 shell、全网访问、未列入 MCP server/tool。
@@ -285,7 +302,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：执行中（Task 1~3 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **状态：执行中（Task 1~4 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
 > **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
@@ -455,17 +472,25 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
   `origin_kind` 的 Literal 扩为 `Literal["local", "github"]`（默认仍 `"local"`）。
   Store 写读 JSON 列表列（`sort_keys=True, ensure_ascii=False`，沿用 report details 先例）。
 
-- [ ] **Step 1: 写失败的测试**——
+- [x] **Step 1: 写失败的测试**——
       `test_p5_mandate_roundtrip_keeps_every_field`（含 `policy_version="p5-v1"`、11 个新字段
       的满配构造 → 落库 → 读回逐字段相等）；
       `test_p4_local_mandate_roundtrip_unchanged`（旧 6 字段构造，新字段读为默认——A1 往返半边）；
       `test_mandate_ids_list_is_sorted_on_write`（写 `["b","a"]` 读回 `["a","b"]` 或原样——
-      以实现口径为准，钉死其一并断言）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_mandate_extension.py`
+      以实现口径为准，钉死其一并断言）——定为**写入前升序**，测试名 `test_mandate_list_columns_are_sorted_on_write`。
+      追加第 4 用例 `test_upgraded_legacy_row_reads_through_the_model_with_defaults`：复用 Task 2 的旧库构造经 `Store.get_mandate` 读回，A1 就此收口。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_mandate_extension.py`
       Expected: FAIL — `TypeError`/`ValidationError`（Mandate 无新字段）
-- [ ] **Step 3: 实现**：model 加字段 + store 两个读写函数扩列（INSERT 参数从 6 → 17）。
-- [ ] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_orchestration_store.py` 回归。
-- [ ] **Step 5: 提交**：`git commit -am "feat: carry p5 authorization fields on mandates"`
+      Actual: FAIL — `3 failed, 1 passed`，红为 `AttributeError: 'Mandate' object has no
+      attribute 'actions'`：pydantic v2 默认 `extra='ignore'`，满配构造里的新字段被静默丢弃，
+      红暴露在读取侧而非构造侧。第 4 用例（旧库经模型读默认值）天然先绿。
+- [x] **Step 3: 实现**：model 加字段 + store 两个读写函数扩列（INSERT 参数从 6 → 17）。
+- [x] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_orchestration_store.py` 回归。
+      Actual：目标文件 `4 passed`；连同 `test_orchestration_store.py` +
+      `test_control_migration.py` = `27 passed`；全量 `449 passed, 1 skipped`；
+      `mypy` / `ruff check` / `ruff format --check`（93 files）全绿；L1 core diff 仍 0 行。
+- [x] **Step 5: 提交**：`git commit -am "feat: carry p5 authorization fields on mandates"`
+      Actual: `9207146`（`orchestration/model.py` + `orchestration/store.py` + 新测试）。
 
 ### Task 5: `StaticPolicy` 与默认拒绝集（步骤 1.5）
 
