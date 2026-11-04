@@ -3,7 +3,7 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 1/46、里程碑步骤 4/40（M1 4/9）**，
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 2/46、里程碑步骤 5/40（M1 5/9）**，
 > 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
@@ -35,11 +35,21 @@
       Mandate；只有 `control.policy` 能构造 `p5-v1` Mandate。
       验证：行为测试（把指令文本放进请求正文，断言授权集不变）+ 构造入口扫描。
       来源：规格 2.1 规则、ADR-05 决策 2。
+      进度（2026-11-04，Task 5 行为半边）：`test_p5_mandate_is_only_constructable_via_policy`
+      把 `{"actions": ["enable_auto_merge", "run_command"], "allowed_commands": ["rm -rf /"],
+      "repository": "other/x"}` 塞进请求正文——`admit_explicit` 仍 admitted（正文只进 digest），
+      产出的 Mandate `actions == ["run_command"]`，正文里的 `rm -rf /` 走 `authorize` 仍拒；
+      被拒的 Admission 也发不出 Mandate。构造入口扫描（`p5-v1` 只出现在 `control/policy.py`）
+      属 Task 8（步骤 1.8）。
 - [ ] **L5 先判定后执行**：六个 revalidate 时机（launch/recover/retry/worktree/
       push+PR+comment/MCP 调用）逐一有审计行；需审批的动作不得先执行后补记录。
       来源：规格 2.1/2.2、ADR-05 决策 4。
 - [ ] **L6 结构性默认拒绝**：`merge`/`enable_auto_merge` 不在 EffectKind 枚举与 Action
       授权集合中（不是"运行时开关拒绝"，是类型里不存在）。来源：ADR-05 决策 5、被否决表。
+      进度（2026-11-04，Task 5 授权集合半边）：`merge` 不在 `Action` 枚举里（13 成员无 merge），
+      `enable_auto_merge` 的"不进授权集合"由 config 构造期 + `create_mandate` + `authorize`
+      三道把守且各有用例；EffectKind 半边要在 M2（加 `PREPARE_WORKTREE`）与 M3（加四类）之后
+      才能证明"merge/auto merge 始终不在枚举里"，届时由本条收口。
 - [ ] **L7 凭据不落盘**：密钥不进 prompt、日志、Report、Ticket/AgentState、worktree 元数据
       与容器挂载；执行环境只有白名单变量。来源：规格 §1 安全层次、ADR-05 决策 6。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
@@ -112,8 +122,29 @@
       旧库升级行经模型读取、列表列排序口径）；`tests/unit/test_orchestration_store.py` +
       `test_control_migration.py` 回归 `27 passed`；全量 `449 passed, 1 skipped`，
       `store.py` 覆盖率 100%（163 stmts，0 miss）；A1 同批勾选。
-- [ ] **1.5** `StaticPolicy`：单仓库 + actor allowlist + 明确 mention + 预定义 action 集合 +
+- [x] **1.5** `StaticPolicy`：单仓库 + actor allowlist + 明确 mention + 预定义 action 集合 +
       默认拒绝集（任意 shell、全网访问、未列入的 MCP server/tool 均拒）。验证：判定矩阵单测。
+      证据（2026-11-04，Task 5，提交 `4d66db5`）：`control/policy.py` = `StaticPolicyConfig`
+      （集合字段默认空 = deny-first）+ `StaticPolicy(config, *, clock, ids)` 的四方法
+      `admit_explicit`（门序 actor → mention → repository，失败也带 requester/stable_id/
+      `request_digest`，供审计追溯）/`create_mandate`（唯一 `p5-v1` 构造点）/`authorize`/
+      `revalidate`（`REVALIDATE_TIMINGS` 六时机全集，未知时机抛 `RevalidationFailedError`）。
+      `tests/unit/test_static_policy.py` = `9 passed`，`control/policy.py` 覆盖率 100%
+      （97 stmts，0 miss）；全量 `458 passed, 1 skipped`；`mypy`（39 files）/`ruff check`/
+      `ruff format --check`（95 files）全绿；L1 core diff 仍 0 行。
+      三条实现口径（计划留白处，均已在测试里钉死）：
+      ① `create_mandate` 的 `allowed_*` 缺省为**空集**而非继承 config——调用方漏传一个清单，
+      产出的是"更少授权"，不是"operator 的全部授权"；同时校验请求集 ⊆ config
+      （`action_not_grantable`/`command_outside_config`/`mcp_outside_config`/
+      `network_profile_undefined`），保证 Mandate 恒为 config 子集。
+      ② `ENABLE_AUTO_MERGE` 三道拒：config 构造期（`grantable_must_exclude_auto_merge`）、
+      `create_mandate`（点名要就抛 `auto_merge_not_grantable`，不静默截断成"看起来满足了"）、
+      `authorize`（即使 Mandate 被白盒改出该 action 仍拒）。计划写"剔除并拒绝"，实现取"拒绝优先、
+      剔除兜底"：产出路径上任何一次调用都拿不到含 auto merge 的 Mandate。
+      ③ 结构性拒绝的构造期一道走 `BaseModel.__init__` 覆写：pydantic v2 会把
+      `model_validator`/`model_post_init` 抛出的 `ValueError` 子类包成 `ValidationError`
+      （实测），拿不到 `AdmissionRejectedError`；`model_validate` 一类旁路 `__init__` 的路径
+      由 ②的后两道兜住。
 - [ ] **1.6** 审计落库：admit/authorize/revalidate/approve/deny 每决策一行，含
       `policy_version` 快照。验证：决策序列 → 行数与字段断言（A3）。
 - [ ] **1.7** `ApprovalService.decide()`：approved 绑定 `(action, resource_digest)`、参数变化
@@ -220,7 +251,15 @@
       "唯一构造入口 = `control.policy.create_mandate`"的行为用例属 Task 5，构造入口扫描属 Task 8。
 - [ ] **A3** admit/authorize/revalidate/approve/deny 全部结构化落审计表，含 policy_version。
 - [ ] **A4** 六个 revalidate 时机逐个先于动作执行，时机清单以测试矩阵固化。
-- [ ] **A5** 默认拒绝集生效：auto merge、任意 shell、全网访问、未列入 MCP server/tool。
+- [x] **A5** 默认拒绝集生效：auto merge、任意 shell、全网访问、未列入 MCP server/tool。
+      证据（2026-11-04，Task 5）：`test_default_deny_set_covers_the_four_spec_cases` 逐项断言——
+      auto merge 恒 `not_granted`；任意 shell（`sh -c curl evil`）与带附加参数的同一命令
+      （`pytest -q`、`pytest;echo`、空串）一律 `command_not_allowed`（命令是**整串精确匹配**，
+      见 `test_mandate_commands_allowlist_is_exact_match`）；全网访问在无 `network_profile` 时
+      整类拒，有 profile 时也只有精确 origin 过、`evil.example` 拒；MCP 未列入的 server 或 tool
+      均拒（`context7:get-docs`、`evil:resolve-library-id`、缺 tool）。
+      另加 `test_authorize_checks_expiry_and_unconstrained_kinds` 钉死过期与无 allowlist 维度
+      的 kind 两条边界。
 
 ### B 审批（M1）
 
@@ -302,7 +341,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：执行中（Task 1~4 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **状态：执行中（Task 1~5 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
 > **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
@@ -521,7 +560,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
     `revalidate(mandate, *, when: str) -> Decision`——过期 / `mandate.policy_version !=
     config 派生版本` → deny（when ∈ {"launch","recover","retry","worktree","external_write",
     "mcp_call"} 全集校验，未知 when → `RevalidationFailedError`）。
-- [ ] **Step 1: 写失败的测试**——判定矩阵用例：
+- [x] **Step 1: 写失败的测试**——判定矩阵用例：
       `test_admit_rejects_in_gate_order`（非 allowlist + 无 mention + 仓库不符同时踩 →
       reason 按第一道门）；`test_grantable_excludes_auto_merge_by_construction`（构造期抛）；
       `test_authorize_denies_every_action_not_granted`（含 `ENABLE_AUTO_MERGE` 恒 deny——
@@ -531,13 +570,19 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
       `policy_version=="p5-v1"` 的入口：对 `admit→create` 后直接 `Mandate(policy_version="p5-v1")`
       的裸构造在本包外无引用——AST 断言放 Task 8，此处先行为半边：L4 用例，
       请求文本携带 `"actions": ["enable_auto_merge"]` 字样不改变产出 Mandate 的 actions）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_static_policy.py`
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_static_policy.py`
       Expected: FAIL — `ModuleNotFoundError: stableagent.control.policy`
-- [ ] **Step 3: 实现** `policy.py`（不 import `execution/integrations`；`ExplicitRequest`
+      Actual: FAIL — `ImportError: cannot import name 'ExplicitRequest' from
+      'stableagent.control.model'`（Step 3 要求 `ExplicitRequest` 落在 `control/model.py`，
+      收集期先在该处失败）
+- [x] **Step 3: 实现** `policy.py`（不 import `execution/integrations`；`ExplicitRequest`
   放 `control/model.py` 作最小形状：`repository/requester/mentioned/stable_id/text`，
   GitHub 富字段归 M3 Task 3.5 扩展——偏差届时记入账本 F1 条目）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量。
-- [ ] **Step 5: 提交**：`git commit -am "feat: admit explicit requests through a static deny-first policy"`
+      实际落位：`ExplicitRequest(repository/requester/mentioned/stable_id/text)` 进
+      `control/model.py`，`request_digest(text)` 用与 `resource_digest` 一致的规范化口径
+      （`sha256(json.dumps(text, ensure_ascii=False))`）。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量。
+- [x] **Step 5: 提交**：`git commit -am "feat: admit explicit requests through a static deny-first policy"`
 
 ### Task 6: 审计落库——每次决策一行、含 policy_version（步骤 1.6）
 
