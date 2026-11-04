@@ -46,6 +46,19 @@ class Resource(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExplicitRequest(BaseModel):
+    """受理门的最小输入形状：GitHub 富字段（issue/PR/comment URL、source ID）归 M3 扩展。
+
+    `text` 是外部文本，只进 `request_digest`，绝不参与判定（L4）。
+    """
+
+    repository: str
+    requester: str
+    mentioned: bool
+    stable_id: str
+    text: str
+
+
 class Admission(BaseModel):
     """受理门的结果：失败也带稳定 reason_code，便于审计与回写文案。"""
 
