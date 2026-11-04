@@ -3,7 +3,7 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 2/46、里程碑步骤 5/40（M1 5/9）**，
+> 执行从 M1 任务级计划（第 5 节，开工前追加）开始；当前 **DoD 3/46、里程碑步骤 6/40（M1 6/9）**，
 > 分支 `feat/p5-m1-control-plane` 自 2026-11-04 起按 Task 推进。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
@@ -44,6 +44,9 @@
 - [ ] **L5 先判定后执行**：六个 revalidate 时机（launch/recover/retry/worktree/
       push+PR+comment/MCP 调用）逐一有审计行；需审批的动作不得先执行后补记录。
       来源：规格 2.1/2.2、ADR-05 决策 4。
+      进度（2026-11-04，Task 6 审计形状半边）：`revalidate` 判定已有对应审计行，行内
+      `action` 槽记时机名（六时机在数据上可区分，不另加列）；"逐一先于动作执行"的接线
+      与时机矩阵属 M2（worktree）/M3（其余五处），由 A4 收口。
 - [ ] **L6 结构性默认拒绝**：`merge`/`enable_auto_merge` 不在 EffectKind 枚举与 Action
       授权集合中（不是"运行时开关拒绝"，是类型里不存在）。来源：ADR-05 决策 5、被否决表。
       进度（2026-11-04，Task 5 授权集合半边）：`merge` 不在 `Action` 枚举里（13 成员无 merge），
@@ -145,8 +148,28 @@
       `model_validator`/`model_post_init` 抛出的 `ValueError` 子类包成 `ValidationError`
       （实测），拿不到 `AdmissionRejectedError`；`model_validate` 一类旁路 `__init__` 的路径
       由 ②的后两道兜住。
-- [ ] **1.6** 审计落库：admit/authorize/revalidate/approve/deny 每决策一行，含
+- [x] **1.6** 审计落库：admit/authorize/revalidate/approve/deny 每决策一行，含
       `policy_version` 快照。验证：决策序列 → 行数与字段断言（A3）。
+      证据（2026-11-04，Task 6，提交 `e4be18a`）：`tests/unit/test_authorization_audit.py`
+      4 用例全绿（`462 passed, 1 skipped`，总覆盖 99.1%，`store.py` 与 `control/*.py` 全 100%）。
+      三处实现取向记为偏差：
+      ① 快照来源是**决策当刻生效的策略版本**（`StaticPolicy.policy_version`），不是被判定
+      Mandate 的自述版本——用例让 p5-v1 策略判定一份自称 `p4-local-v1` 的 Mandate，行里仍记
+      `p5-v1`，否则版本漂移在审计上会表现为"两行版本一致"的假象。为此 `StaticPolicyConfig`
+      新增 `policy_version`（默认 `p5-v1`，Task 5 默认路径逐字等价），`create_mandate` 打版与
+      `revalidate` 漂移判定同读该值：版本标签必须由配置侧携带，否则计划用例里"两个不同 config
+      实例"这一维度在实现中根本不存在。
+      ② `authorization_audit` 的 `action` 槽按 kind 取值：authorize/approve 存动作名，
+      revalidate 存 `REVALIDATE_TIMINGS` 之一，admit 留空。11 列契约由 Task 2 的
+      `test_new_tables_have_the_authorization_columns` 按 ADR-05 决策 3 钉死，六时机的可区分性
+      不加列解决。
+      ③ Store 侧六个仓储方法收**列名 + 原语**、读侧返回行字典（不返回 `control.model` 类型）：
+      `orchestration` 不得 import `control`（L2 方向锁），枚举取值与词汇表校验归 control 调用方。
+      `AuditWriter` 四方法各写恰好 1 条 INSERT 且**不自开事务**（单语句由 sqlite3 自动提交保证
+      原子，调用方已在 `store.transaction()` 内时不会重入——L3 的写入半边），并追加
+      `*, ticket_id=None, assignment_id=None` 可选关键字（`decided` 从 approval 取），否则
+      `list_audit(ticket_id=)` 是死过滤器。第 4 用例为计划 3 例之外的追加，覆盖 Task 7 依赖的
+      审批行读写与过滤口径。
 - [ ] **1.7** `ApprovalService.decide()`：approved 绑定 `(action, resource_digest)`、参数变化
       即失效、denied → blocked/failed 不可绕过、Ticket 取消同事务撤 pending。验证：B1~B4 用例。
 - [ ] **1.8** L2 边界测试扩展：三新包 × 四旧包 AST 方向矩阵。验证：故意 import 的红测 + 常驻。
@@ -249,7 +272,17 @@
 - [ ] **A2** 只有 `control.policy` 能构造 `p5-v1` Mandate（构造入口扫描 + 行为用例）。
       进度（2026-11-04，Task 4 字段形状半边）：`p5-v1` 的 17 字段形状已由满配往返用例钉死；
       "唯一构造入口 = `control.policy.create_mandate`"的行为用例属 Task 5，构造入口扫描属 Task 8。
-- [ ] **A3** admit/authorize/revalidate/approve/deny 全部结构化落审计表，含 policy_version。
+- [x] **A3** admit/authorize/revalidate/approve/deny 全部结构化落审计表，含 policy_version。
+      证据（2026-11-04，Task 6）：`AuditWriter.admitted/authorized/revalidated/decided` 各写
+      1 行 `authorization_audit`，`kind ∈ {admit, authorize, revalidate, approve}`、
+      `decision ∈ {allow, deny}`（deny 是 decision 取值，不是第五个 kind），11 列齐全且
+      `created_at` 由注入时钟给出；`reason` 为稳定码——`test_audit_reason_is_stable_code_not_free_text`
+      对四行 deny 逐一 `^[a-z][a-z0-9_]*$` 全匹配（`actor_not_allowlisted`/`not_granted`/
+      `command_not_allowed`/`mandate_expired`），并断言请求正文里的自由文本不出现在表里（L4）；
+      `policy_version` 写决策当刻的策略版本快照——`test_audit_snapshots_policy_version`：两个
+      config 实例先后决策 → 两行版本不同，且后续换策略只新增行、不改已有行的快照。
+      本条只证明落库面与形状：真实调用点（六时机 + 审批门）在 M2/M3 接线，见对照表第 6 行
+      "审计先于接线"的口径。
 - [ ] **A4** 六个 revalidate 时机逐个先于动作执行，时机清单以测试矩阵固化。
 - [x] **A5** 默认拒绝集生效：auto merge、任意 shell、全网访问、未列入 MCP server/tool。
       证据（2026-11-04，Task 5）：`test_default_deny_set_covers_the_four_spec_cases` 逐项断言——
@@ -341,7 +374,7 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-03）
 
-> **状态：执行中（Task 1~5 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
+> **状态：执行中（Task 1~6 已收口，2026-11-04）。** 对应第 1 节 M1 的 9 个步骤（1.1~1.9），展开为
 > **9 个 Task / 45 个 Step**。
 > 执行分支 `feat/p5-m1-control-plane`（从 `main` 切出）。零语义改动约束沿用：M1 期间
 > `git diff 234f620..HEAD -- stableagent/core/` 恒为 0 行（L1）；`orchestration` 包只允许
@@ -598,16 +631,32 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
   `decided(approval, decision)`，每个恰好写 1 行 `authorization_audit`，`kind ∈
   {"admit","authorize","revalidate","approve"}`，`decision ∈ {"allow","deny"}`，
   `policy_version` 写**决策当刻**的策略版本快照；`reason` 存稳定码，非自由文本。
-- [ ] **Step 1: 写失败的测试**——
+- [x] **Step 1: 写失败的测试**——
       `test_each_decision_kind_writes_exactly_one_row`（四类各一次 → 4 行，字段齐全，A3）；
       `test_audit_snapshots_policy_version`（用两个不同 config 实例先后决策 → 两行版本不同）；
       `test_audit_reason_is_stable_code_not_free_text`（deny 行 reason 匹配
-      `^[a-z][a-z0-9_]*$`）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q tests/unit/test_authorization_audit.py`
+      `^[a-z][a-z0-9_]*$`）。追加第 4 用例 `test_approval_rows_roundtrip_and_audit_filters`：
+      审批行 insert/get/update（含未知 id → 行数 0）+ `list_approvals` 状态过滤 +
+      `list_audit` 的 ticket_id/kind 过滤——Task 7 的仓储前提，也是 `store.py` 不掉出 100% 的前提。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_authorization_audit.py`
       Expected: FAIL — `AttributeError: 'Store' object has no attribute 'insert_audit'`
-- [ ] **Step 3: 实现** store 方法 + `audit.py`。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量。
-- [ ] **Step 5: 提交**：`git commit -am "feat: persist every authorization decision with its version"`
+      Actual: FAIL — 收集期 `ModuleNotFoundError: No module named 'stableagent.control.audit'`
+      （测试模块顶层 import `AuditWriter`，模块缺失时 `insert_audit` 的 AttributeError 无从观测；
+      与 Task 1/4/5 同型的"计划预期红在更上游"）
+- [x] **Step 3: 实现** store 方法 + `audit.py`。
+      实际落位：`Store.insert_audit/list_audit/insert_approval/update_approval/get_approval/`
+      `list_approvals`（原语入、行字典出，沿用 `clauses, params` + `ORDER BY … ASC, id ASC`
+      的 P4 写法）+ `control/audit.py` 的 `AuditWriter`；`StaticPolicyConfig.policy_version`
+      与 `StaticPolicy.policy_version` 属性为本 Task 追加（三处取向与理由见第 1 节步骤 1.6）。
+      首轮测试修正一次构造：同一进程内多个 writer 共用一个 `SequenceIds`，否则审计行 id 撞
+      `UNIQUE`（`sqlite3.IntegrityError`）——生产代码未改。
+- [x] **Step 4: 跑到绿**：目标文件 `4 passed` + 全量 `.venv/bin/pytest -q` →
+      `462 passed, 1 skipped`，总覆盖 99.1%（`store.py` 192 stmts、`control/audit.py` 25 stmts、
+      `control/policy.py` 101 stmts 均 100%）；`.venv/bin/mypy` Success（40 files）、
+      `ruff check` All checks passed、`ruff format --check` 97 files already formatted；
+      `git diff 234f620..HEAD -- stableagent/core/ | wc -l` = 0（L1）。
+      出口命令同第 3 节，M1 出口（Task 9）再整体跑一遍。
+- [x] **Step 5: 提交**：`e4be18a feat: persist every authorization decision with its version`
 
 ### Task 7: ApprovalService、Gate 与守卫式取消（步骤 1.7）
 
