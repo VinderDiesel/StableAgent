@@ -4,7 +4,7 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 10/46、里程碑步骤 13/40（M1 9/9、M2 4/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **DoD 15/46、里程碑步骤 17/40（M1 9/9、M2 8/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
@@ -106,6 +106,10 @@
       另记一条已在 Task 7 落定的顺序事实：`stdout`/`stderr` 在进 `CommandResult` 之前就已过一遍
       `_redact`（先脱敏后截断），所以调用方拿到的正文本身不含配置里列出的密钥。prompt/日志侧脱敏
       与容器挂载仍未闭合，L7 继续不勾。
+      进度（2026-11-05，M2 Task 9）：本轮**没有新增脱敏证据**，只把一处未来缺口写进账本——
+      `audit(request, reason)` 回调拿到的是完整 `CommandRequest`（含全部 argv 正文与未收口的
+      `cwd`），M3 把它接到 Report/审计写入时必须先过一遍脱敏再落盘，否则"正文不进长期记录"会被
+      审计路径绕开。`summary()` 那条性质（Task 8）管的是结果行，管不到审计回调。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
 
@@ -409,8 +413,24 @@
       `Assignment Report` 的接线属 Task 12 / M3，不因本步勾 2.6；②`DockerRunner`（D2）未落，
       `CommandResult.mode` 的默认值是 `local-restricted`，容器实现必须显式换串——这条已写进常量
       注释并作为 Task 10 的验收点。
-- [ ] **2.9** shell 拒绝：`shell=True`、shell 语法字符（`;|&$\``）一律拒绝且审计。
+- [x] **2.9** shell 拒绝：`shell=True`、shell 语法字符（`;|&$\``）一律拒绝且审计。
       验证：注入语料表（C6）。
+      证据（2026-11-05，M2 Task 9）：`execution/command.py`（105 语句、覆盖 100%）新增
+      `SHELL_METACHARACTERS = frozenset(";&|$`\n\r")`（七项：步骤 2.9 原文点名 `; & | $ 反引号` 五个，
+      本 Task 的 Interfaces 列全七个，多出的两项是换行与回车——后者能伪造行尾），判定顺序 ①cwd ②空 argv
+      ③allowlist ④shell 语法，④ 命中即 `denied_reason="shell_syntax"`、不 spawn、正文为空、
+      只有一次时钟读数；`_denied()` 是拒绝的唯一出口，四条码都过一遍可注入的
+      `audit(request, reason)`（默认 no-op，M3 接 Report/审计写入）。`shell=True` 那一半是结构性的：
+      `inspect.signature(CommandRunner.run)` = `['self', 'request']`，源码 grep 不含 `shell=True`
+      （`subprocess.run` 那一项仍显式写 `shell=False`，Task 7 钉下的）。新增 7 例：6 串语料逐条 +
+      `\r` 单例 + `US$5` 无辜正文 + `argv[0]` 带元字符时先报 ③ + 三条既有码各审计一次 + 放行侧零审计 +
+      `run()` 无 `shell` 形参；本轮实测目标 2 文件 `34 passed`、全量 `552 passed, 1 skipped`、总覆盖 `99.18%`，
+      `mypy` 51 files / `ruff check` / `ruff format --check` 114 files 三口径全绿，L1 与约束 1 diff 0 行。
+      三条边界照实写：① 字符表是**策略**不是解析器，误伤方向为拒（含 `;` 的正文参数会被拒），代价与
+      "要放行文本类参数得换 policy" 已写进模块文档；② 计划把审计只挂在 shell 那条下，实现挂在所有
+      拒绝上（细节见 §6 Task 9 Step 3）；③ 字符表落地把 8 个既有 `-c` 测试语料逼成
+      `__import__` 单表达式写法——**测试自己也被这条规则拦下**，正是 C6 想要的效果，但它是实现的
+      连带改动而非计划项。审计的**落点**（写进 Report/审计表）本轮仍是空，属 Task 12 / M3。
 - [ ] **2.10** `DockerRunner` 参数装配断言：`--network none`、非特权、无 socket、CPU/内存/pid/
       超时、仅挂本 worktree、镜像可配置 + digest pin 文档。验证：不启动容器、只断言 argv（D2）。
 - [ ] **2.11** Docker 测试条件：`docker` marker + `STABLEAGENT_DOCKER=1` 双条件，默认跳过且
@@ -520,6 +540,11 @@
       均拒（`context7:get-docs`、`evil:resolve-library-id`、缺 tool）。
       另加 `test_authorize_checks_expiry_and_unconstrained_kinds` 钉死过期与无 allowlist 维度
       的 kind 两条边界。
+      进度（2026-11-05，M2 Task 9 的执行侧第二道）：**"任意 shell"现在有两处独立的拒**——M1 的 Gate
+      在授权侧按整串精确匹配拒（`pytest;echo` 不在 mandate 命令名单里），M2 的 `CommandRunner` 在执行
+      侧按字符表拒（`shell_syntax`）。两道互不依赖：授权判定被绕过或 mandate 名单被填宽时，执行侧
+      仍不会把语法字符交给 shell；反之执行侧的字符表也不看 mandate——它管的是"这个请求在任何实现下
+      都不该被 shell 解释"。证据见 C6。
 
 ### B 审批（M1）
 
@@ -574,7 +599,7 @@
       root 自身算在内；`tests/unit/test_worktree.py` 四例覆盖 `..` 穿越、root 外的绝对路径、
       `/etc/hosts`、以及**链接本身在 root 内而解析结果在外**的符号链接（macOS `/var` →
       `/private/var` 同型）；错误详情同时给出 root 与原始 candidate（`test_confine_error_names_the_root_and_the_candidate`）。
-- [ ] **C5** request 文本不直通分支名、路径、命令参数；slug 仅 `[a-z0-9-]`。
+- [x] **C5** request 文本不直通分支名、路径、命令参数；slug 仅 `[a-z0-9-]`。
       进度（2026-11-05，M2 Task 2 命名半边）：**分支名/worktree 目录名**半边已闭合——slug 只留
       `[a-z0-9-]` 且有 8 条注入语料 + `ticket.task` 正文用例（步骤 2.2 证据）；**路径**半边由 C4 的
       唯一收口点 `confine()` 守着，但"进入路径的字符串只能来自 `workspace_name`"要在 Task 3 的
@@ -582,8 +607,38 @@
       入路径的字符串只有 `confine(root, workspace_name(ticket))` 的产物，克隆侧只做
       `Path(repository).resolve()`，`worktree add` 的 argv 逐项来自 branch/路径/base_ref）。
       剩 **命令参数** 半边属 Task 7（`CommandRunner` argv 构造）与 Task 9（shell 语法拒绝），
-      齐了才勾本条。
-- [ ] **C6** `shell=True` 与 shell 语法字符一律拒绝且有审计。
+      齐了才勾本条——**现已齐并勾选**（2026-11-05，M2 Task 9）。
+      命令参数半边的证据：Task 7 的 `test_allowlist_matches_argv_zero_byte_for_byte` 钉死"argv 元素
+      逐字节等于名单，不取 basename、不做 PATH 归一化"，任何文本要进 `argv[0]` 必须先命中名单的字面量；
+      Task 9 的 `SHELL_METACHARACTERS` 覆盖 **任一** argv 元素（不是只看首元），六串语料 + `\r` +
+      无辜的 `US$5` 全部 `shell_syntax`，首元带语法字符也有拒（只是先报 ③，
+      `test_metacharacter_in_argv_zero_reports_the_allowlist_code_first`）。三段合起来的性质是"文本不能直通"：分支名侧
+      `workspace_name` 的签名里没有 request 位（Task 2），路径侧进入路径的字符串只有 `confine` 的产物
+      （Task 3），命令参数侧正文里的 shell 语法一律拒（Task 9）。
+      仍要说清的边界：**"文本不直通命令参数"验的是边界上的拒，不是"调用方永远不会把 request 文本
+      塞进 argv"**——M2 里 `CommandRunner` 还没有生产调用方（同 2.6 的口径），调用方侧的审查属 M3/M4。
+- [x] **C6** `shell=True` 与 shell 语法字符一律拒绝且有审计。
+      证据（2026-11-05，M2 Task 9）：两半分别由**结构**与**字符表**守着，不靠文案。
+      ① `shell=True`：`test_run_has_no_shell_switch` 断 `CommandRunner.run` 的参数表就是
+      `["self", "request"]`、`"shell" not in params`、
+      `inspect.getsource(CommandRunner.run)` 不含 `shell=True`——这一档实现里 `subprocess.run` 仍显式
+      `shell=False`（第 175 行），"关掉了"和"写不出来"是两件事，钉的是后者。
+      ② 字符表：`SHELL_METACHARACTERS = frozenset(";&|$`\n\r")`，
+      `test_shell_metacharacters_in_any_argument_are_denied_without_spawn` 按计划的 6 串语料
+      （`echo; rm -rf /`、`a|b`、`a&b`、`a$HOME`、`` `id` ``、`line\nbreak`）逐条放成 `argv[2]`
+      （命令名是名单内的 `sys.executable`，拒的只能是正文），断 `denied_reason == "shell_syntax"` +
+      无退出码 + 两条流皆空 + `started_at == ended_at`（唯一一次读数 = 没 spawn），并断 audit 收到的
+      6 对 `(request, "shell_syntax")` **按请求对象**逐个相等（不是只数次数——次数对得上但递错了
+      request 也是假审计）；`test_carriage_return_is_in_the_table_too` 单验 `\r`。
+      ③ 审计覆盖全部拒绝而非只有 shell 那条：`test_every_denial_is_audited_once` 三条既有码
+      `["command_not_allowed", "cwd_escape", "empty_argv"]` 各留一次；
+      `test_allowed_command_leaves_the_audit_hook_untouched` 断放行侧零调用。
+      ④ 顺序与代价：`test_metacharacter_in_argv_zero_reports_the_allowlist_code_first` 认 ③ 先命中
+      （两条都是拒、都不 spawn，"一律拒绝"不打折）；
+      `test_dollar_in_an_argument_denies_even_when_the_payload_is_benign` 把误伤钉成可见事实
+      （`print('US$5')` 被拒；实现前它 `exit_code=0` 真跑起来了，那条红见 §6 Task 9 Step 2）。
+      审计的**落点**（写进 Report/审计表）不在本条：本轮只保证"每次拒绝都过一遍可注入回调"，
+      默认实现是 no-op，接线属 Task 12 / M3。
 - [x] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
       证据（2026-11-05，M2 Task 7）：`tests/unit/test_command_runner.py` 的 C7 段 14 例，五项逐项对上——
       ① **allowlist**：`test_denied_command_has_no_side_effect`
@@ -1105,8 +1160,13 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~8 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
-> 展开为 **12 个 Task / 60 个 Step**。
+> **状态：执行中（M2 Task 1~9 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> 展开为 **12 个 Task / 60 个 Step**。顶部计数本次一并校正：Task 5~8 四次收口只勾条目、没改第 0 节
+> 上方的汇总行，账上停在 `DoD 10/46、里程碑 13/40（M2 4/12）`，而 Task 9 开工前的真实值是
+> `DoD 13/46`（Task 6/7/8 各加一项 C8/C7/D1，未计入）、`里程碑 16/40（M2 7/12）`（Task 5 勾 2.5 起
+> 就少算）；本轮按 Task 9 收口后的真实值改写为 `DoD 15/46`（第 2 节 15 项 + 第 0 节 0 项）、
+> `里程碑 17/40`（M1 9 + M2 8）。
+> 这是记账疏漏，不是判定变化——被改写的只有汇总行，各条证据原文未动。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
 > （`EffectKind` 加成员属 ADR-05 决策 5 点名允许，`service.py` 一字不动——约束 1）；`control/`
@@ -1570,21 +1630,83 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 **Files:**
 - Modify: `stableagent/execution/command.py`
 - Test: `tests/unit/test_command_runner.py`（追加 C6 用例）
+- 计划外两处（本轮实际改动，见 Step 3）：Modify `stableagent/execution/errors.py`（只补码表口径一句）、
+  Modify `tests/unit/test_sandbox.py`（超时语料含 `;`，被 ④ 拦下后改写）
 
 **Interfaces:**
 - Produces: `SHELL_METACHARACTERS`（`;`、`&`、`|`、`$`、反引号、换行、回车）；任一 argv 元素包含其一
   → `denied_reason="shell_syntax"`、不 spawn、并经可注入的 `audit(request, reason)` 回调落
   一次拒绝记录（默认 no-op；M3 接到 Report/审计）。`inspect.signature(CommandRunner.run)`
   里没有 `shell` 形参（结构性）。
-- [ ] **Step 1: 写失败的测试**：表驱动注入语料 `["echo; rm -rf /", "a|b", "a&b", "a$HOME",
+- [x] **Step 1: 写失败的测试**：表驱动注入语料 `["echo; rm -rf /", "a|b", "a&b", "a$HOME",
   "`id`", "line\nbreak"]` 全部拒绝；audit 回调收到 6 次
   `(request, "shell_syntax")`；`test_run_has_no_shell_switch`。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
+  实际追加 7 例（`SHELL_CORPUS` 常量 + `test_shell_metacharacters_in_any_argument_are_denied_without_spawn`
+  逐条断 `denied_reason`/无退出码/正文为空/`started_at == ended_at`，并按请求对象逐个比对该轮 audit
+  收到的 6 对；`test_carriage_return_is_in_the_table_too`；
+  `test_dollar_in_an_argument_denies_even_when_the_payload_is_benign`；
+  `test_metacharacter_in_argv_zero_reports_the_allowlist_code_first`；`test_every_denial_is_audited_once`；
+  `test_allowed_command_leaves_the_audit_hook_untouched`；`test_run_has_no_shell_switch`）。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
   Expected: FAIL — 首个语料 `echo; rm -rf /` 未被拒（`denied_reason is None`）。
-- [ ] **Step 3: 实现** 字符表 + 审计回调；`shell_syntax` 进 `errors.py` 的稳定码家族说明
+  Actual（2026-11-05，`5 failed, 22 passed`）：红是两类混在一轮里，且**首条不是 Expected 里那条**——
+  三例（语料测试 + `test_every_denial_is_audited_once` +
+  `test_allowed_command_leaves_the_audit_hook_untouched`）实现未落前先撞构造函数：
+  `TypeError: CommandRunner.__init__() got an unexpected keyword argument 'audit'`；另两例
+  （`test_carriage_return_is_in_the_table_too`、
+  `test_dollar_in_an_argument_denies_even_when_the_payload_is_benign`）不依赖 audit，红在规则本身。Expected 的"规则是红的"为看得清楚又单跑一次，
+  只取那两例：
+  `.venv/bin/pytest -q --no-cov "…::test_carriage_return_is_in_the_table_too" "…::test_dollar_in_an_argument_denies_even_when_the_payload_is_benign"`
+  → `2 failed`，`assert None == 'shell_syntax'`，且 `where None = CommandResult(argv=(… '-c',
+  "print('US$5')"), exit_code=0, …)`——无辜正文**真的跑起来了**（`exit_code=0`），不是判定后放行。
+  两次红都按 2026-11-05 在 `HEAD~1` 版 `command.py` 上原地复现过，工作树随后还原、`34 passed`。
+  口径：注入型测试的 `TypeError` 也算红，但它证明的是"接口不存在"而不是"规则不成立"，所以把两例
+  纯规则红单列出来，不让前者顶替后者。
+- [x] **Step 3: 实现** 字符表 + 审计回调；`shell_syntax` 进 `errors.py` 的稳定码家族说明
   （拒绝原因码表写进 `command.py` docstring）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: reject shell syntax at the command boundary"`
+  落点：`SHELL_METACHARACTERS = frozenset(";&|$`\n\r")`（④ 位，排在 allowlist 之后）、
+  `_deny_reason()` 加第四条短路、`_denied()` 成为拒绝的唯一出口（一次时钟读数 + 一次
+  `self._audit(request, reason)`，回调抛出的异常原样传出——拒绝已决定，记录失败不能把结论改成放行）、
+  `__init__` 加 `audit: Callable[[CommandRequest, str], None] = _no_audit`（默认回调体只有文档字符串，
+  等价 no-op；M3 才接 Report/审计写入，本轮不预设目的地）、模块文档的码表把 `Task 9` 占位换成
+  `④` 并新增一段"为什么 `shell=False` 之下还要拦 shell 语法"。
+  三处计划没写、实现时定下的口径：① **计划把 audit 挂在 shell 这一条下，实现挂在所有拒绝上**——
+  `audit(request, reason)` 的签名本来就带 reason，而"拒绝要留痕"是对四条码共同的性质，不是 `shell_syntax`
+  的专属；`test_every_denial_is_audited_once` 断的是三条既有码各审计一次，
+  `test_allowed_command_leaves_the_audit_hook_untouched` 断放行侧零调用（审计不该是噪声）。
+  ② **`argv[0]` 同时不在名单又含元字符时先报 `command_not_allowed`**——顺序即优先级：先判"能不能跑"
+  再判"怎么跑"，一次请求只报一条码；不因此放宽"含元字符一律拒"（该例用 `sh -c` 形式验证，
+  换成名单内的 `sys.executable` 就落进 `shell_syntax`）。
+  ③ **误伤是设计选择，不是 bug**：`;`/`$` 出现在正文参数里也会拒（`print('US$5')`），方向是拒而不是放，
+  所以错的只会是可用性；代价与"要放行文本类参数得换 policy，不在这里开口"一并写进模块文档。
+  连带影响（如实记）：字符表一落，**8 个既有 `-c` 语料因含 `;`（一处还含真换行）被 ④ 拒掉**，
+  全部重写为 `__import__` 单表达式形式（`print('hello', __import__('os').getcwd())`、
+  `__import__('time').sleep(2)`、`(__import__('sys').stdout.write('x'*200_000), …)` 等）。
+  这批测试原本验的是"允许的命令能跑完"，它们被新规则拦下正是 C6 想要的效果——连测试自己都得走
+  元字符之外的写法。其中一处是 C8 用裸 `subprocess` 探环境的探针，不经 `CommandRunner`、本不需要改，
+  批量替换顺手改了（无害，断言的是子进程可见环境，与写法无关）。`tests/unit/test_sandbox.py` 的
+  超时语料 `import time; time.sleep(5)` 同因改写成 `__import__('time').sleep(5)`。
+  `errors.py` 只补一句口径——四个稳定码的表与顺序留在 `command.py` 一处，不在两处重复名单（迟早会漂）。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+  证据（2026-11-05）：`tests/unit/test_command_runner.py`（C6 段 7 例，累计 27 例）+
+  `tests/unit/test_sandbox.py` 7 例 = `34 passed`；全量 `.venv/bin/pytest -q` =
+  `552 passed, 1 skipped`、总覆盖 `99.18%`，`stableagent/execution/command.py` 105 语句覆盖 `100%`
+  （`errors.py`/`sandbox.py`/`paths.py` 同为 100%）。门禁：`mypy` = `Success: no issues found in
+  51 source files`、`ruff check stableagent tests examples benchmarks` = `All checks passed!`、
+  `ruff format --check` = `114 files already formatted`（E501 挡过 4 次：两条 `-c` 语料拆成相邻字面量
+  拼接、一条 `_request` 逐参换行、C6 测试签名由 `ruff format` 拆开——四条都是排版，没有一条靠删断言
+  过关）。
+  结构性复核：`inspect.signature(CommandRunner.run)` = `['self', 'request']`（无 `shell` 形参，
+  用例里同时 grep 源码不含 `shell=True`）。L1 `git diff 234f620..HEAD --stat -- stableagent/core/`
+  = 0 行，约束 1 对 `orchestration/service.py` 同为 0 行；本轮没碰 `stableagent/core/`、编排层与依赖方向，
+  L8 无新增外部条件（新增用例不启动容器、不联网）。
+- [x] **Step 5: 提交**：`git commit -am "feat: reject shell syntax at the command boundary"`
+  → `7f65bd2`（四个已跟踪文件；两篇 blog 文稿仍未跟踪，等用户定夺，未被 `-am` 带走）。
+  步骤 2.9 与 C6 随之勾选；**C5 一并勾选**——它的三段半边（分支名 Task 2 / 路径 Task 3 / 命令参数
+  Task 7+9）到本轮才全部有测试，证据与边界口径写在 §2 C5。`2.6` 与 `L7` 的 Report 半边仍不勾：
+  审计回调的**落点**（写进 Report/审计表）本轮是 no-op，接线属 Task 12 / M3。
+  顺手补一笔记账：文件头的汇总行自 Task 5 起就没跟着收口走（停在 `DoD 10/46、里程碑 13/40`），
+  本轮按真实值校正为 `DoD 15/46、里程碑 17/40`，过程与差在哪几项写在 §6 状态头。
 
 ### Task 10: `DockerRunner` 参数装配（步骤 2.10）
 
