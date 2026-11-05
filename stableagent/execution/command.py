@@ -62,6 +62,80 @@ def _no_audit(request: CommandRequest, reason: str) -> None:
     """拒绝审计的默认回调：什么都不做。M3 把它接到 Report/审计写入，本轮不预设目的地。"""
 
 
+def deny_reason(
+    request: CommandRequest, *, allowlist: frozenset[str], worktree_root: Path
+) -> str | None:
+    """四条判定的唯一实现（①cwd ②空 argv ③allowlist ④shell 语法），放行返回 `None`。
+
+    顺序即优先级，一次请求只报第一条。提到模块函数而不是留在 `CommandRunner` 里，是为了让
+    `DockerRunner` 共用同一份规则：容器档若带一份自己的复制品，两边迟早漂出"本地拒、容器放"的缝。
+    `confine` 在这里与 `run()` 取路径时各调一次——同一个收口实现（C4），两次结果必然同形。
+    """
+    try:
+        confine(worktree_root, request.cwd)
+    except PathEscapeError:
+        return "cwd_escape"
+    if not request.argv:
+        return "empty_argv"
+    if request.argv[0] not in allowlist:
+        return "command_not_allowed"
+    if any(char in SHELL_METACHARACTERS for arg in request.argv for char in arg):
+        return "shell_syntax"
+    return None
+
+
+def denied_result(
+    request: CommandRequest,
+    reason: str,
+    *,
+    clock: Clock,
+    mode: str = LOCAL_RESTRICTED,
+    audit: Callable[[CommandRequest, str], None] = _no_audit,
+) -> CommandResult:
+    """拒绝的唯一出口：一次时钟读数 + 一次审计回调 + 一份"没有副作用"的结果。
+
+    `started_at == ended_at` 就是没 spawn 的证据（判定发生在 spawn 之前）。回调抛出的异常原样
+    传出——拒绝已经决定，记录失败不能把结论改成放行。
+    """
+    now = clock.now_ms()
+    audit(request, reason)
+    return CommandResult(
+        argv=request.argv,
+        exit_code=None,
+        stdout="",
+        stderr="",
+        started_at=now,
+        ended_at=now,
+        truncated=False,
+        timed_out=False,
+        denied_reason=reason,
+        mode=mode,
+    )
+
+
+def fit_output(
+    text: str, *, max_output_bytes: int, secrets: tuple[str, ...] = ()
+) -> tuple[str, bool]:
+    """先脱敏后截断，返回（不超过预算的文本, 是否被截）。
+
+    `max_output_bytes` 是含尾标的总预算：尾标 `...[truncated N bytes]` 的位数随 dropped 增长，
+    所以按 `len(data)`（dropped 的上界）那一份形态预留预算，真实尾标只会更短，"正文 + 尾标 ≤ 预算"
+    恒成立。顺序不能换——先截后脱敏会让落在切口前的密钥原样进 Report。
+    """
+    redacted = text
+    for secret in secrets:
+        if secret:  # 空串会让 `replace` 在每个字符间插星号：那是自伤，不是脱敏
+            redacted = redacted.replace(secret, REDACTED)
+    data = redacted.encode("utf-8")
+    if len(data) <= max_output_bytes:
+        return redacted, False
+    reserve = TRUNCATION_MARKER.format(dropped=len(data)).encode("utf-8")
+    keep = max(max_output_bytes - len(reserve), 0)
+    body = data[:keep].decode("utf-8", "ignore")  # 切口落在半个字符上就丢掉那半个
+    dropped = len(data) - len(body.encode("utf-8"))
+    return body + TRUNCATION_MARKER.format(dropped=dropped), True
+
+
 @dataclass(frozen=True)
 class CommandContext:
     """一次执行属于哪个 Ticket/Assignment——`build_child_env` 需要的四个标识。
@@ -181,8 +255,8 @@ class CommandRunner:
             )
         except subprocess.TimeoutExpired as exc:
             # 超时既不是成功也不是拒绝：没有退出码，但已经产出的部分要留着看。
-            stdout, first_cut = self._fit(_as_text(exc.stdout))
-            stderr, second_cut = self._fit(_as_text(exc.stderr))
+            stdout, first_cut = self._fit(stream_text(exc.stdout))
+            stderr, second_cut = self._fit(stream_text(exc.stderr))
             return CommandResult(
                 argv=request.argv,
                 exit_code=None,
@@ -209,65 +283,23 @@ class CommandRunner:
         )
 
     def _deny_reason(self, request: CommandRequest) -> str | None:
-        """① cwd 收口 ② 空 argv ③ allowlist ④ shell 语法——顺序即优先级，一次请求只报第一条。
-
-        判定与 `run()` 里的取路径各调一次 `confine`：同一个收口实现（C4），两次结果必然同形，
-        换来的是"理由"与"路径"各自只有一个来源。
-        """
-        try:
-            confine(self._worktree_root, request.cwd)
-        except PathEscapeError:
-            return "cwd_escape"
-        if not request.argv:
-            return "empty_argv"
-        if request.argv[0] not in self._allowlist:
-            return "command_not_allowed"
-        if any(char in SHELL_METACHARACTERS for arg in request.argv for char in arg):
-            return "shell_syntax"
-        return None
+        """委托给模块级 `deny_reason`：四条判定的实现只有一份，`DockerRunner` 用的是同一个。"""
+        return deny_reason(request, allowlist=self._allowlist, worktree_root=self._worktree_root)
 
     def _denied(self, request: CommandRequest, reason: str) -> CommandResult:
-        """拒绝的唯一出口：一次读数（没 spawn 的证据）+ 一次审计回调。
-
-        回调抛出的异常原样传出——拒绝已经决定，记录失败不能把结论改成放行。
-        """
-        now = self._clock.now_ms()
-        self._audit(request, reason)
-        return CommandResult(
-            argv=request.argv,
-            exit_code=None,
-            stdout="",
-            stderr="",
-            started_at=now,
-            ended_at=now,
-            truncated=False,
-            timed_out=False,
-            denied_reason=reason,
-        )
-
-    def _redact(self, text: str) -> str:
-        for secret in self._secrets:
-            if secret:  # 空串会让 `replace` 在每个字符间插星号：那是自伤，不是脱敏
-                text = text.replace(secret, REDACTED)
-        return text
+        """委托给模块级 `denied_result`：拒绝出口同样只有一份，模式取本档的名字。"""
+        return denied_result(request, reason, clock=self._clock, audit=self._audit)
 
     def _fit(self, text: str) -> tuple[str, bool]:
-        """先脱敏后截断；返回值是（不超过预算的文本, 是否被截）。"""
-        redacted = self._redact(text)
-        data = redacted.encode("utf-8")
-        if len(data) <= self._max_output_bytes:
-            return redacted, False
-        # 尾标的位数随 dropped 增长，用 len(data)（dropped 的上界）那一份形态预留预算，
-        # 真实尾标只会更短，所以"正文 + 尾标 ≤ 预算"恒成立。
-        reserve = TRUNCATION_MARKER.format(dropped=len(data)).encode("utf-8")
-        keep = max(self._max_output_bytes - len(reserve), 0)
-        body = data[:keep].decode("utf-8", "ignore")  # 切口落在半个字符上就丢掉那半个
-        dropped = len(data) - len(body.encode("utf-8"))
-        return body + TRUNCATION_MARKER.format(dropped=dropped), True
+        """委托给模块级 `fit_output`：先脱敏后截断的顺序由那一个实现守着。"""
+        return fit_output(text, max_output_bytes=self._max_output_bytes, secrets=self._secrets)
 
 
-def _as_text(value: bytes | str | None) -> str:
-    """`TimeoutExpired.stdout` 在 text 模式下是 str，字节模式下是 bytes——两种都接住。"""
+def stream_text(value: bytes | str | None) -> str:
+    """`TimeoutExpired.stdout` 在 text 模式下是 str，字节模式下是 bytes——两种都接住。
+
+    公开给 `DockerRunner` 复用：两档执行对"超时留下的半截输出"要做的是同一件事。
+    """
     if value is None:
         return ""
     return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
