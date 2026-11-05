@@ -1,7 +1,7 @@
-"""C3~C5：路径收口、命名收口与 worktree 复用——执行层吃到的任何路径都在 root 内，
-任何分支名只由 Ticket 决定，复用四要素不全等就拒绝并保留现场。
+"""C2~C5：路径收口、命名收口、worktree 复用与 effect 重放——执行层吃到的任何路径都在 root 内，
+任何分支名只由 Ticket 决定，复用四要素不全等就拒绝并保留现场，重放不产生第二个现场。
 
-Task 4~5 的重放与清理用例继续追加在本文件。
+Task 5 的清理用例继续追加在本文件。
 """
 
 from __future__ import annotations
@@ -445,48 +445,54 @@ def _prepare_effect(effect_id: str, ticket: Ticket, repository: str) -> Effect:
 
 
 async def test_prepare_effect_is_idempotent_on_replay(tmp_path: pathlib.Path) -> None:
-    """C2：现场已建、账没落上——重放必须复用同一 worktree，账上也只有一行。"""
+    """C2：现场已建、账没落上——换一条连接重放，必须复用同一 worktree、账上也只有一行。"""
     clone = _make_clone(tmp_path)
+    db = tmp_path / "orchestration.db"
     clock = FixedClock()
-    store = Store(tmp_path / "orchestration.db", clock=clock)
+    manager, _ = _manager(tmp_path / "worktrees", clock)
+    ticket = _ticket("Add rate limiter")
+
+    store = Store(db, clock=clock)
     try:
-        manager, _ = _manager(tmp_path / "worktrees", clock)
-        ticket = _ticket("Add rate limiter")
         with store.transaction():
             store.insert_ticket(ticket)
             effect = store.enqueue_effect(_prepare_effect("ef-prep", ticket, str(clone)))
         assert effect.id == "ef-prep"
-
-        # "崩溃"：prepare 的 git 副作用已经发生，effect 仍停在 running（claim 后没落账）
+        # 崩溃点：prepare 的 git 副作用已经发生，effect 停在 running（claim 之后没落账）
         created = manager.prepare(ticket, repository=str(clone), base_ref="main")
         with store.transaction():
             store.update_effect(effect.model_copy(update={"state": EffectState.RUNNING}))
-        assert store.reclaim_running_effects(clock.now_ms()) == 1
+    finally:
+        store.close()
 
+    # 重放走一条全新连接：事实源是库里的行，不是上一个进程的内存（同 B4 口径）
+    replay = Store(db, clock=clock)
+    try:
+        assert replay.reclaim_running_effects(clock.now_ms()) == 1
         dispatcher = EffectDispatcher(
-            store,
-            {EffectKind.PREPARE_WORKTREE: prepare_worktree_handler(manager, store)},
+            replay,
+            {EffectKind.PREPARE_WORKTREE: prepare_worktree_handler(manager, replay)},
             clock=clock,
         )
         assert await dispatcher.dispatch_due() == 1
 
-        settled = store.get_effect("ef-prep")
+        settled = replay.get_effect("ef-prep")
         assert settled is not None and settled.state is EffectState.SUCCEEDED
-        assert settled.attempts == 1  # reclaim 还掉了崩溃前那次 claim，重放只算一次真实执行
+        assert settled.attempts == 1  # reclaim 还掉崩溃前那次 claim，重放只算一次真实执行
         assert (
-            store._conn.execute(
+            replay._conn.execute(
                 "SELECT COUNT(*) FROM effects WHERE kind = 'prepare_worktree'"
             ).fetchone()[0]
             == 1
         )
-        # 现场：一个 worktree、一个分支、ownership 仍是第一次建的
+        # 现场：一个 worktree、一个分支、ownership 仍是崩溃前那一次建的
         assert _worktree_paths(clone) == [str(clone.resolve()), str(created.path)]
         assert _branch_count(clone, created.branch) == 1
         ownership = json.loads(created.ownership_file.read_text(encoding="utf-8"))
         assert ownership["created_at"] == clock.now_ms()
         assert ownership["branch"] == "sa-01234567-add-rate-limiter"
     finally:
-        store.close()
+        replay.close()
 
 
 def test_prepare_effect_key_is_scoped_to_the_assignment(tmp_path: pathlib.Path) -> None:
