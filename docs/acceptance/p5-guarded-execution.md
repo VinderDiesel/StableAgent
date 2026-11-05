@@ -4,7 +4,7 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 8/46、里程碑步骤 10/40（M1 9/9、M2 1/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **DoD 9/46、里程碑步骤 12/40（M1 9/9、M2 3/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
@@ -81,6 +81,15 @@
       才能证明"merge/auto merge 始终不在枚举里"，届时由本条收口。
 - [ ] **L7 凭据不落盘**：密钥不进 prompt、日志、Report、Ticket/AgentState、worktree 元数据
       与容器挂载；执行环境只有白名单变量。来源：规格 §1 安全层次、ADR-05 决策 6。
+      进度（2026-11-05，M2 Task 3 的 worktree 元数据 + git 子进程两半边）：ownership 文件与
+      `WorktreeHandle.repository` 记录的是**剥掉 userinfo 的 remote 身份**——`git.scrub_credentials`
+      在传输层就把 `scheme://user:pass@` 段去掉，所以 `SubprocessGit` 的 stdout/stderr/GitError
+      文本与 ownership 都拿不到 token；`test_ownership_never_records_credentials` 用
+      `https://octocat:ghp_SEKRET@…` 起真克隆，断言 ownership 文本里没有 `ghp_SEKRET`/`octocat`/`@`
+      且身份等于干净 URL。git 子进程环境是第二道白名单：`git_env()` 只给 `PATH`/`LANG`/
+      `GIT_TERMINAL_PROMPT=0`/`GIT_CONFIG_NOSYSTEM=1` 四项（`test_git_carries_only_four_environment_variables`
+      钉死，含 `HOME`/`GH_TOKEN` 不注入）。**Agent 命令**的环境白名单与容器挂载属 Task 6/D2，
+      prompt/日志/Report 的脱敏属 Task 9 与 M3，故 L7 仍不勾。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
 
@@ -238,8 +247,13 @@
 
 ### M2：隔离执行（规格 WP-5.2 + WP-5.3；ADR-05 决策 5/6/7）
 
-- [ ] **2.1** `execution/` 包骨架 + `GitWorktreeManager`：参数数组调用 git、路径
+- [x] **2.1** `execution/` 包骨架 + `GitWorktreeManager`：参数数组调用 git、路径
       `Path.resolve()` 锁 root。验证：路径逃逸拒绝用例（C4）。
+      收口（2026-11-05，M2 Task 3）：骨架半边见 Task 1（`__init__/errors/paths` + 方向锁），
+      `GitWorktreeManager` 半边由 Task 3 补齐——git 一律经注入的 `Git` 协议、
+      `SubprocessGit` 用 argv 数组 + `shell=False` + `timeout_s` + 输出上限，命令首元固定 `git`；
+      路径侧 `prepare` 只把 `confine(root, workspace_name(ticket))` 的结果当目录用，克隆侧
+      `Path(repository).resolve()`。C4 四例 + C3 十例 + 传输层两例同文件在绿。
       进度（2026-11-05，M2 Task 1 骨架 + C4 半边）：包落位 `__init__.py`
       （`EXECUTION_SCHEMA_VERSION = "0.1.0"`，不顶层重导出）、`errors.py`（`ExecutionError(ValueError)`
       + `path_escape`/`worktree_reuse`/`command_denied`/`cleanup_unconfirmed` 四个稳定码）、
@@ -261,8 +275,21 @@
       rm -rf /` 放进 `ticket.task` 后名字逐字节不变。门禁：`mypy` Success（45 source files，+1）、
       `ruff check` All checks passed、`ruff format --check` 106 files already formatted、L1 与约束 1
       diff 均 0 行。计划偏差两条见 §6 Task 2。
-- [ ] **2.3** 复用判定：仓库 remote / Ticket metadata / base ref / ownership 四要素全等复用，
+- [x] **2.3** 复用判定：仓库 remote / Ticket metadata / base ref / ownership 四要素全等复用，
       不一致拒绝并保留诊断。验证：临时 git 仓库逐要素破坏测试（C3）。
+      证据（2026-11-05，M2 Task 3）：`execution/worktree.py`（67 语句、覆盖 100%）——
+      `prepare(ticket, repository=本地克隆, base_ref=...)` 先读 `git remote get-url origin`
+      （脱敏后即"仓库身份"），再 `confine` 出路径；目录已存在时逐项比四要素，全等才返回复用的
+      `WorktreeHandle`（用例断言 `worktree add` 调用数仍为 1、ownership 的 `created_at` 未被改写、
+      最后一次 git 调用只是 `remote get-url`）。破坏任一要素都得 `WorktreeReuseError`
+      （`execution.worktree_reuse`）：`remote`（改克隆 origin）、`ticket_id`（ownership 指向别的
+      Ticket）、`base_ref`（记录 main 要求 dev）、`ownership`（坏 JSON / 删文件 / 分支标记改成
+      `main`）——六种破坏各一条参数化用例，`diagnostics` 固定六键
+      （`element`/`reason`/`path`/`ownership_file`/`recorded`/`requested`，recorded 与 requested
+      同键集），且断言 worktree 目录**仍在**（拒绝不等于清理）。真 git 装置：`_make_clone` 用
+      参数数组 + 最小环境建临时仓库，全程离线（L8）。口径决定两条（记进 §6 Task 3）：ownership
+      缺失/不可解析时**先按要素④拒绝**，不拿"remote 不符"顶罪；读不到 origin 直接 `GitError`
+      且不创建 root（失败不留无主 ownership，也不留半成品 worktree）。
 - [ ] **2.4** `PREPARE_WORKTREE` EffectKind + outbox 驱动 prepare：重复 effect 幂等命中同一
       worktree。验证：崩溃注入重放（C2）。
 - [ ] **2.5** 生命周期：Ticket 结束默认保留；清理需显式调用 + 人工确认参数，无自动删除。
@@ -421,7 +448,12 @@
 
 - [ ] **C1** 多 Ticket 并行 worktree 目录与分支互不污染（并发集成用例）。
 - [ ] **C2** 重复 prepare 幂等复用同一 worktree（含崩溃重放）。
-- [ ] **C3** 复用四要素（remote/metadata/base ref/ownership）不一致时拒绝并保留诊断。
+- [x] **C3** 复用四要素（remote/metadata/base ref/ownership）不一致时拒绝并保留诊断。
+      证据（2026-11-05，M2 Task 3）：`test_reuse_rejects_each_element_and_keeps_the_scene` 六种破坏
+      （remote / ticket_id / base_ref / ownership 坏档 / ownership 缺失 / ownership 分支标记指向
+      他人）逐条断言 `WorktreeReuseError.code`、detail 里的人读标签、`diagnostics` 的六键与
+      recorded/requested 同键集，外加 `handle.path` 目录仍在；`test_prepare_reuses_the_identical_worktree`
+      证明全等时不重复 `worktree add`、不改写 ownership。用例名与详细口径见第 1 节步骤 2.3。
 - [x] **C4** 路径逃逸拒绝：resolve 后必须在配置 root 内。
       证据（2026-11-05，M2 Task 1）：`execution/paths.py` 的 `confine(root, candidate)` 是全层
       唯一收口点——相对路径先拼 root、随后 `resolve()`，判定用 `is_relative_to(root.resolve())`，
@@ -432,8 +464,11 @@
       进度（2026-11-05，M2 Task 2 命名半边）：**分支名/worktree 目录名**半边已闭合——slug 只留
       `[a-z0-9-]` 且有 8 条注入语料 + `ticket.task` 正文用例（步骤 2.2 证据）；**路径**半边由 C4 的
       唯一收口点 `confine()` 守着，但"进入路径的字符串只能来自 `workspace_name`"要在 Task 3 的
-      `prepare` 入口接线后才算证到；**命令参数**半边属 Task 7（`CommandRunner` argv 构造）与
-      Task 9（shell 语法拒绝）。三项齐全后才勾本条，故 DoD 计数保持 8/46。
+      `prepare` 入口接线后才算证到——**该半边现已闭合**（2026-11-05，M2 Task 3：`prepare` 里进
+      入路径的字符串只有 `confine(root, workspace_name(ticket))` 的产物，克隆侧只做
+      `Path(repository).resolve()`，`worktree add` 的 argv 逐项来自 branch/路径/base_ref）。
+      剩 **命令参数** 半边属 Task 7（`CommandRunner` argv 构造）与 Task 9（shell 语法拒绝），
+      齐了才勾本条。
 - [ ] **C6** `shell=True` 与 shell 语法字符一律拒绝且有审计。
 - [ ] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
 - [ ] **C8** 执行环境仅白名单变量；宿主密钥、无关环境变量不注入。
@@ -911,7 +946,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~2 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~3 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
@@ -1054,17 +1089,52 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   复用判定读 ownership 文件 + `git remote get-url`，四要素（remote / ticket_id / base_ref /
   ownership 文件存在且可解析）全等才复用，否则 `WorktreeReuseError(diagnostics: dict)` 且
   **不清理**现场。
-- [ ] **Step 1: 写失败的测试**：`test_prepare_creates_worktree_and_ownership`；
+- [x] **Step 1: 写失败的测试**：`test_prepare_creates_worktree_and_ownership`；
   `test_prepare_reuses_identical_worktree`；`test_reuse_rejects_each_of_the_four_elements`
   （逐要素破坏：改 remote、改 ownership 的 ticket_id、改 base_ref、删/坏 ownership 文件
   → 四种拒绝 + 诊断字段齐全 + 目录仍在）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  Actual: 用例名与本 Task 落地的略有出入，等价对应为
+  `test_prepare_creates_worktree_branch_and_ownership`（多了分支名与起点断言：`HEAD` 等于新建受控
+  分支、其 commit 等于 `release-2` 的 commit，并断言 git argv 逐项
+  `("worktree","add","-b",branch,path,base_ref)`）、`test_prepare_reuses_the_identical_worktree`、
+  `test_reuse_rejects_each_element_and_keeps_the_scene`（参数化 **六种**破坏：四种之外再加
+  "ownership 缺失"与"ownership 分支标记改成 `main`"两种 ownership 形态）。诊断齐全口径钉死为
+  六键 `{element, reason, path, ownership_file, recorded, requested}` 且 recorded/requested 同键集。
+  计划外补三条：`test_ownership_never_records_credentials`（L7）、
+  `test_prepare_rejects_a_repository_without_origin_remote`（读不到 origin 就拒绝、不留半成品）、
+  `test_git_carries_only_four_environment_variables` + `test_scrub_credentials_*`（本 Task 自带的
+  两个取向）。测试装置：真临时仓库（`_make_clone`）+ `RecordingGit` 包装真 git 记录 argv，
+  全程离线。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
   Expected: FAIL — `ImportError: cannot import name 'GitWorktreeManager'`。
-- [ ] **Step 3: 实现** `git.py` + `worktree.py`；prepare 入口先 `confine(root, path)`；
+  Actual: `ModuleNotFoundError: No module named 'stableagent.execution.git'`（收集期即红，同 Task 2
+  的形态——模块还不存在）。
+- [x] **Step 3: 实现** `git.py` + `worktree.py`；prepare 入口先 `confine(root, path)`；
   所有路径参数化（root 由调用方给临时目录）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁；`git diff 234f620..HEAD --
+  五处口径决定（计划没写死，本 Task 定下并写进模块文档 string）：
+  ① `GitError` **不进** `ExecutionError` 家族——放 `git.py`、继承 `RuntimeError`、带
+  `returncode/stdout/stderr`：Task 1 的四个稳定码是"策略拒绝"的目录，git 进程失败不是；且
+  `test_execution_error_code_inventory_is_unique_and_prefixed` 钉死了家族成员清单，加类等于改
+  别人 Task 的用例。
+  ② `repository` 参数 = **本地克隆根目录**；写进 ownership 与 `WorktreeHandle.repository` 的是该
+  克隆 `git remote get-url origin` 的**脱敏身份**。复用比较的是"记录在案的身份 vs 当前身份"，
+  这样 `set-url` 才真的能破坏要素①（worktree 与克隆共享 config，比"两边的 remote"是恒等式）。
+  ③ 脱敏在传输层做：`scrub_credentials` 剥掉 `scheme://user:pass@` 段，`SubprocessGit` 的
+  stdout/stderr 与 `GitError` 文本一律先过它——ownership 因此拿不到 token（L7）。
+  ④ `SubprocessGit` 自带四项最小环境 `git_env()`（`PATH`/`LANG`/`GIT_TERMINAL_PROMPT=0`/
+  `GIT_CONFIG_NOSYSTEM=1`，不含 `HOME`）：账本 L7 的白名单原本只约束 Agent 命令（Task 6），
+  本层给自己的 git 调用也钉上，防凭据助手被拉进来。
+  ⑤ ownership 缺失/不可解析时**先按要素④拒绝**：首次实现让它去跟"remote 不符"顶罪，跑出
+  2 failed 后才改成现在的归因顺序。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁；`git diff 234f620..HEAD --
   stableagent/core/` = 0（L1）。
-- [ ] **Step 5: 提交**：`git commit -am "feat: prepare reusable worktrees with four-element reuse checks"`
+  Actual: 归因顺序修正后目标文件 **29 passed**（+12）；全量 **509 passed, 1 skipped**、总覆盖
+  99.13%；`worktree.py` 67 语句 **100%**、`git.py` 46 语句 96%——未覆盖的是超时分支
+  `git.py:103-104`（真实超时无法确定性注入，留给后续 Task 以可注入 executable 的用例补，本 Task
+  如实记为未覆盖面）；`mypy` Success（47 source files，+2）、`ruff check` All checks passed、
+  `ruff format --check` 108 files already formatted；L1 与约束 1 diff 均 0 行。
+- [x] **Step 5: 提交**：`git commit -am "feat: prepare reusable worktrees with four-element reuse checks"`
+  → `250c990`（`git.py`/`worktree.py` 为新增文件，先 `git add` 再提交）。
 
 ### Task 4: `PREPARE_WORKTREE` effect 与崩溃重放（步骤 2.4）
 
