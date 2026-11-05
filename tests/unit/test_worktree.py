@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 
 import pytest
 
+from stableagent.execution.effects import prepare_idempotency_key, prepare_worktree_handler
 from stableagent.execution.errors import PathEscapeError, WorktreeReuseError
 from stableagent.execution.git import (
     GitError,
@@ -32,7 +33,9 @@ from stableagent.execution.naming import (
 )
 from stableagent.execution.paths import confine
 from stableagent.execution.worktree import GitWorktreeManager, WorktreeHandle
-from stableagent.orchestration.model import Ticket
+from stableagent.orchestration.model import Effect, EffectKind, EffectState, Ticket
+from stableagent.orchestration.outbox import EffectDispatcher
+from stableagent.orchestration.store import Store
 from tests.support import FixedClock
 
 HOSTILE_TITLES = [
@@ -410,3 +413,110 @@ def test_scrub_credentials_strips_userinfo_and_is_idempotent() -> None:
     assert "octocat" not in scrub_credentials(SECRET_ORIGIN)
     # 路径里的 @ 不是凭据段，不许被剥掉
     assert scrub_credentials("file:///tmp/team@host/repo.git") == "file:///tmp/team@host/repo.git"
+
+
+# ------------------------------------------------- C2：effect 驱动与崩溃重放（Task 4）
+
+
+def _worktree_paths(clone: pathlib.Path) -> list[str]:
+    lines = _git(clone, "worktree", "list", "--porcelain").splitlines()
+    rows = [line for line in lines if line.startswith("worktree ")]
+    return [line.removeprefix("worktree ").strip() for line in rows]
+
+
+def _branch_count(clone: pathlib.Path, name: str) -> int:
+    listed = _git(clone, "branch", "--list", name).strip()
+    return len(listed.splitlines()) if listed else 0
+
+
+def _prepare_effect(effect_id: str, ticket: Ticket, repository: str) -> Effect:
+    return Effect(
+        id=effect_id,
+        kind=EffectKind.PREPARE_WORKTREE,
+        idempotency_key=prepare_idempotency_key("as-1"),
+        payload={
+            "ticket_id": ticket.id,
+            "assignment_id": "as-1",
+            "repository": repository,
+            "base_ref": "main",
+        },
+        due_at=1_000,
+    )
+
+
+async def test_prepare_effect_is_idempotent_on_replay(tmp_path: pathlib.Path) -> None:
+    """C2：现场已建、账没落上——重放必须复用同一 worktree，账上也只有一行。"""
+    clone = _make_clone(tmp_path)
+    clock = FixedClock()
+    store = Store(tmp_path / "orchestration.db", clock=clock)
+    try:
+        manager, _ = _manager(tmp_path / "worktrees", clock)
+        ticket = _ticket("Add rate limiter")
+        with store.transaction():
+            store.insert_ticket(ticket)
+            effect = store.enqueue_effect(_prepare_effect("ef-prep", ticket, str(clone)))
+        assert effect.id == "ef-prep"
+
+        # "崩溃"：prepare 的 git 副作用已经发生，effect 仍停在 running（claim 后没落账）
+        created = manager.prepare(ticket, repository=str(clone), base_ref="main")
+        with store.transaction():
+            store.update_effect(effect.model_copy(update={"state": EffectState.RUNNING}))
+        assert store.reclaim_running_effects(clock.now_ms()) == 1
+
+        dispatcher = EffectDispatcher(
+            store,
+            {EffectKind.PREPARE_WORKTREE: prepare_worktree_handler(manager, store)},
+            clock=clock,
+        )
+        assert await dispatcher.dispatch_due() == 1
+
+        settled = store.get_effect("ef-prep")
+        assert settled is not None and settled.state is EffectState.SUCCEEDED
+        assert settled.attempts == 1  # reclaim 还掉了崩溃前那次 claim，重放只算一次真实执行
+        assert (
+            store._conn.execute(
+                "SELECT COUNT(*) FROM effects WHERE kind = 'prepare_worktree'"
+            ).fetchone()[0]
+            == 1
+        )
+        # 现场：一个 worktree、一个分支、ownership 仍是第一次建的
+        assert _worktree_paths(clone) == [str(clone.resolve()), str(created.path)]
+        assert _branch_count(clone, created.branch) == 1
+        ownership = json.loads(created.ownership_file.read_text(encoding="utf-8"))
+        assert ownership["created_at"] == clock.now_ms()
+        assert ownership["branch"] == "sa-01234567-add-rate-limiter"
+    finally:
+        store.close()
+
+
+def test_prepare_effect_key_is_scoped_to_the_assignment(tmp_path: pathlib.Path) -> None:
+    """幂等键 = `prepare:{assignment_id}`：同键重复入队不新增行，payload 只刷新不复活。"""
+    clock = FixedClock()
+    store = Store(tmp_path / "keys.db", clock=clock)
+    try:
+        ticket = _ticket("Add rate limiter")
+        with store.transaction():
+            store.insert_ticket(ticket)
+            first = store.enqueue_effect(_prepare_effect("ef-1", ticket, "/clones/a"))
+            second = store.enqueue_effect(_prepare_effect("ef-2", ticket, "/clones/b"))
+        assert prepare_idempotency_key("as-1") == "prepare:as-1"
+        assert (first.id, second.id) == ("ef-1", "ef-1")
+        assert second.payload["repository"] == "/clones/b"
+        assert store._conn.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 1
+    finally:
+        store.close()
+
+
+async def test_prepare_effect_without_ticket_row_fails_loudly(tmp_path: pathlib.Path) -> None:
+    """Ticket 行不在库里就炸给 dispatcher：不猜标题、不静默建 worktree。"""
+    store = Store(tmp_path / "gone.db", clock=FixedClock())
+    try:
+        manager, _ = _manager(tmp_path / "worktrees", FixedClock())
+        handler = prepare_worktree_handler(manager, store)
+        effect = _prepare_effect("ef-x", _ticket("Add rate limiter"), str(_make_clone(tmp_path)))
+
+        with pytest.raises(ValueError, match="不在库里"):
+            await handler(effect)
+        assert not (tmp_path / "worktrees").exists()
+    finally:
+        store.close()

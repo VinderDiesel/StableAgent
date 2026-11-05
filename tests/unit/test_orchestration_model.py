@@ -145,11 +145,16 @@ def test_assignment_cross_record_check_rejects_foreign_ticket() -> None:
 
 
 def test_m2_effect_kinds_close_the_whitelist() -> None:
-    assert {k.value for k in EffectKind} == {
+    values = {k.value for k in EffectKind}
+    assert values == {
         "launch_assignment",
         "deliver_input",
         "cancel_assignment",
-    }  # C1：P4 不引入 P5/P6 种类，白名单就此闭合
+        "prepare_worktree",
+    }  # C1 + ADR-05 决策 5：白名单只按里程碑点名扩容，P5/M2 加 prepare_worktree
+    # L6：merge 与 auto-merge 在类型里不存在（值与成员名两个口径都钉死），不是"运行时开关拒绝"
+    names = {k.name.lower() for k in EffectKind}
+    assert {"merge", "enable_auto_merge", "auto_merge"}.isdisjoint(values | names)
 
 
 def test_deadline_and_input_state_are_defaulted_compat_fields() -> None:

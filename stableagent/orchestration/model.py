@@ -65,6 +65,9 @@ class EffectKind(str, Enum):
     LAUNCH_ASSIGNMENT = "launch_assignment"
     DELIVER_INPUT = "deliver_input"
     CANCEL_ASSIGNMENT = "cancel_assignment"
+    # P5/M2（ADR-05 决策 5）：worktree 创建由 outbox 驱动。`effects.kind` 是无 CHECK 的 TEXT，
+    # 加成员是非破坏性扩展；merge/auto-merge 永远不进这个枚举（L6）。
+    PREPARE_WORKTREE = "prepare_worktree"
 
 
 class ReportKind(str, Enum):
