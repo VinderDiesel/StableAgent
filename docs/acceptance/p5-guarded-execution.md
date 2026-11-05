@@ -99,6 +99,13 @@
       多出来的键只允许是 macOS 在 exec 时注入的 `__CF_USER_TEXT_ENCODING`（`OS_INJECTED_KEYS` 写死名单，
       Linux CI 上那条差集为空）。容器挂载与容器内环境属 Task 10/D2，prompt/日志/Report 的脱敏属
       Task 9 与 M3，故 L7 仍不勾。
+      进度（2026-11-05，M2 Task 8 的 Report 文本半边）：进 Report 的那一行由
+      `CommandResult.summary()` 生成，只写"模式 + 结果码（被拒写稳定码、超时写 `timed_out`）+
+      是否截断 + 耗时"；`test_summary_carries_no_stream_text` 断言标记串在 `result.stdout` 里确实
+      存在、在 `result.summary()` 里不存在——"命令正文不进长期记录"是可测的而不是口头约定。
+      另记一条已在 Task 7 落定的顺序事实：`stdout`/`stderr` 在进 `CommandResult` 之前就已过一遍
+      `_redact`（先脱敏后截断），所以调用方拿到的正文本身不含配置里列出的密钥。prompt/日志侧脱敏
+      与容器挂载仍未闭合，L7 继续不勾。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
 
@@ -358,6 +365,10 @@
       ticket/assignment/仓库/base ref，而 `worktree_root` 是全 Ticket 共用的根，身份只能随请求走）、
       构造函数加 `clock`（`started_at`/`ended_at` 的来源，房子口径同 `Store`/`GitWorktreeManager`）、
       拒绝码表多一个 `empty_argv`。
+      进度（2026-11-05，M2 Task 8）：上面点名的"文本形状"半边已落——`CommandResult.summary()` 一行
+      带 `truncated|intact` 与结果码，脱敏过的正文一个字符都不进（`test_summary_carries_no_stream_text`、
+      `test_summary_names_mode_exit_code_and_truncation`）。"入 Report"的接线半边仍未证：没有任何生产
+      调用方把这一行写进 `Assignment Report`，那是 Task 12 / M3 的事，2.6 继续不勾。
 - [x] **2.7** `environment.py` 变量白名单（TICKET_ID/ASSIGNMENT_ID/WORKTREE/仓库信息），
       宿主其余环境不注入。验证：子进程可见环境断言（C8、L7）。
       证据（2026-11-05，M2 Task 6）：`execution/environment.py`（8 语句、覆盖 100%）的
@@ -383,8 +394,21 @@
       与 `git_env()` 的口径差一条并写进 docstring：git 侧 `LANG=C`（只吐按行解析的 plumbing 输出），
       子进程侧 `LANG=C.UTF-8`（Agent 命令要吐中文标题与 diff，Report 需统一按 UTF-8 解释与脱敏）；
       两侧共同点是都不注入 `HOME`。计划偏差与补测见 §6 Task 6。
-- [ ] **2.8** `LocalRestrictedRunner` + 叙事纪律：类文档、拒绝消息、Report summary 禁
+- [x] **2.8** `LocalRestrictedRunner` + 叙事纪律：类文档、拒绝消息、Report summary 禁
       "sandbox" 一词。验证：文案断言测试（D1）。
+      证据（2026-11-05，M2 Task 8，提交 `6a79767`）：`execution/sandbox.py`（11 语句、100%）落
+      `SandboxRunner` 协议（规格 2.4 签名原样）与 `LocalRestrictedRunner(runner: CommandRunner)`——
+      后者只做 `asyncio.to_thread` 包装，判定/拒绝码/脱敏/截断仍只在 `command.py` 一处；
+      `CommandResult.summary()` 一行写"模式 + 结果码 + 是否截断 + 耗时"。三处禁词语料由
+      `test_local_restricted_never_says_sandbox` 一次断完（类文档 + 两条被拒结果的 `summary()`），
+      小写化后不含 `sandbox`、含 `local-restricted`；整个 `stableagent/execution/` 里 `grep -ri sandbox`
+      只剩协议名两处（`class SandboxRunner` 定义处，与模块文档解释"这个名字不承诺隔离"那一句）——
+      `command.py` 已 0 处。本轮实测：目标文件 7 例、全量 545 passed / 1 skipped、
+      总覆盖 99.17%。
+      两条边界照实写：①"Report summary" 在本轮是**文本形状**（`summary()`），写进
+      `Assignment Report` 的接线属 Task 12 / M3，不因本步勾 2.6；②`DockerRunner`（D2）未落，
+      `CommandResult.mode` 的默认值是 `local-restricted`，容器实现必须显式换串——这条已写进常量
+      注释并作为 Task 10 的验收点。
 - [ ] **2.9** shell 拒绝：`shell=True`、shell 语法字符（`;|&$\``）一律拒绝且审计。
       验证：注入语料表（C6）。
 - [ ] **2.10** `DockerRunner` 参数装配断言：`--network none`、非特权、无 socket、CPU/内存/pid/
@@ -601,7 +625,16 @@
 
 ### D Sandbox 分层（M2）
 
-- [ ] **D1** `LocalRestrictedRunner` 的文档、拒绝消息、Report 不称"sandbox"（文案断言）。
+- [x] **D1** `LocalRestrictedRunner` 的文档、拒绝消息、Report 不称"sandbox"（文案断言）。
+      证据（2026-11-05，M2 Task 8）：`tests/unit/test_sandbox.py::test_local_restricted_never_says_sandbox`
+      的语料正好是三处——`inspect.getdoc(LocalRestrictedRunner)`、`command_not_allowed` 被拒结果的
+      `summary()`、`cwd_escape` 被拒结果的 `summary()`；每处 `assert "sandbox" not in lowered` 与
+      `assert "local-restricted" in lowered`。语料前两条 `denied_reason` 断言不是装饰：拒绝若落在别的
+      码上（或根本没被拒），文案断言就只是在读一份不相干的文本。
+      口径记一句：本仓库的"拒绝消息"在数据上是**稳定码**，没有独立文案，因此对它可断言的载体是被拒
+      结果渲染出的那一行 `summary()`——这正是 D1 与步骤 2.6"截断与脱敏入 Report"共用的一条文本。
+      纪律自身也咬过一次人：类文档首版引用了测试文件路径 `tests/unit/test_sandbox.py`，路径里的
+      `sandbox` 让 D1 直接转红（`1 failed, 5 passed`），改写后才绿——见 §6 Task 8 Step 2。
 - [ ] **D2** `DockerRunner` 默认参数：network none、非特权、无 socket、资源上限、仅挂本
       worktree、镜像配置带 pin 指南（argv 构造断言）。
 - [ ] **D3** Docker 不可用时测试跳过、核心门禁不受影响。
@@ -1072,7 +1105,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~7 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~8 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
@@ -1482,14 +1515,55 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   明确"local-restricted 不是安全沙箱，DockerRunner 才是边界"；`CommandResult.summary() ->
   str` 生成 Report 用的一句话（含 `local-restricted`、退出码、是否截断，不含 stdout 原文、
   不含 "sandbox"）。
-- [ ] **Step 1: 写失败的测试**：`test_local_restricted_never_says_sandbox`——`inspect.getdoc`
+- [x] **Step 1: 写失败的测试**：`test_local_restricted_never_says_sandbox`——`inspect.getdoc`
   取类文档、拒绝消息语料（allowlist 拒绝、cwd 拒绝）、`summary()` 三处都断言小写化后不含
   `"sandbox"` 且含 `"local-restricted"`；`test_runner_delegates_to_command_runner`。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
+  实落 7 例（新建 `tests/unit/test_sandbox.py`）：D1 语料一处不缺——三处文本进同一个 dict 逐条断，
+  语料前先钉 `denied_reason == "command_not_allowed"` / `"cwd_escape"`（拒绝若不是那两条码，文案断言
+  就空转）；委派用替身 `RecordingRunner`，断 `inner.calls == [request]` 且结果 `is sentinel`，
+  这样"本地实现只做包装"是行为断言而不是读代码得出的印象；协议另有一例（`__mro__[1] is object`
+  证不继承 + `runtime_checkable` 的 `isinstance` 证结构匹配）。
+  计划外两例：`test_summary_carries_no_stream_text`（L7 的可执行形式——stdout 里的标记串进不了
+  那一行）与 `test_timeout_summary_names_the_missing_exit_code`（summary 的 `timed_out` 分支：
+  事实是"没有退出码"，不该写成 `exit=None`）。后者是首跑覆盖率报出 `command.py:105` 未覆盖后补的，
+  不是先想到再写的。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
   Expected: FAIL — `ModuleNotFoundError: No module named 'stableagent.execution.sandbox'`。
-- [ ] **Step 3: 实现** `sandbox.py`。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: add the local-restricted runner without sandbox claims"`
+  Actual: `ERROR collecting tests/unit/test_sandbox.py` → `ModuleNotFoundError: No module named
+  'stableagent.execution.sandbox'`（`1 error in 0.19s`，收集期即红，与 Expected 同型）。
+  **另记一次"实现之后才出现的红"**：`sandbox.py` 首版类文档写了测试文件路径
+  `tests/unit/test_sandbox.py`，D1 的小写化断言把路径里的 `sandbox` 也算进去 →
+  `AssertionError: 类文档 把本地受限模式称成了沙箱`（`1 failed, 5 passed`）。这是禁词纪律本身生效，
+  不是测试写坏：类文档改成"由单元测试把本类文档、两条拒绝消息与 `summary()` 一起断言"后转绿，
+  并顺手把 `command.py` 里 `CommandRunner` 文档中指向 `execution/sandbox.py` 的那句也改成指向
+  `LocalRestrictedRunner`——文件名不是谎言，但禁词不留路径引用更省心。
+- [x] **Step 3: 实现** `sandbox.py`。
+  `stableagent/execution/sandbox.py`（11 语句）= `SandboxRunner`（`@runtime_checkable` Protocol，
+  规格 2.4 签名原样 `async def run(self, request: CommandRequest) -> CommandResult`）+
+  `LocalRestrictedRunner(runner: CommandRunner)`。类文档把口径写死三行：这一档约束的是"Agent 能
+  发起哪一类动作"（名单逐字节、cwd 收口、输出预算、超时），不约束"动作本身作恶的能力"（网络、
+  worktree 之外的文件系统、CPU/内存、恶意代码）；那条边界属于 `DockerRunner`（WP-5.3）。
+  两处计划未指定、按房子口径补的决定：
+  (1) **`CommandResult.mode` 字段**（`command.py`，常量 `LOCAL_RESTRICTED = "local-restricted"` 作默认）。
+      计划要求 `summary()` 含 `local-restricted`，不加字段只能在 summary 里硬编码模式串——那么
+      Task 10 的 `DockerRunner` 复用同一个 dataclass 时会替容器结果宣称"本地受限"。字段是带默认值的
+      兼容性新增（现有三处构造点一字不改），并把"`DockerRunner` 不得沿用默认值冒充本地执行"写进
+      常量注释，留给 Task 10 收。
+  (2) **`asyncio.to_thread` 下沉**：口径同 ADR-02 检查清单第 6 条（同步驱动下沉到线程）。一次命令
+      最长可跑到它的超时（默认 60 秒），而 ADR-04 决策 2 的编排循环是单线程 asyncio——直接调用会
+      拿一条命令的时长停住整条循环。协议之所以是 `async`，规格 2.4 这条接口就是为它准备的。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+  Actual: 目标文件 **7 passed**、全量 **545 passed, 1 skipped**（+7）、总覆盖 99.17%；
+  `execution/sandbox.py` 11 语句 **100%**、`execution/command.py` 98 语句 **100%**（+9 语句 =
+  `summary()` 的三分支、`mode` 字段与常量）；`mypy` Success（51 source files，+1）、
+  `ruff check` All checks passed、`ruff format --check` 114 files already formatted（一处签名超
+  100 列被 `E501` 挡过，格式化改行）；L1 `git diff 234f620..HEAD --stat -- stableagent/core/` = 0 行，
+  本轮对 `stableagent/core/` 与 `orchestration/service.py` 的 diff 同为 0 行；
+  `test_execution_imports_only_the_layers_below_it` 的语料是 `rglob("*.py")`，新模块自动进方向扫描，
+  无需改名单。
+- [x] **Step 5: 提交**：`git commit -am "feat: add the local-restricted runner without sandbox claims"`
+  → `6a79767`（三个路径先 `git add`，账本回填单独提交）。步骤 2.8 与 D1 随之勾选；步骤 2.6 仍不勾——
+  `summary()` 只是 Report 的**文本形状**，真正写进 `Assignment Report` 的接线在 Task 12 / M3。
 
 ### Task 9: shell 语法拒绝与审计（步骤 2.9）
 
