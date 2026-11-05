@@ -4,7 +4,7 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 7/46、里程碑步骤 9/40（M1 9/9、M2 0/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **DoD 8/46、里程碑步骤 9/40（M1 9/9、M2 0/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
@@ -240,6 +240,12 @@
 
 - [ ] **2.1** `execution/` 包骨架 + `GitWorktreeManager`：参数数组调用 git、路径
       `Path.resolve()` 锁 root。验证：路径逃逸拒绝用例（C4）。
+      进度（2026-11-05，M2 Task 1 骨架 + C4 半边）：包落位 `__init__.py`
+      （`EXECUTION_SCHEMA_VERSION = "0.1.0"`，不顶层重导出）、`errors.py`（`ExecutionError(ValueError)`
+      + `path_escape`/`worktree_reuse`/`command_denied`/`cleanup_unconfirmed` 四个稳定码）、
+      `paths.py`（`confine()`，C4 已收口并勾选）；`tests/unit/test_execution_boundaries.py` 把方向锁钉死
+      （execution 只可 import 自身/control/orchestration/core，integrations 零引用）。参数数组调用 git 的
+      `GitWorktreeManager` 本体属 Task 3（步骤 2.3），本步届时整体勾选。
 - [ ] **2.2** 分支/worktree 命名纯函数：`sa-<ticket短id>-<slug>`，slug 仅 `[a-z0-9-]`；
       request 文本永不直通。验证：命名往返 + 注入文本用例（C5）。
 - [ ] **2.3** 复用判定：仓库 remote / Ticket metadata / base ref / ownership 四要素全等复用，
@@ -403,7 +409,12 @@
 - [ ] **C1** 多 Ticket 并行 worktree 目录与分支互不污染（并发集成用例）。
 - [ ] **C2** 重复 prepare 幂等复用同一 worktree（含崩溃重放）。
 - [ ] **C3** 复用四要素（remote/metadata/base ref/ownership）不一致时拒绝并保留诊断。
-- [ ] **C4** 路径逃逸拒绝：resolve 后必须在配置 root 内。
+- [x] **C4** 路径逃逸拒绝：resolve 后必须在配置 root 内。
+      证据（2026-11-05，M2 Task 1）：`execution/paths.py` 的 `confine(root, candidate)` 是全层
+      唯一收口点——相对路径先拼 root、随后 `resolve()`，判定用 `is_relative_to(root.resolve())`，
+      root 自身算在内；`tests/unit/test_worktree.py` 四例覆盖 `..` 穿越、root 外的绝对路径、
+      `/etc/hosts`、以及**链接本身在 root 内而解析结果在外**的符号链接（macOS `/var` →
+      `/private/var` 同型）；错误详情同时给出 root 与原始 candidate（`test_confine_error_names_the_root_and_the_candidate`）。
 - [ ] **C5** request 文本不直通分支名、路径、命令参数；slug 仅 `[a-z0-9-]`。
 - [ ] **C6** `shell=True` 与 shell 语法字符一律拒绝且有审计。
 - [ ] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
@@ -882,7 +893,8 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：待开工。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），展开为 **12 个 Task / 60 个 Step**。
+> **状态：执行中（M2 Task 1 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
 > （`EffectKind` 加成员属 ADR-05 决策 5 点名允许，`service.py` 一字不动——约束 1）；`control/`
@@ -947,17 +959,33 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   execution → control → orchestration → core）；不得 import `stableagent.integrations`
   （尚不存在，名单先含）；`test_control_boundaries.py` 的 L2 语料按目录枚举自动把新包纳入
   旧包侧扫描，无需改名单。
-- [ ] **Step 1: 写失败的测试**：`test_execution_version_is_independent_and_not_reexported`；
+- [x] **Step 1: 写失败的测试**：`test_execution_version_is_independent_and_not_reexported`；
   `test_execution_never_imports_integrations`；`test_confine_rejects_escape`
   （`../x`、绝对路径外部、指向外部的 symlink）、`test_confine_accepts_inside`。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_execution_boundaries.py
+  实际落位：另加 `test_execution_imports_only_the_layers_below_it`（把"只可 import 自身/control/
+  orchestration/core"整条方向锁钉住，integrations 用例是它的子集）与
+  `test_execution_error_code_inventory_is_unique_and_prefixed`（沿 M1 Task 1 先例：错误家族四个 code
+  一次落地，用库存测试撑住 `errors.py` 的 100% 覆盖，消费者在 Task 3/5/10 各自补上）；
+  路径用例拆成 C4 四例（穿越+外部绝对路径+`/etc/hosts` 同例、symlink 单例、错误详情单例），
+  共 8 例分放两文件：`test_execution_boundaries.py` 4 例 + `test_worktree.py` 4 例。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_execution_boundaries.py
   tests/unit/test_worktree.py` Expected: FAIL — `ModuleNotFoundError: No module named
   'stableagent.execution'`（若收集期在更上游失败，按实测记 Actual）。
-- [ ] **Step 3: 实现** `__init__.py`（docstring 写明"执行层不认识集成层"）、`errors.py`、
+  Actual: FAIL — 两文件各自收集期 `ModuleNotFoundError: No module named 'stableagent.execution'`，
+  `2 errors during collection`——M2 第一次计划预期红直接命中（M1 只命中过一次）。
+- [x] **Step 3: 实现** `__init__.py`（docstring 写明"执行层不认识集成层"）、`errors.py`、
   `paths.py`；symlink 用例先 `Path.symlink_to` 造出真实链接再断言。
-- [ ] **Step 4: 跑到绿**：目标两文件 + `tests/unit/test_control_boundaries.py`（新包入矩阵后
+  实际落位：三个新文件共 37 stmts（`__init__` 3、`errors` 22、`paths` 12），全部 100%；
+  `confine()` 对 root 自身放行（prepare 要在 root 下建目录）；symlink 用例是真造链接、不是 mock。
+- [x] **Step 4: 跑到绿**：目标两文件 + `tests/unit/test_control_boundaries.py`（新包入矩阵后
   仍绿）+ 全量 `pytest -q`；`mypy`/`ruff check`/`ruff format --check` 全绿。
-- [ ] **Step 5: 提交**：`git commit -am "feat: open the execution package with path confinement"`
+  首轮自红一处（测试侧，生产代码未改）：`test_execution_imports_only_the_layers_below_it` 把包内
+  自引用 `stableagent.execution.errors` 当成越界——白名单补 `stableagent.execution` 前缀后绿。
+  复跑：目标两文件 + control/orchestration 两矩阵 = `27 passed`；全量 `484 passed, 1 skipped`
+  （+8）、总覆盖 99.16%；`mypy` Success（44 source files，+3）；`ruff check` All checks passed；
+  `ruff format --check` 105 files already formatted；L1 `git diff 234f620..HEAD -- stableagent/core/`
+  = 0 行、约束 1 `orchestration/service.py` = 0 行。
+- [x] **Step 5: 提交**：`git commit -am "feat: open the execution package with path confinement"`
 
 ### Task 2: 命名纯函数（步骤 2.2）
 
