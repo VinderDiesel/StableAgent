@@ -3,10 +3,12 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 17/46、里程碑步骤 19/40（M1 9/9、M2 10/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
-> `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
-> `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
+> 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口，M2 已于
+> 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾），当前
+> **DoD 18/46、里程碑步骤 20/40（M1 9/9、M2 11/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> `main`（`5e94377`）；M2 计划已落并已执行（第 6 节，12 Task / 60 Step），执行分支
+> `feat/p5-m2-isolated-execution` **尚未快进 `main`**——M2 的收口口径是本地门禁全绿 + 账本回填，
+> 合并与远端 CI 复现的时机按 P4 惯例由维护者指示（P5 级收口另见步骤 4.7）。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
 > 验收账本（第 0、2 节）。每个可勾选事项写明来源、验证方法或命令、证据占位；全部勾选且第 3 节
@@ -46,6 +48,21 @@
       `test_guarded_cancel_rolls_back_all_three_on_error` 证明：注入 revoke 异常 → ticket 仍 QUEUED、`due_effects` 空、
       approval 仍 pending、`store.in_transaction is False`），`AuditWriter` 不自开事务（单条 INSERT 自动提交）。
       `await` 源码扫描门仍未落：M1 没有协程可扫，接线（M2 executor / M3 集成层）后补。
+      M2 出口复测（2026-11-05，Task 12）：那句"接线后补"兑现了——M2 在心脏层引入了 3 个协程
+      （`execution/effects.py` 的 `handle`、`execution/sandbox.py` 的 `LocalRestrictedRunner.run`、
+      `execution/docker.py` 的 `DockerRunner.run`，后两者只 `await asyncio.to_thread(...)`），
+      扫描有了对象。落点 `tests/unit/test_execution_boundaries.py`：
+      `test_no_transaction_body_awaits` 对 `stableagent/**/*.py` 逐个 AST 解析，断言没有任何函数体
+      同时出现 `x.transaction()` 与 `await`（只认属性调用，`Store.transaction` 自己的定义不算使用点；
+      方向是多报，嵌套定义里的 await 记在外层函数头上）；`test_the_await_scan_finds_a_planted_violation`
+      种一个 `bad` 函数证明它不是空转。扫描不是空话的另一个读数：库里 31 处 `transaction()` 调用、
+      分布在 6 个文件，其中 5 个文件里也出现了 `await` 这个词——按函数体判定才是 0 处。
+      运行时那半边一直在位：`outbox.py:49` 的 `assert not self._store.in_transaction`
+      （`test_handler_never_sees_an_open_transaction`、`test_transaction_wrapper_still_rejects_nesting`）。
+      **L3 仍不勾**：本条要求"授权判定、审批状态、Mandate+Ticket+effect 的原子写入全部在同步段完成"，
+      M2 只新增 `execution/effects.py` 一处对 `Store` 的**读**（`get_ticket`），没新增任何写入；
+      M3 的 `control` 入口事务（步骤 3.6）才是那句话的完整对象。崩溃注入用例（L3 验证栏的后一半）
+      同属 M3。
 - [ ] **L4 外部文本不扩权**：Issue/prompt/工具输出/MCP 返回中的任何文本不能创建或扩大
       Mandate；只有 `control.policy` 能构造 `p5-v1` Mandate。
       验证：行为测试（把指令文本放进请求正文，断言授权集不变）+ 构造入口扫描。
@@ -128,6 +145,10 @@
       于是容器档补了定点清理（按请求摘要命名 + 超时分支 `docker kill`），补完全绿。
       **仍未闭合**：宿主凭据会不会经 `docker` daemon 间接可达（这一跑只看容器内的环境，没查
       daemon 侧）；prompt/日志侧脱敏照旧，L7 继续不勾。
+      M2 出口复测（2026-11-05，Task 12）：本轮新增用例没有开出新的凭据路径——并发集成用例的
+      origin 是 `https://github.example/…` 假 URL（不含 userinfo），ownership 里落的仍是脱敏后的
+      remote（`test_ownership_never_records_credentials` 那半边在 `test_worktree.py` 已证），
+      并发跑的孩子仍只见七键白名单（C8）。出口没有让这句话变得更真，也没有让它更假。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
       进度（2026-11-05，M2 Task 11 的 Docker 半边）：Docker 这一半的形状落定了——`docker` marker
@@ -138,6 +159,12 @@
       本仓库不 pull 镜像：真实用例还要 `STABLEAGENT_DOCKER_IMAGE` 指一个本地已 pin 的引用，
       缺它同样跳过。**仍未闭合**：真实 GitHub 那一半（M4 的 WP-5.5 才有可选 smoke test），
       以及"CI 上确实没有 Docker 可用"这一条只能靠 CI 日志而不是本地断言——L8 继续不勾。
+      M2 出口复测（2026-11-05，Task 12）：出口读数 `581 passed, 6 skipped` 是在没有 `-m docker`、
+      没有两个门禁变量的环境里取到的，跳过原因在 `-rs` 里逐条可见。新落的
+      `tests/integration/test_worktree_concurrency.py` 用**真 git 与真目录**但完全不联网——
+      取向 ① 写明"不 mock git 输出"，它要跑的 `worktree add` 只读本地对象库，所以它不在 L8
+      要拦的那一类（Docker / 真实仓库）里，也不需要 marker。仍未闭合的两半没变：真实 GitHub
+      那一半，以及 CI 侧的在场证明（步骤 4.3/4.7）。
 
 ## 1. 里程碑与步骤
 
@@ -399,6 +426,10 @@
       带 `truncated|intact` 与结果码，脱敏过的正文一个字符都不进（`test_summary_carries_no_stream_text`、
       `test_summary_names_mode_exit_code_and_truncation`）。"入 Report"的接线半边仍未证：没有任何生产
       调用方把这一行写进 `Assignment Report`，那是 Task 12 / M3 的事，2.6 继续不勾。
+      进度（2026-11-05，M2 出口 Task 12）：上面点名的两个候选时机里，Task 12 只交付并发用例与账本，
+      **没有生产改动**（`service.py` 一字不动是 M2 的约束 1，Report 写入点也不在 M2 的面上），
+      所以这半句仍缺、2.6 仍不勾。M2 因此按 11/12 收口；接线归 M3（步骤 3.6/3.7 那批事务与
+      handler 落地时，`CommandResult.summary()` 才有生产调用方）。
 - [x] **2.7** `environment.py` 变量白名单（TICKET_ID/ASSIGNMENT_ID/WORKTREE/仓库信息），
       宿主其余环境不注入。验证：子进程可见环境断言（C8、L7）。
       证据（2026-11-05，M2 Task 6）：`execution/environment.py`（8 语句、覆盖 100%）的
@@ -513,7 +544,35 @@
       挡住而 `/tmp` 可写、容器环境里五个 `STABLEAGENT_*` 到位且三个宿主密钥名一个不见（L7）。
       门禁与覆盖：`mypy` 52 files、`ruff check` 通过、`ruff format --check` 116 files、
       `docker.py` 覆盖 100%、L1 与约束 1 diff 0 行。装配口径的改动见 §6 Task 11 Step 3。
-- [ ] **2.12** **M2 出口**：全量门禁 + 并行 Ticket 目录互不污染集成用例（C1）+ 账本回填。
+- [x] **2.12** **M2 出口**：全量门禁 + 并行 Ticket 目录互不污染集成用例（C1）+ 账本回填。
+      证据（2026-11-05，M2 Task 12）：并发用例落 `tests/integration/test_worktree_concurrency.py`
+      （4 条；真 git + 真目录 + `https://github.example/…` 假 origin，`worktree add` 只读本地对象库，
+      全程离线，L8）。① `test_parallel_tickets_get_disjoint_worktrees`——两个 Ticket 用
+      `asyncio.gather` + `asyncio.to_thread` 并发 `prepare`（`prepare` 是同步的，它不在
+      `SandboxRunner` 协议上）：目录名与分支名互异且都匹配 `WORKSPACE_RE`，
+      `git worktree list --porcelain` 去掉主克隆后恰好两行，两条分支各 1 行，两份 ownership
+      各写各的 `ticket_id`/`branch`/`base_ref`/`repository`；②
+      `test_parallel_commands_run_in_their_own_worktree`——两条命令经 `LocalRestrictedRunner` 并发，
+      stdout 里的 `os.getcwd()` 就是各自 worktree，孩子写下的 `who.txt` 是自己的
+      `STABLEAGENT_TICKET_ID`，两份互异；③ `test_uncommitted_files_do_not_cross_the_worktrees`——
+      A 的未跟踪文件不出现在 B 与主克隆的 `git status` 里；④
+      `test_three_tickets_in_parallel_stay_disjoint`——并发度 3 仍是 3 目录/3 分支/3 ownership，
+      排除"只有两个才碰巧不打架"。同一命令重复跑 5 次全绿，没观察到 `git worktree add` 锁竞争。
+      **本轮没有生产改动**：Step 2 只有一条红，红因是我把"B 的工作区干净"写成 `== ""`——
+      `.stableagent-worktree.json` 本就是本系统写进工作区的唯一未跟踪文件（`worktree.py` 的清理
+      口径建在这句话上），实测 `?? .stableagent-worktree.json`。改断言不改 manager，计划里那句
+      "若无共享态则记为一次即绿"按这个形状兑现：共享态没出现，出现的是我对既有事实的误写。
+      计划外一处：`tests/unit/test_execution_boundaries.py` 补 L3 的源码扫描半边
+      （`test_no_transaction_body_awaits` + 非空转那条），兑现 M1 出口欠下的那句
+      "`await` 源码扫描门……接线后补"——细节写在 §0 L3 与 §6 Task 12 Step 3。
+      出口门禁读数：全量 `581 passed, 6 skipped`、总覆盖 `99.21%`；`execution/` 11 个文件逐个
+      ≥96%（10 个 100%，`git.py` 96% 缺的是超时那两行）；`mypy` 52 source files、`ruff check`
+      通过、`ruff format --check` 117 files already formatted；L1 对 `stableagent/core/` 0 行、
+      约束 1 对 `orchestration/service.py` 0 行。CI 心脏 FOCUS 名单本轮**未**扩到 `execution/`——
+      那是步骤 4.3 点名的扩容，不在 M2 射程。
+      **M2 按 11/12 收口，不是 12/12**：2.6 仍不勾——缺的是"截断与脱敏**入 Report**"那半句的
+      接线，本轮零生产改动、`service.py` 一字不动，不能拿出口用例把它抹平；L3/L7/L8 的 M2 出口
+      复测在 §0 对应条目里（L3 扫描半边已落、L7/L8 各自那半缺，三条都继续不勾）。
 
 ### M3：MCP 与 GitHub 闭环（规格 WP-5.4 + WP-5.5；ADR-05 决策 4/8/9）
 
@@ -658,7 +717,16 @@
 
 ### C worktree 与命令（M2）
 
-- [ ] **C1** 多 Ticket 并行 worktree 目录与分支互不污染（并发集成用例）。
+- [x] **C1** 多 Ticket 并行 worktree 目录与分支互不污染（并发集成用例）。
+      证据（2026-11-05，M2 Task 12）：`tests/integration/test_worktree_concurrency.py` 四条，
+      并发是真线程（`prepare` 走 `asyncio.to_thread` + `gather`，命令走 `LocalRestrictedRunner`
+      自己的 `to_thread`），不是顺序调两次。四个半边各管一段：目录与分支互异 +
+      `git worktree list` 去掉主克隆恰两行 + 两条分支各一行 + 两份 ownership 互不覆盖；
+      并发命令的 cwd 与 `who.txt` 各归各；A 的未跟踪文件不进 B 的 `git status`（B 只剩它自己的
+      ownership 标记）；并发度 3 仍互异。同一命令重复 5 次全绿。
+      口径钉一句：本条证的是**不同 Ticket**并发。同一 Ticket 同时两次 `prepare` 没有互斥，
+      manager 也不带锁——那条路径的语义是 C2 的重放复用（先后两次，第二次命中四要素全等），
+      不是同时两次；把它写成"并发安全"是本项不该有的扩张。
 - [x] **C2** 重复 prepare 幂等复用同一 worktree（含崩溃重放）。
       证据（2026-11-05，M2 Task 4）：`test_prepare_effect_is_idempotent_on_replay`（换连接重放：
       一个 worktree、一个分支、ownership 不被改写、effect 一行且 `attempts == 1`）+
@@ -844,6 +912,7 @@
 ```bash
 .venv/bin/pytest -q tests/unit/test_policy.py tests/unit/test_approval.py tests/unit/test_worktree.py
 .venv/bin/pytest -q tests/unit/test_command_runner.py tests/unit/test_sandbox.py tests/unit/test_mcp_client.py
+.venv/bin/pytest -q tests/integration/test_worktree_concurrency.py   # C1：并发 worktree（M2 Task 12）
 .venv/bin/pytest -q tests/unit/test_github_integration.py tests/integration/test_mcp_stdio.py
 .venv/bin/pytest -q tests/integration/test_guarded_ticket_recovery.py
 .venv/bin/ruff check stableagent tests examples benchmarks
@@ -1283,7 +1352,8 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~11 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：M2 已收口（Task 1~12 全部执行完，2026-11-05；11/12 步骤绿，2.6 缺"入 Report"那半边）。**
+> 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。顶部计数本次一并校正：Task 5~8 四次收口只勾条目、没改第 0 节
 > 上方的汇总行，账上停在 `DoD 10/46、里程碑 13/40（M2 4/12）`，而 Task 9 开工前的真实值是
 > `DoD 13/46`（Task 6/7/8 各加一项 C8/C7/D1，未计入）、`里程碑 16/40（M2 7/12）`（Task 5 勾 2.5 起
@@ -1291,7 +1361,9 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 > `里程碑 17/40`（M1 9 + M2 8）。
 > 这是记账疏漏，不是判定变化——被改写的只有汇总行，各条证据原文未动。此后每收口一个 Task 只推进
 > 汇总行一处：Task 10 收口为 `DoD 16/46、里程碑 18/40（M2 9/12）`，Task 11 收口为
-> `DoD 17/46、里程碑 19/40（M1 9/9、M2 10/12）`，即文件头那一行。
+> `DoD 17/46、里程碑 19/40（M1 9/9、M2 10/12）`，Task 12（出口）收口为
+> `DoD 18/46、里程碑 20/40（M1 9/9、M2 11/12）`，即文件头那一行。M2 那一格停在 11/12 而不是
+> 12/12：2.6 没勾，缺的是 Report 接线半边，理由写在 §1 的 2.12 与 2.6 两处。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
 > （`EffectKind` 加成员属 ADR-05 决策 5 点名允许，`service.py` 一字不动——约束 1）；`control/`
@@ -2047,13 +2119,74 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 - Test: 同文件
 
 **Interfaces:** 无新生产接口。
-- [ ] **Step 1: 写失败的测试**：`test_parallel_tickets_get_disjoint_worktrees`——同一仓库同一
+- [x] **Step 1: 写失败的测试**：`test_parallel_tickets_get_disjoint_worktrees`——同一仓库同一
   base ref 的两个 Ticket 用 `asyncio.gather` 并发 prepare：目录名/分支名不同、
   `git worktree list` 恰两行、两份 ownership 文件各自正确、互不覆盖；再并发跑两条命令，
   stdout 各自只在自 worktree。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/integration/test_worktree_concurrency.py`
+  实际落四条（计划那一条只覆盖"目录与 ownership"，句子后半截的"并发两条命令"是另一件事，
+  拆成独立用例更好读）：① 计划原条（目录/分支互异 + 匹配 `WORKSPACE_RE` +
+  `git worktree list` 去掉主克隆后恰两行 + 两条分支各 1 行 + 两份 ownership 各写各的
+  `ticket_id`/`branch`/`base_ref`/`repository` + 两个 ownership 路径不同）；②
+  `test_parallel_commands_run_in_their_own_worktree`（并发跑两条命令，探针把 `os.getcwd()` 打到
+  stdout、把 `STABLEAGENT_TICKET_ID` 写进 cwd 下的 `who.txt`，两半一起读）；③
+  `test_uncommitted_files_do_not_cross_the_worktrees`（把"互不污染"从"目录名不同"推到
+  "两个工作区各有 index"）；④ `test_three_tickets_in_parallel_stay_disjoint`（并发度 3，排除
+  "只有两个才碰巧不打架"）。四处装置决定写在文件头：
+  ①`prepare` 是**同步**的（它是 effect handler 的下游，不在 `SandboxRunner` 协议上），并发只能
+  用 `asyncio.to_thread` + `gather` 造，不是 `await` 两个协程；命令那半边用
+  `LocalRestrictedRunner`——它自己就 `to_thread`，两次 `run` 是真并发。
+  ②计划里"`git worktree list` 恰两行"按事实改写：主克隆自己也占一行，所以断言是
+  "去掉 `str(clone.resolve())` 之后恰两行"（`_worktree_rows` 就是这句的实现，顺带解释了 macOS
+  上 `/var → /private/var` 为什么必须比 resolve 后的路径）。
+  ③探针仍是单表达式、不含 `;&|$` 反引号与换行——它要过同一份 `SHELL_METACHARACTERS` 判定，
+  测试自己也在这条规则之下（口径同 Task 9/11）。
+  ④`_git`/`_make_clone` 从 `tests/unit/test_worktree.py` **复制**而不是 import：跨测试模块 import
+  会让单测文件改名或动签名时连带打断集成用例，而 `tests/support.py` 是 P1 资产、本轮不动它。
+  代价是两份装置要同步维护，写在文件头。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/integration/test_worktree_concurrency.py`
   Expected: FAIL — 首次运行暴露的共享状态（若无共享态则记为"一次即绿"，如实记录）。
-- [ ] **Step 3: 实现**：按红因修 `GitWorktreeManager`；若一次即绿，不改生产代码。
-- [ ] **Step 4: 跑到绿**：出口命令全套（第 3 节 + `pytest -q`、`mypy`、ruff 两口、L1 diff 0、
+  Actual: `1 failed, 3 passed in 0.73s`。红的不是共享态，是我自己写错的一条断言——
+  `test_uncommitted_files_do_not_cross_the_worktrees` 里 `assert _git(second.path, "status",
+  "--porcelain", "--untracked-files=all") == ""` 收到
+  `?? .stableagent-worktree.json`。`worktree.py` 的清理口径早就写明 ownership 标记是"本系统自己
+  写进工作区的唯一未跟踪文件"，所以 B 那边**不可能**是全空；计划里那句"若无共享态则记为一次即绿"
+  按这个形状兑现：并发侧三条一次即绿（没有 `git worktree add` 锁竞争、没有 ownership 互相覆盖），
+  出现的是我对既有事实的误写。Step 1 之前的那次命令是 `file or directory not found`——文件还不存在。
+- [x] **Step 3: 实现**：按红因修 `GitWorktreeManager`；若一次即绿，不改生产代码。
+  **生产代码一行没动**（`git status` 下 `stableagent/` 无改动）：红因在断言，改断言——B 的
+  `git status` 期望从 `""` 改成 `["?? .stableagent-worktree.json"]`，并在 docstring 里把这句话
+  写清："干净"在这里等于"只有那一个名字"。`GitWorktreeManager` 不带锁、也不加锁：C1 说的是
+  **不同 Ticket** 并行，同 Ticket 同时两次 `prepare` 的语义是 C2 的重放复用（先后两次），本轮不
+  把它伪装成"并发安全"。
+  计划外一处（Files 没列）：`tests/unit/test_execution_boundaries.py` 追加 L3 的源码扫描半边——
+  `test_no_transaction_body_awaits`（对 `stableagent/**/*.py` 逐个 AST 解析，断言没有函数体同时出现
+  `x.transaction()` 与 `await`；只认属性调用，所以 `Store.transaction` 自己的定义不算使用点；方向是
+  多报，嵌套定义里的 await 记在外层函数头上）+ `test_the_await_scan_finds_a_planted_violation`
+  （种一个 `bad` 函数证明扫描不是空转）。落在这里的理由：M1 出口亲口写着"`await` 源码扫描门仍未落
+  ……接线（M2 executor / M3 集成层）后补"，而 M2 已经引入 3 个协程，欠的就是这个测试本身；
+  它是纯测试，不动生产面。库里 31 处 `transaction()` 调用分布在 6 个文件、其中 5 个文件里也出现
+  `await` 这个词——按函数体判定才是 0 处，所以这句话有对象。这两条一次即绿（断的是既有事实），
+  与非空转的证明一起给出。
+- [x] **Step 4: 跑到绿**：出口命令全套（第 3 节 + `pytest -q`、`mypy`、ruff 两口、L1 diff 0、
   `service.py` diff 0、`execution/` 覆盖率逐个 ≥90%）。
-- [ ] **Step 5: 提交**：`git add -A && git commit -m "feat: close p5 m2 with parallel worktree evidence"`
+  证据（2026-11-05）：新文件单跑 `4 passed`；同一命令重复 5 次全绿（0.57~0.63s，无锁竞争）；
+  四个 M2 心脏文件合跑 `99 passed`（`test_worktree.py` + `test_command_runner.py` +
+  `test_sandbox.py` + 新并发文件）；全量 `581 passed, 6 skipped`、总覆盖 `99.21%`（H4 的基线半边
+  在此读数：不低于 P4 的 99.02%）。`execution/` 逐文件：`command.py`/`docker.py`/`effects.py`/
+  `environment.py`/`errors.py`/`naming.py`/`paths.py`/`sandbox.py`/`worktree.py`/`__init__.py`
+  均 100%，`git.py` 96%（缺 `103-104` 两行 = `GitError` 的超时分支）——≥90% 全线通过。
+  `mypy` = `Success: no issues found in 52 source files`、`ruff check` = `All checks passed!`、
+  `ruff format --check` = `117 files already formatted`（116→117：新增并发文件；它第一次被
+  format 挑过一次，是 `to_thread(...)` 那行的换行形状）。L1 `git diff 234f620..HEAD --stat --
+  stableagent/core/` 空、约束 1 对 `stableagent/orchestration/service.py` 空。
+  第 3 节命令表的前四条里有 6 个目标文件尚不存在（`test_policy.py`、`test_approval.py`、
+  `test_mcp_client.py`、`test_github_integration.py`、`test_mcp_stdio.py`、
+  `test_guarded_ticket_recovery.py`——M3/M4 的落点），本轮只跑了已存在的三条；这是表格先写
+  收口命令、实现在后的既有状态，不是本轮新缺口，M2 出口不假装它们跑过。
+- [x] **Step 5: 提交**：`git add -A && git commit -m "feat: close p5 m2 with parallel worktree evidence"`
+  → 没用 `-A`：改显式 `git add` 三个路径（`tests/integration/test_worktree_concurrency.py`、
+  `tests/unit/test_execution_boundaries.py`、`docs/acceptance/p5-guarded-execution.md`）——
+  `docs/README.md`、`docs/blog/01`、`docs/blog/02` 里维护者的在制编辑仍在工作树，
+  `docs/blog/03-durable-outbox.md`、`docs/blog/README.md` 仍未跟踪，`-A` 会把它们一起卷进 M2 出口
+  提交。提交消息按原文。步骤 2.12 与 C1 随之勾选，2.6/`L3`/`L7`/`L8` 继续不勾（各缺哪一半写在
+  §1 与 §0 对应条目里），M2 以 11/12 收口；M3 开工按计划另行确认。

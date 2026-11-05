@@ -63,6 +63,63 @@ def test_execution_never_imports_integrations() -> None:
     assert not offenders
 
 
+def _await_inside_transaction(tree: ast.AST) -> set[str]:
+    """列出"同一个函数体内既开事务又 await"的函数名（L3 的源码扫描半边）。
+
+    只认 `x.transaction()` 这种属性调用——`Store.transaction` 的**定义**本身是个
+    `@contextmanager`，不该被当成使用点。方向是多报：嵌套定义里的 await 也记在外层函数头上。
+    """
+    offenders: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            continue
+        opens = any(
+            isinstance(call.func, ast.Attribute) and call.func.attr == "transaction"
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        )
+        awaits = any(isinstance(child, ast.Await) for child in ast.walk(node))
+        if opens and awaits:
+            offenders.add(node.name)
+    return offenders
+
+
+def test_no_transaction_body_awaits() -> None:
+    """L3 的扫描半边落地：整个 `stableagent/` 里没有一处 `transaction()` 与 `await` 同函数体。
+
+    M1 出口时这句话没法扫——那时心脏层零协程；M2 接了 effect handler 与两档 runner（都是
+    `to_thread` 包装），扫描才有对象。运行时那半边一直由 `outbox.py` 的
+    `assert not self._store.in_transaction` 守着，这一条是它的静态同伴。
+    """
+    offenders = {
+        str(module.relative_to(ROOT.parent)): sorted(_await_inside_transaction(tree))
+        for module in sorted(ROOT.rglob("*.py"))
+        if (tree := ast.parse(module.read_text(encoding="utf-8"))) is not None
+        and _await_inside_transaction(tree)
+    }
+    assert not offenders, offenders
+
+
+def test_the_await_scan_finds_a_planted_violation() -> None:
+    """扫描器不是空转：种一个"事务体内 await"的函数，它必须只报那一个名字。"""
+    tree = ast.parse(
+        "class Holder:\n"
+        "    def transaction(self): return None\n"
+        "\n"
+        "async def bad(store):\n"
+        "    with store.transaction():\n"
+        "        await work()\n"
+        "\n"
+        "async def sync_inside(store):\n"
+        "    with store.transaction():\n"
+        "        print('同步段')\n"
+        "\n"
+        "async def awaits_without_transaction(store):\n"
+        "    await work()\n"
+    )
+    assert _await_inside_transaction(tree) == {"bad"}
+
+
 def _all_error_classes() -> list[type]:
     return [
         obj
