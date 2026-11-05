@@ -309,8 +309,33 @@
       断言 `worktree list` 仍是主目录 + 我们这一条、`branch --list` 计数 1、ownership 的
       `created_at` 仍是崩溃前那次、effect 行数 1 且 `attempts == 1`（reclaim 还掉了崩前的 claim）。
       重放走新连接是刻意的：C2 的"崩溃"要证的是事实源在库里不在内存里（同 B4 口径）。
-- [ ] **2.5** 生命周期：Ticket 结束默认保留；清理需显式调用 + 人工确认参数，无自动删除。
+- [x] **2.5** 生命周期：Ticket 结束默认保留；清理需显式调用 + 人工确认参数，无自动删除。
       验证：结束后目录仍在 + cleanup 需 confirm 参数。
+      证据（2026-11-05，M2 Task 5）：`execution/worktree.py`（67 → 82 语句、覆盖仍 100%）加
+      `cleanup(handle, *, confirm=False, delete_branch=False)`：`confirm=False` 抛
+      `CleanupNotConfirmedError`（`execution.cleanup_unconfirmed`），消息带可执行的下一步
+      （`manager.cleanup(handle, confirm=True)`，连分支一起删再加 `delete_branch=True`），
+      `delete_branch=True` 不能代替确认（同一用例的第二道断言）。"无自动删除"按三种形态一起证：
+      manager 无 `__del__`、无定时器、也不接在 Ticket 状态机上——`test_worktree_survives_ticket_end`
+      用真 `Store` + 真 `OrchestrationService` 把 Ticket 推到 `COMPLETED`（OPEN→QUEUED→RUNNING→
+      READY→COMPLETED 全走状态机），随后断言目录、ownership 文件、受控分支、`git worktree list`
+      四项原样，且录制到的 git 调用里删除类 argv 为空（`_removal_calls` 只认 `worktree remove` 与
+      `branch -D` 两种指纹）。
+      口径决定（不传 `--force`）：ownership 标记是 prepare 自己写进工作区的唯一未跟踪文件，
+      `git worktree remove` 会因为它而拒绝（实测 rc=128），所以 `cleanup` 先按字节读出标记、摘掉它、
+      再 plain remove；remove 失败就意味着工作区里有**别人的**未提交内容，此时把标记按字节写回再抛
+      `GitError`——未提交内容由 git 的脏检查守着，一次失败的清理也不会损坏复用四要素之④
+      （`test_cleanup_refuses_uncommitted_work_and_keeps_the_marker`）。规格只要求"清理需显式调用 +
+      人工确认"，没要求系统提供丢弃未提交内容的入口，故本轮不伪造 `discard`/`--force` 参数。
+      接口扩展一处（计划未列，见 §6 Task 5）：`WorktreeHandle` 加 `clone` 字段——`worktree remove`
+      与 `branch -D` 必须在一个仍然存在的 worktree 里执行，被删目录本身不行（实测 cwd 取主克隆）。
+      另两条补测：`test_cleanup_deletes_branch_only_when_asked`（argv 序列固定 remove→`branch -D`、
+      两次 cwd 都是主克隆）、`test_cleanup_of_a_worktree_removed_by_hand_still_deletes_the_branch`
+      （目录已被人工删掉时 git 侧登记仍能清掉并按要求删分支）。
+      绿：目标文件 **38 passed**（+6）、全量 **518 passed, 1 skipped**、总覆盖 99.14%、
+      `execution/worktree.py` 与 `execution/errors.py` 均 100%；`mypy` Success（48 source files，
+      本轮零新文件）、`ruff check` All checks passed、`ruff format --check` 109 files already formatted；
+      L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行，约束 1 与整个 `orchestration/` 本轮 0 行。
 - [ ] **2.6** `CommandRunner`：命令名精确 allowlist、cwd 锁 worktree、超时、输出上限、
       截断与脱敏入 Report。验证：C7 全断言。
 - [ ] **2.7** `environment.py` 变量白名单（TICKET_ID/ASSIGNMENT_ID/WORKTREE/仓库信息），
@@ -968,7 +993,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~4 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~5 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
@@ -1214,13 +1239,40 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   delete_branch: bool = False) -> None`——`confirm=False` 抛 `CleanupNotConfirmedError`
   （code `execution.cleanup_unconfirmed`）；`confirm=True` 走 `git worktree remove`，分支默认
   保留供审查，`delete_branch=True` 才 `git branch -D`。manager 无析构、无定时清理。
-- [ ] **Step 1: 写失败的测试**：`test_worktree_survives_ticket_end`（把一个 Ticket 推到处终态后
+- [x] **Step 1: 写失败的测试**：`test_worktree_survives_ticket_end`（把一个 Ticket 推到处终态后
   目录仍在）；`test_cleanup_requires_confirmation`；`test_cleanup_keeps_branch_by_default`。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  三条按计划落位，另补三条同口径用例（`test_cleanup_deletes_branch_only_when_asked`、
+  `test_cleanup_refuses_uncommitted_work_and_keeps_the_marker`、
+  `test_cleanup_of_a_worktree_removed_by_hand_still_deletes_the_branch`）。终态那条不 mock：
+  真 `Store` + 真 `OrchestrationService` 走 `queue → START → DELIVER → COMPLETE`，断言里除"目录仍在"
+  还加了"录制不到任何删除 argv"——默认保留 ≠ 只有目录检查，还得证明没有别的路径会删。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
   Expected: FAIL — `AttributeError: 'GitWorktreeManager' object has no attribute 'cleanup'`。
-- [ ] **Step 3: 实现** `cleanup`；拒绝消息带可执行的下一步（显式命令 + `confirm=True`）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: keep worktrees after tickets and require explicit cleanup"`
+  Actual: **4 failed / 33 passed**，四条 cleanup 用例各一次 `AttributeError: 'GitWorktreeManager'
+  object has no attribute 'cleanup'`——与预期同形。补测的第三条（脏内容被拒）与另两条也红在同一处。
+  如实记一笔：`test_worktree_survives_ticket_end` **实现前就是绿的**，因为它是"没有第三条删除路径"
+  的守卫断言而非新行为的红；这类用例的红不在 Step 2，而在"哪天有人加了自动删除它就会红"。
+- [x] **Step 3: 实现** `cleanup`；拒绝消息带可执行的下一步（显式命令 + `confirm=True`）。
+  `CleanupNotConfirmedError` 的消息由 `未确认清理 {path}：需要 confirm=True` 扩成带调用式的一句
+  （类只吃 `path`，构造签名不动——`test_execution_boundaries.py` 的探针表钉着四元的错误家族）。
+  计划偏差三处，都记在这儿：
+  ① **不传 `--force`**：计划只写"`confirm=True` 走 `git worktree remove`"，实测 plain remove 会因
+  我们自己的 ownership 标记（未跟踪文件）拒绝，所以实现是"按字节读出标记 → 摘掉 → plain remove →
+  失败则写回标记再抛 `GitError`"。这样 git 的脏检查成了第二道锁：未提交内容不会被一次清理抹掉，
+  失败的清理也不损坏复用四要素之④。
+  ② **`WorktreeHandle` 加 `clone` 字段**（计划 Interfaces 未列）：`worktree remove`/`branch -D` 需要
+  一个仍然存在的 worktree 当 cwd，被删目录自身不行；跟着 handle 走比给 `cleanup` 加 `repository`
+  参数更好——计划的签名就此原样保留。
+  ③ **无 `--force` 也不加 `discard` 参数**：规格 2.5 只要"显式调用 + 人工确认"，丢弃未提交内容的
+  能力不在本步，需要时另开口径，不在此伪造。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+  Actual: `tests/unit/test_worktree.py` **38 passed**（+6）；全量 **518 passed, 1 skipped**（+6）、
+  总覆盖 99.14%、`execution/worktree.py` 82 语句 **100%**、`execution/errors.py` 22 语句 100%；
+  `mypy` Success（48 source files）、`ruff check` All checks passed、`ruff format --check`
+  109 files already formatted（`_removal_calls` 那条推导式被 ruff 重排过一次）；
+  L1 与约束 1 diff 均 0 行，本轮 `orchestration/` 全包未碰。
+- [x] **Step 5: 提交**：`git commit -am "feat: keep worktrees after tickets and require explicit cleanup"`
+  → `cb7325f`（一笔含 `worktree.py` + `errors.py` 文案 + 六条用例；账本回填随后单独提交）。
 
 ### Task 6: 环境变量白名单（步骤 2.7）
 
