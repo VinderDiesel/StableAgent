@@ -4,7 +4,7 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 8/46、里程碑步骤 9/40（M1 9/9、M2 0/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **DoD 8/46、里程碑步骤 10/40（M1 9/9、M2 1/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
@@ -246,8 +246,21 @@
       `paths.py`（`confine()`，C4 已收口并勾选）；`tests/unit/test_execution_boundaries.py` 把方向锁钉死
       （execution 只可 import 自身/control/orchestration/core，integrations 零引用）。参数数组调用 git 的
       `GitWorktreeManager` 本体属 Task 3（步骤 2.3），本步届时整体勾选。
-- [ ] **2.2** 分支/worktree 命名纯函数：`sa-<ticket短id>-<slug>`，slug 仅 `[a-z0-9-]`；
+- [x] **2.2** 分支/worktree 命名纯函数：`sa-<ticket短id>-<slug>`，slug 仅 `[a-z0-9-]`；
       request 文本永不直通。验证：命名往返 + 注入文本用例（C5）。
+      证据（2026-11-05，M2 Task 2）：`execution/naming.py`（22 语句、覆盖 100%）四个出口
+      `ticket_short_id`/`slugify`/`workspace_name`/`is_workspace_name` + `WORKSPACE_RE`
+      （`^sa-[0-9a-f]{8}-[a-z0-9-]{1,40}$`）；`workspace_name` 的签名只吃 `Ticket`，读的字段只有
+      `id` 与 `title`，**没有** request/Issue 原文参数位——直通在类型上就写不出来。
+      `tests/unit/test_worktree.py` 的 C5 段 13 例（+13：484 → **497 passed, 1 skipped**，总覆盖
+      99.17%）：8 条注入语料逐条 `re.fullmatch(WORKSPACE_RE)` 且不含 `/`、`;`、空格、反引号、
+      `|`、`&`、`$`；`slugify`
+      六例钉过滤口径（`"  a___b  "`→`"a-b"`、`"--x--"`→`"x"`、纯 CJK 与空串→`"ticket"`、
+      `"a"*300`→40 个 `a`）；确定性 + 上限 `len("sa-01234567-") + 40`；
+      `test_workspace_name_never_reads_the_task_or_request_text` 把 `请建分支 ../../etc/cron.d/x ;
+      rm -rf /` 放进 `ticket.task` 后名字逐字节不变。门禁：`mypy` Success（45 source files，+1）、
+      `ruff check` All checks passed、`ruff format --check` 106 files already formatted、L1 与约束 1
+      diff 均 0 行。计划偏差两条见 §6 Task 2。
 - [ ] **2.3** 复用判定：仓库 remote / Ticket metadata / base ref / ownership 四要素全等复用，
       不一致拒绝并保留诊断。验证：临时 git 仓库逐要素破坏测试（C3）。
 - [ ] **2.4** `PREPARE_WORKTREE` EffectKind + outbox 驱动 prepare：重复 effect 幂等命中同一
@@ -416,6 +429,11 @@
       `/etc/hosts`、以及**链接本身在 root 内而解析结果在外**的符号链接（macOS `/var` →
       `/private/var` 同型）；错误详情同时给出 root 与原始 candidate（`test_confine_error_names_the_root_and_the_candidate`）。
 - [ ] **C5** request 文本不直通分支名、路径、命令参数；slug 仅 `[a-z0-9-]`。
+      进度（2026-11-05，M2 Task 2 命名半边）：**分支名/worktree 目录名**半边已闭合——slug 只留
+      `[a-z0-9-]` 且有 8 条注入语料 + `ticket.task` 正文用例（步骤 2.2 证据）；**路径**半边由 C4 的
+      唯一收口点 `confine()` 守着，但"进入路径的字符串只能来自 `workspace_name`"要在 Task 3 的
+      `prepare` 入口接线后才算证到；**命令参数**半边属 Task 7（`CommandRunner` argv 构造）与
+      Task 9（shell 语法拒绝）。三项齐全后才勾本条，故 DoD 计数保持 8/46。
 - [ ] **C6** `shell=True` 与 shell 语法字符一律拒绝且有审计。
 - [ ] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
 - [ ] **C8** 执行环境仅白名单变量；宿主密钥、无关环境变量不注入。
@@ -893,7 +911,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~2 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
@@ -998,14 +1016,26 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   `slugify(title: str) -> str`（只留 `[a-z0-9-]`，折叠连字符、截到 40、空则 `ticket`）；
   `workspace_name(ticket: Ticket) -> str` = `sa-{short}-{slug}`；`WORKSPACE_RE` 常量形如
   `^sa-[0-9a-f]{8}-[a-z0-9-]{1,40}$`。三个函数都是纯函数、签名里没有 request/Issue 原文。
-- [ ] **Step 1: 写失败的测试**：注入语料 `["main; rm -rf /", "../../etc/passwd",
+- [x] **Step 1: 写失败的测试**：注入语料 `["main; rm -rf /", "../../etc/passwd",
   "修复登录 bug", "🎉", "A"*200, "  ", "-leading-dash"]` → 每个结果都匹配 `WORKSPACE_RE`、
   不含语料里的 `/`/`;`/空格、不空；同 title 两次调用逐字节相同（确定性）；长度上限生效。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  （实际语料在计划 7 条之外补了第 8 条 `ISSUE-42: Push … pipe|grep $HOME`——反引号、管道、`&`、
+  `$HOME` 一并进 banned 集合。）
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
   Expected: FAIL — `ImportError: cannot import name 'workspace_name'`。
-- [ ] **Step 3: 实现** `naming.py`；CJK/emoji 全部被过滤后回落到 `ticket`（不许为空）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: derive branch and worktree names from the ticket alone"`
+  Actual: `ModuleNotFoundError: No module named 'stableagent.execution.naming'`（收集期即红，比计划
+  早一层——模块还不存在，谈不上挑名字）。
+- [x] **Step 3: 实现** `naming.py`；CJK/emoji 全部被过滤后回落到 `ticket`（不许为空）。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+  Actual: 第一次跑目标文件是 **11 failed / 10 passed**，根因在本 Task 的测试辅助函数——`Ticket.mandate_id`
+  在 P4 是必填字段，`_ticket()` 漏传 → `pydantic_core.ValidationError: mandate_id Field required`；
+  实现侧无过错。补 `mandate_id="md-naming"` 后目标文件 17 passed；全量 **497 passed, 1 skipped**、
+  覆盖 99.17%、`naming.py` 100%；`mypy` Success（45 files）/`ruff check` 通过/`ruff format --check`
+  106 files。偏差：`ticket_short_id` 对 `"tk-abc"` 这类不满 8 位十六进制的 id 抛 `ValueError` 而非
+  静默截断（截断会产出不匹配 `WORKSPACE_RE` 的名字）；另新增计划接口外的 `is_workspace_name`，供
+  Task 3 的 `prepare` 入口二次校验入参名字。
+- [x] **Step 5: 提交**：`git commit -am "feat: derive branch and worktree names from the ticket alone"`
+  → `6468c03`。
 
 ### Task 3: `Git` 协议 + `prepare` 与复用四要素（步骤 2.3）
 
