@@ -4,7 +4,7 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 9/46、里程碑步骤 12/40（M1 9/9、M2 3/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **DoD 10/46、里程碑步骤 13/40（M1 9/9、M2 4/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
@@ -79,6 +79,10 @@
       `enable_auto_merge` 的"不进授权集合"由 config 构造期 + `create_mandate` + `authorize`
       三道把守且各有用例；EffectKind 半边要在 M2（加 `PREPARE_WORKTREE`）与 M3（加四类）之后
       才能证明"merge/auto merge 始终不在枚举里"，届时由本条收口。
+      进度（2026-11-05，M2 Task 4 的 EffectKind 半边）：枚举现有 4 员（P4 三员 + `prepare_worktree`），
+      P4 的白名单闭合用例 `test_m2_effect_kinds_close_the_whitelist` 随之扩容并**顺手钉死缺席**：
+      `{"merge", "enable_auto_merge", "auto_merge"}` 与"值集合 ∪ 成员名集合"不相交——两个口径都查，
+      防止只改 value 不改名字。M3 加 GitHub 四类之后仍需保持该不相交成立，由本条在 M3 出口收口。
 - [ ] **L7 凭据不落盘**：密钥不进 prompt、日志、Report、Ticket/AgentState、worktree 元数据
       与容器挂载；执行环境只有白名单变量。来源：规格 §1 安全层次、ADR-05 决策 6。
       进度（2026-11-05，M2 Task 3 的 worktree 元数据 + git 子进程两半边）：ownership 文件与
@@ -290,8 +294,21 @@
       参数数组 + 最小环境建临时仓库，全程离线（L8）。口径决定两条（记进 §6 Task 3）：ownership
       缺失/不可解析时**先按要素④拒绝**，不拿"remote 不符"顶罪；读不到 origin 直接 `GitError`
       且不创建 root（失败不留无主 ownership，也不留半成品 worktree）。
-- [ ] **2.4** `PREPARE_WORKTREE` EffectKind + outbox 驱动 prepare：重复 effect 幂等命中同一
+- [x] **2.4** `PREPARE_WORKTREE` EffectKind + outbox 驱动 prepare：重复 effect 幂等命中同一
       worktree。验证：崩溃注入重放（C2）。
+      证据（2026-11-05，M2 Task 4）：`EffectKind` 加 `PREPARE_WORKTREE = "prepare_worktree"`
+      （`model.py` 唯一改动，`store.py` 未碰——`kind` 是无 CHECK 的 TEXT，加成员是非破坏性扩展；
+      `service.py` 一字未动，约束 1 diff 0）。`execution/effects.py`（16 语句、覆盖 100%）：
+      `prepare_idempotency_key(assignment_id)` = `prepare:{assignment_id}`（**不带 attempt**：一个
+      assignment 只有一个现场，重试换键就等于允许建第二个），`prepare_worktree_handler(manager, store)`
+      按 P4 口径从库里取 Ticket（`scheduler._gate_launch` 同款读法）后调同步 `manager.prepare`。
+      幂等两层都有用例：账上 `test_prepare_effect_key_is_scoped_to_the_assignment`（同键重复入队 →
+      仍是 1 行、终态不复活）；现场 `test_prepare_effect_is_idempotent_on_replay`——真 `Store` +
+      真临时仓库，prepare 的 git 副作用已发生而 effect 停在 `running`，随后 `store.close()` 换一条
+      **全新连接**、`reclaim_running_effects` 退回 pending、新 `EffectDispatcher` 重放一次成功，
+      断言 `worktree list` 仍是主目录 + 我们这一条、`branch --list` 计数 1、ownership 的
+      `created_at` 仍是崩溃前那次、effect 行数 1 且 `attempts == 1`（reclaim 还掉了崩前的 claim）。
+      重放走新连接是刻意的：C2 的"崩溃"要证的是事实源在库里不在内存里（同 B4 口径）。
 - [ ] **2.5** 生命周期：Ticket 结束默认保留；清理需显式调用 + 人工确认参数，无自动删除。
       验证：结束后目录仍在 + cleanup 需 confirm 参数。
 - [ ] **2.6** `CommandRunner`：命令名精确 allowlist、cwd 锁 worktree、超时、输出上限、
@@ -447,7 +464,12 @@
 ### C worktree 与命令（M2）
 
 - [ ] **C1** 多 Ticket 并行 worktree 目录与分支互不污染（并发集成用例）。
-- [ ] **C2** 重复 prepare 幂等复用同一 worktree（含崩溃重放）。
+- [x] **C2** 重复 prepare 幂等复用同一 worktree（含崩溃重放）。
+      证据（2026-11-05，M2 Task 4）：`test_prepare_effect_is_idempotent_on_replay`（换连接重放：
+      一个 worktree、一个分支、ownership 不被改写、effect 一行且 `attempts == 1`）+
+      `test_prepare_effect_key_is_scoped_to_the_assignment`（`prepare:{assignment_id}` 同键不新增行）
+      + `test_prepare_reuses_the_identical_worktree`（同进程内第二次 prepare 不再 `worktree add`）。
+      口径与用例名详见第 1 节步骤 2.4。
 - [x] **C3** 复用四要素（remote/metadata/base ref/ownership）不一致时拒绝并保留诊断。
       证据（2026-11-05，M2 Task 3）：`test_reuse_rejects_each_element_and_keeps_the_scene` 六种破坏
       （remote / ticket_id / base_ref / ownership 坏档 / ownership 缺失 / ownership 分支标记指向
@@ -946,7 +968,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~3 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~4 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
@@ -1148,16 +1170,38 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   形状 `{"ticket_id", "assignment_id", "repository", "base_ref"}`，幂等键
   `prepare:{assignment_id}`；handler 是 `async def`（P4 handler 类型如此），内部直接调同步
   `manager.prepare`（dispatcher 保证不在事务内，L3 不受影响）。
-- [ ] **Step 1: 写失败的测试**：`test_prepare_effect_is_idempotent_on_replay`——真实 `Store` +
+- [x] **Step 1: 写失败的测试**：`test_prepare_effect_is_idempotent_on_replay`——真实 `Store` +
   真实临时仓库，同一 effect 入队、dispatch 两次（模拟崩溃后重放）→ 账上只有一条
   `prepare:` effect、`git worktree list` 只有一行、目录/分支名不变。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
+  Actual: 三条口径把计划里的"dispatch 两次"改硬了——① 重放走 `store.close()` 后的**全新连接**
+  （"两次 dispatch"在同进程里可以由内存缓存作弊，换连接才证到事实源在库里）；② `git worktree list`
+  只有一行的说法不准（主 worktree 也在名单里），改为断言路径集合 == `[clone, 我们的路径]`；
+  ③ 补 `test_prepare_effect_key_is_scoped_to_the_assignment`（账上半边）与
+  `test_prepare_effect_without_ticket_row_fails_loudly`（Ticket 行不在库里 → handler 抛
+  `ValueError`，由 dispatcher 记 `last_error` 重试，不猜标题也不静默建现场）。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_worktree.py`
   Expected: FAIL — `AttributeError: PREPARE_WORKTREE`（枚举缺成员）。
-- [ ] **Step 3: 实现** 枚举成员 + `effects.py`；不碰 `store.py`（`kind` 是无 CHECK 的 TEXT）
+  Actual: `ModuleNotFoundError: No module named 'stableagent.execution.effects'`（收集期即红，
+  同 Task 2/3 的形态——枚举成员的红还没轮到就被 import 挡住了）。
+- [x] **Step 3: 实现** 枚举成员 + `effects.py`；不碰 `store.py`（`kind` 是无 CHECK 的 TEXT）
   与 `service.py`（约束 1）。
-- [ ] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_outbox.py` / `test_scheduler.py`（既有
+  计划偏差一条（接口）：计划写的工厂是 `prepare_worktree_handler(manager)`，落地是
+  `prepare_worktree_handler(manager, store)`——payload 里只有 `ticket_id`，而 `prepare` 需要
+  `Ticket`（取 title 生成 slug），必须有读库入口；注入 `Store` 而不是塞一个 `Callable`，是因为
+  P4 的 `scheduler._gate_launch` 已经是同款读法，跟着房子口径走。`model.py` 的改动只有枚举成员
+  与其来源注释；`store.py`/`service.py` 零改动（约束 1 的 diff 复核 0 行）。
+- [x] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_outbox.py` / `test_scheduler.py`（既有
   effect 语义不受影响）+ 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: drive worktree preparation through an outbox effect"`
+  Actual: 全量第一次跑出一个**预期外的真红**——P4 的 `test_m2_effect_kinds_close_the_whitelist`
+  钉的是"EffectKind 恰好三员"（P4 C1 白名单闭合），加成员必红。按计划 ADR-05 决策 5 这是点名
+  允许的兼容性扩展，于是把该用例的断言集合扩到四员，并顺手加 L6 的"merge/auto_merge 不在值集合
+  也不在成员名集合"不相交断言（见第 0 节 L6 进度）。改完：目标文件 32 passed（+3）、
+  `test_worktree + test_orchestration_model + test_outbox + test_scheduler` = 98 passed、
+  全量 **512 passed, 1 skipped**、覆盖 99.14%、`effects.py` 16 语句 100%；`mypy` Success
+  （48 source files，+1）、`ruff check` 通过、`ruff format --check` 109 files；L1 与约束 1 均 0 行。
+- [x] **Step 5: 提交**：`git commit -am "feat: drive worktree preparation through an outbox effect"`
+  → `3682aba`；重放用例换连接的那次加固是提交后才做的（Step 1 的口径 ①），单独提交
+  `0af9425 test: replay the prepare effect across a fresh connection`，不混进实现提交。
 
 ### Task 5: 生命周期——默认保留、显式清理（步骤 2.5）
 
