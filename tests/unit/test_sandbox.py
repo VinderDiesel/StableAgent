@@ -1,4 +1,4 @@
-"""D1（步骤 2.8）+ D2（步骤 2.10）：叙事纪律与 `DockerRunner` 的参数装配。
+"""D1（步骤 2.8）+ D2（步骤 2.10）+ D3（步骤 2.11）：叙事纪律、参数装配与 Docker 用例的门禁。
 
 D1 来自规格 §1（"不宣称本地受限模式能隔离恶意代码"）与 ADR-05 决策 7：`LocalRestrictedRunner`
 的类文档、被拒时产生的消息、以及进 Report 的一行 summary 三处都不得出现 "sandbox" 一词，
@@ -9,16 +9,21 @@ argv 长什么样"与"被拒时不碰 docker CLI"。逐项对上规格 2.5 的�
 `--read-only`、`--tmpfs /tmp`、pid/内存/CPU 上限、`no-new-privileges`、`--cap-drop ALL`、
 只挂本 worktree、`-e` 只带五个 `STABLEAGENT_*` 的**名字**（值不上宿主 argv）。
 
-Task 8 落"协议 + 本地实现 + summary 形状"，Task 10 落容器档的装配；真实容器执行与
-Docker 的双条件门禁（步骤 2.11）在 Task 11。
+Task 8 落"协议 + 本地实现 + summary 形状"，Task 10 落容器档的装配，Task 11 落 Docker 用例的
+双条件门禁（步骤 2.11 / D3）：`docker` marker 注册 + `STABLEAGENT_DOCKER=1`，两个条件缺一个
+就跳过，且跳过原因在 `pytest -rs` 里可见——本文件的 D3 段用嵌套 pytest 观察真实收集结果。
 """
 
 from __future__ import annotations
 
 import inspect
+import os
 import pathlib
+import re
 import subprocess
-from collections.abc import Sequence
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import pytest
 
@@ -229,7 +234,11 @@ def _docker_runner(
 
 
 class FakeSpawn:
-    """替 `subprocess.run` 记账：容器档的测试只看装配结果被怎么交出去，绝不启动 Docker（L8）。"""
+    """替 `subprocess.run` 记账：容器档的测试只看装配结果被怎么交出去，绝不启动 Docker（L8）。
+
+    `raise_once` 是给超时清理那条路准备的：第一次 spawn 抛 `TimeoutExpired`（那是被掐的
+    `docker run`），后续调用正常返回——不然清理那条调用发没发出去都测不到。
+    """
 
     def __init__(
         self,
@@ -238,16 +247,18 @@ class FakeSpawn:
         stderr: str = "",
         returncode: int = 0,
         raises: BaseException | None = None,
+        raise_once: bool = False,
     ) -> None:
         self.calls: list[tuple[list[str], dict[str, object]]] = []
         self._stdout = stdout
         self._stderr = stderr
         self._returncode = returncode
         self._raises = raises
+        self._raise_once = raise_once
 
     def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(argv), kwargs))
-        if self._raises is not None:
+        if self._raises is not None and not (self._raise_once and len(self.calls) > 1):
             raise self._raises
         return subprocess.CompletedProcess(
             args=list(argv), returncode=self._returncode, stdout=self._stdout, stderr=self._stderr
@@ -500,3 +511,171 @@ def test_build_argv_refuses_the_denied_requests_too(tmp_path: pathlib.Path) -> N
             runner.build_argv(request)
         assert raised.value.code == "execution.command_denied"
         assert f"command_denied: {code}" in raised.value.detail
+
+
+# ── D3（步骤 2.11）：真实 Docker 用例的双条件门禁 ─────────────────────────────
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+PYPROJECT = REPO_ROOT / "pyproject.toml"
+DOCKER_INTEGRATION = REPO_ROOT / "tests" / "integration" / "test_docker_runner.py"
+
+#: marker 的注册文本；未注册的 marker 只会 warn 不会 fail，所以"注册在位"这条只能钉配置本身。
+MARKER_TEXT = "docker: 需要真实 Docker 守护进程（同时设置 STABLEAGENT_DOCKER=1 才运行）"
+
+#: 嵌套 pytest 里要剥掉的两个开关：不剥的话，开发机上导出的环境变量会让"默认跳过"这条断言
+#: 变成"看机器脸色"，而这正是 L8 不能有的性质。
+GATE_VARS = ("STABLEAGENT_DOCKER", "STABLEAGENT_DOCKER_IMAGE")
+
+
+def _run_pytest(
+    *args: str, gate: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """在子进程里真跑一次 pytest：D3 断的是"到底是 skip 还是 fail"，只能观察一次真实收集。"""
+    child = {key: value for key, value in os.environ.items() if key not in GATE_VARS}
+    child.update(gate or {})
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--no-cov", "-q", "-rs", *args],
+        cwd=REPO_ROOT,
+        env=child,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+
+def test_docker_marker_is_registered() -> None:
+    """marker 进 `pyproject.toml` 的 `markers`，且只写一次：文本里点名第二个条件是哪个环境变量。"""
+    text = PYPROJECT.read_text(encoding="utf-8")
+
+    assert MARKER_TEXT in text
+    assert text.count(MARKER_TEXT) == 1
+
+
+def test_docker_gate_needs_the_env_flag_set_to_one() -> None:
+    """环境变量半边：只有 `"1"` 算开；空串、`0`、`true` 都算关——开关不是布尔解析。"""
+    corpus: list[tuple[dict[str, str], bool]] = [
+        ({}, False),
+        ({"STABLEAGENT_DOCKER": ""}, False),
+        ({"STABLEAGENT_DOCKER": "0"}, False),
+        ({"STABLEAGENT_DOCKER": "true"}, False),
+        ({"STABLEAGENT_DOCKER": "1"}, True),
+    ]
+
+    for env, expected in corpus:
+        assert docker_module.docker_tests_enabled(env) is expected
+
+
+def test_docker_cases_skip_in_the_default_environment() -> None:
+    """默认环境（两个开关都不给）跑集成文件：全绿 + 跳过原因点名 `STABLEAGENT_DOCKER`。"""
+    done = _run_pytest(str(DOCKER_INTEGRATION.relative_to(REPO_ROOT)))
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "skipped" in done.stdout.lower()
+    assert "STABLEAGENT_DOCKER" in done.stdout
+    assert "error" not in done.stdout.lower()
+
+
+def test_docker_cases_stay_skipped_when_only_the_env_flag_is_set() -> None:
+    """双条件的第二半：环境变量给了但没按 `-m docker` 选中，容器用例照样不起。"""
+    done = _run_pytest(
+        str(DOCKER_INTEGRATION.relative_to(REPO_ROOT)), gate={"STABLEAGENT_DOCKER": "1"}
+    )
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "skipped" in done.stdout.lower()
+    assert "-m docker" in done.stdout
+
+
+def test_core_suite_does_not_depend_on_docker() -> None:
+    """L8 的另一半：核心用例一条都不该被门禁跳过——它们连 Docker 都不碰，跳过就是被牵连。"""
+    done = _run_pytest("tests/unit/test_command_runner.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "passed" in done.stdout
+    assert "failed" not in done.stdout
+    assert "skipped" not in done.stdout.lower()
+
+
+# ── D3 续：真实运行兑现的超时清理缺口（`--name` 手柄）─────────────────────────
+
+
+def test_container_name_is_a_stable_digest_of_the_request(tmp_path: pathlib.Path) -> None:
+    """命名是请求的纯函数：同请求两次装配同名（argv 相等性那条断言才守得住），换一样就换容器。"""
+    worktree = _worktree(tmp_path)
+    runner = _docker_runner(tmp_path)
+    request = _request(worktree, "python3", "-c", "print('a')")
+
+    argv = runner.build_argv(request)
+    same = runner.build_argv(_request(worktree, "python3", "-c", "print('a')"))
+    other_command = runner.build_argv(_request(worktree, "python3", "-c", "print('b')"))
+    other_identity = runner.build_argv(
+        replace(request, context=replace(request.context, ticket_id="tk-0002"))
+    )
+
+    name = _flag_value(argv, "--name")
+    assert re.fullmatch(r"sa-[0-9a-f]{16}", name), name
+    assert name == _flag_value(same, "--name")
+    assert name != _flag_value(other_command, "--name")
+    assert name != _flag_value(other_identity, "--name")
+    assert name == docker_module.container_name(request)
+
+
+async def test_timeout_kills_the_named_container_it_started(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 10 记下的缺口第一次兑现：客户端被掐之后容器还在跑——所以超时分支要补一刀定点 kill。"""
+    worktree = _worktree(tmp_path)
+    expired = subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=0.5, output="partial")
+    fake = FakeSpawn(raises=expired, raise_once=True)
+    monkeypatch.setattr(docker_module.subprocess, "run", fake)
+    runner = _docker_runner(tmp_path)
+    request = _request(worktree, "python3", "-c", "__import__('time').sleep(30)", timeout_s=0.5)
+
+    result = await runner.run(request)
+
+    assert [call[0] for call in fake.calls] == [
+        runner.build_argv(request),
+        [docker_module.DOCKER, "kill", docker_module.container_name(request)],
+    ]
+    assert fake.calls[1][1]["shell"] is False
+    assert fake.calls[1][1]["timeout"] == docker_module.KILL_TIMEOUT_S
+    assert result.timed_out and result.exit_code is None
+    assert result.stdout == "partial"
+
+
+async def test_a_finished_command_is_not_killed(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """清理只跟着超时：非零退出也不补——容器自己走了，`--rm` 已经把它的文件系统带走。"""
+    worktree = _worktree(tmp_path)
+    fake = FakeSpawn(returncode=7, stderr="boom")
+    monkeypatch.setattr(docker_module.subprocess, "run", fake)
+
+    result = await _docker_runner(tmp_path).run(_request(worktree, "python3", "-c", "raise 'x'"))
+
+    assert [call[0] for call in fake.calls if call[0][:2] == ["docker", "kill"]] == []
+    assert len(fake.calls) == 1
+    assert result.exit_code == 7 and not result.timed_out
+
+
+async def test_a_failing_kill_does_not_rewrite_the_timeout(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kill 自己也起不来时不改结论：超时这一档的事实已经定稿，清理是尽力而为。"""
+    worktree = _worktree(tmp_path)
+    calls: list[list[str]] = []
+
+    def spawn(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=0.5, output="partial")
+        raise OSError("docker kill 起不来")
+
+    monkeypatch.setattr(docker_module.subprocess, "run", spawn)
+    runner = _docker_runner(tmp_path)
+
+    result = await runner.run(_request(worktree, "python3", "-c", "pass", timeout_s=0.5))
+
+    assert len(calls) == 2 and calls[1][:2] == ["docker", "kill"]
+    assert result.timed_out and result.exit_code is None
+    assert result.stdout == "partial"

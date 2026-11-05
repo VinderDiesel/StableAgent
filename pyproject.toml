@@ -53,6 +53,10 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "--cov=stableagent --cov-report=term-missing --cov-report=xml"
+# 步骤 2.11 / D3、L8：真实 Docker 用例要 marker 被 -m 选中且 STABLEAGENT_DOCKER=1，两条缺一即跳过。
+markers = [
+  "docker: 需要真实 Docker 守护进程（同时设置 STABLEAGENT_DOCKER=1 才运行）",
+]
 
 [tool.coverage.report]
 # P2 验收 F3：全库门槛 70%；心脏模块（core/loop.py、core/checkpoint/*）由 CI 单独按 90% 把关

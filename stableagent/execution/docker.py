@@ -19,15 +19,19 @@
   两者都拒；`name:1.2.3` 收，`name@sha256:<64hex>` 是推荐写法。**digest pin 指南**：发布镜像后
   用 `docker inspect --format='{{index .RepoDigests 0}}' <tag>` 取回 digest 写进配置；digest 变了
   就是另一份文件系统，配置里换 digest 而不是换 tag，也不给 `latest` 留任何默认位。
-* **超时是客户端超时**：`timeout_s` 掐的是宿主上那个 `docker run` 客户端。客户端被杀不等于容器
-  被杀——容器是否随之退出取决于 Docker 版本的信号处理，而本轮一个容器都不启动（L8）。同理
-  不传 `--name`：固定名要处理并发冲突，随机名又让超时后的容器无法定点清理。这两条留给 Task 11
-  的 `docker` marker + `STABLEAGENT_DOCKER=1` 双条件用例去验，验不过就在这一档补清理路径。
+* **超时是客户端超时，所以超时分支自己收尾**：`timeout_s` 掐的是宿主上那个 `docker run` 客户端。
+  Task 11 的双条件用例第一次真跑就把这条验出来了：客户端被杀**不**带走容器（两个 `sleep 30` 的
+  容器还在跑），所以这一档给每个请求一个稳定名字（`container_name`），超时后补一刀 `docker kill`。
+  命名走摘要而不是随机串，为的是 `build_argv` 仍是请求的纯函数——不同请求天然不撞，同一请求并发
+  重跑会撞名并以非零退出**显式**失败，那正是"同一条命令被跑了两遍"该被看见的样子。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import os
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -61,6 +65,49 @@ FLOATING_TAGS = frozenset({"latest"})
 
 #: 会随 `STABLEAGENT_` 前缀进容器的键；`PATH`/`LANG` 只给 CLI，不给容器。
 _CONTAINER_ENV_PREFIX = "STABLEAGENT_"
+
+#: 双条件之一：环境变量名与它的"开"值。只有恰好 `"1"` 算开。
+DOCKER_GATE_ENV = "STABLEAGENT_DOCKER"
+DOCKER_GATE_ON = "1"
+
+#: 容器名的前缀与 `docker kill` 自己的宽限：掐客户端已经花掉了命令预算，清理不该再无限挂着。
+CONTAINER_NAME_PREFIX = "sa"
+KILL_TIMEOUT_S = 10.0
+
+
+def container_name(request: CommandRequest) -> str:
+    """容器名 = 请求的稳定摘要——装配保持纯函数，超时清理才有定点手柄。
+
+    Task 10 记的是"不给 `--name`"，理由是固定名要处理并发冲突、随机名无法定点清理。双条件用例第
+    一次真跑就把那条推翻了：客户端超时掐不掉容器（两个 `sleep 30` 的容器还在跑），没有名字就没有
+    任何手柄。摘要命名同时避开两头——不同请求天然不撞；同一请求并发重跑会撞名并以非零退出**显式**
+    失败，那正是"同一条命令被跑了两遍"该被看见而不是被合并的样子。
+
+    摘要覆盖身份（ticket/assignment/repository/base_ref）与 `cwd`+`argv`：只缺一样就是另一个容器。
+    """
+    context = request.context
+    parts = (
+        context.ticket_id,
+        context.assignment_id,
+        context.repository,
+        context.base_ref,
+        str(request.cwd),
+        *request.argv,
+    )
+    digest = hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
+    return f"{CONTAINER_NAME_PREFIX}-{digest}"
+
+
+def docker_tests_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """真实 Docker 用例的环境变量半边（步骤 2.11 / D3、L8）；另一半是 `-m docker` 的 marker 选择。
+
+    严格比对 `"1"`，不做布尔解析：`STABLEAGENT_DOCKER=false` 经过 `bool()` 会读成"开"，而"开"的
+    后果是在离线 CI 上起容器——错方向的代价不对称，所以宁可让手滑的人看到一次跳过。
+
+    `env` 注入只为测试能断"缺变量就是缺"，不靠篡改 `os.environ`；生产调用读宿主环境。
+    """
+    source = os.environ if env is None else env
+    return source.get(DOCKER_GATE_ENV) == DOCKER_GATE_ON
 
 
 class DockerRunner:
@@ -136,6 +183,8 @@ class DockerRunner:
             DOCKER,
             "run",
             "--rm",
+            "--name",
+            container_name(request),
             "--network",
             network,
             "--read-only",
@@ -183,6 +232,7 @@ class DockerRunner:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            self._kill(container_name(request), env)
             stdout, first_cut = self._fit(stream_text(exc.stdout))
             stderr, second_cut = self._fit(stream_text(exc.stderr))
             return self._result(
@@ -205,6 +255,25 @@ class DockerRunner:
             truncated=first_cut or second_cut,
             timed_out=False,
         )
+
+    def _kill(self, name: str, env: Mapping[str, str]) -> None:
+        """超时后的定点清理：`docker kill <name>`，成败都不改已经定稿的超时结论。
+
+        清了却不留痕是取舍不是疏忽：`CommandResult` 那一档说的是"容器里那条命令"的下场（超时、
+        没有退出码、已产出的部分），把清理工具的 stderr 拼进去等于伪造命令输出。清理没成会留下一个
+        还在跑的容器，那是 `test_client_timeout_leaves_no_running_container`（双条件用例）的断言
+        对象——它比这里多写一行字更诚实。
+        """
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            subprocess.run(
+                [DOCKER, "kill", name],
+                env=env,
+                timeout=KILL_TIMEOUT_S,
+                shell=False,
+                capture_output=True,
+                text=True,
+                check=False,
+            )  # 尽力而为：kill 自己也超时或起不来时，超时这一档的结论不因此改变
 
     def _result(
         self,
