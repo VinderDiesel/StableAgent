@@ -92,8 +92,13 @@
       `https://octocat:ghp_SEKRET@…` 起真克隆，断言 ownership 文本里没有 `ghp_SEKRET`/`octocat`/`@`
       且身份等于干净 URL。git 子进程环境是第二道白名单：`git_env()` 只给 `PATH`/`LANG`/
       `GIT_TERMINAL_PROMPT=0`/`GIT_CONFIG_NOSYSTEM=1` 四项（`test_git_carries_only_four_environment_variables`
-      钉死，含 `HOME`/`GH_TOKEN` 不注入）。**Agent 命令**的环境白名单与容器挂载属 Task 6/D2，
-      prompt/日志/Report 的脱敏属 Task 9 与 M3，故 L7 仍不勾。
+      钉死，含 `HOME`/`GH_TOKEN` 不注入）。**Agent 命令**的环境白名单半边已闭合
+      （2026-11-05，M2 Task 6）：`build_child_env` 只产出七个键，且断言的不是函数返回值而是
+      **真子进程自己打印的 `os.environ`**——宿主快照里的 `GITHUB_TOKEN`/`AWS_SECRET_ACCESS_KEY`/
+      `SSH_AUTH_SOCK`/`PYTHONPATH`/`HOME`/P4 的 `orchestration.db` 路径都到不了孩子手里，
+      多出来的键只允许是 macOS 在 exec 时注入的 `__CF_USER_TEXT_ENCODING`（`OS_INJECTED_KEYS` 写死名单，
+      Linux CI 上那条差集为空）。容器挂载与容器内环境属 Task 10/D2，prompt/日志/Report 的脱敏属
+      Task 9 与 M3，故 L7 仍不勾。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
 
@@ -338,8 +343,31 @@
       L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行，约束 1 与整个 `orchestration/` 本轮 0 行。
 - [ ] **2.6** `CommandRunner`：命令名精确 allowlist、cwd 锁 worktree、超时、输出上限、
       截断与脱敏入 Report。验证：C7 全断言。
-- [ ] **2.7** `environment.py` 变量白名单（TICKET_ID/ASSIGNMENT_ID/WORKTREE/仓库信息），
+- [x] **2.7** `environment.py` 变量白名单（TICKET_ID/ASSIGNMENT_ID/WORKTREE/仓库信息），
       宿主其余环境不注入。验证：子进程可见环境断言（C8、L7）。
+      证据（2026-11-05，M2 Task 6）：`execution/environment.py`（8 语句、覆盖 100%）的
+      `build_child_env(*, ticket_id, assignment_id, worktree, repository, base_ref, host=None)`
+      产出恰好七键——五个 `STABLEAGENT_*` + `PATH` + `LANG`。取向是"没有第四个来源"而不是
+      "过滤已知密钥名"：`source = os.environ if host is None else host`，只读它的 `PATH` 一项，
+      所以宿主新增什么密钥都不需要改这里。`test_command_runner.py` 的 C8 段六例——
+      ① `test_child_env_is_an_allowlist`：13 键宿主（`GITHUB_TOKEN`/`GH_TOKEN`/`OPENAI_API_KEY`/
+      `AWS_SECRET_ACCESS_KEY`/`AWS_ACCESS_KEY_ID`/`SSH_AUTH_SOCK`/`PYTHONPATH`/`HOME`/
+      `STABLEAGENT_DB_PATH`/`ENV`/`PAGER` + `PATH`/`LANG`）进来，键集合仍等于白名单，五个密钥字面量
+      不出现在任何值里，`PATH` 取宿主值、`LANG` 固定 `C.UTF-8` 不吃宿主的 `zh_CN.GBK`；
+      ② `test_child_env_leaves_the_database_and_host_home_behind`：值里找不到 `orchestration.db`、
+      `/home/agent`、`/run/user`、`/opt/stableagent`——规格 2.3 R5 的"只给 worktree 路径与非敏感变量"
+      连 P4 库位置和宿主代码路径一起挡住；③ `test_child_env_has_no_secrets_from_arguments`
+      整份环境写死比对（五个参数按原值透传，无第三来源）；④ `host=None` 走真 `os.environ`，
+      断言连必然存在的 `HOME` 都不带走；⑤ 宿主没有 `PATH` 时留空——不硬编码 `/usr/local/bin`
+      当默认值（硬编码等于替宿主决定哪些二进制可信）；⑥
+      `test_child_process_sees_only_the_allowlist` 补的是步骤 2.7 验证栏里"**子进程可见**环境断言"
+      那句话——真起一个 `sys.executable -c` 进程让它自己打印 `os.environ`，断言
+      `set(seen) >= CHILD_KEYS` 且 `set(seen) - CHILD_KEYS` 只允许是 `OS_INJECTED_KEYS`。
+      实测有一处不能假装：macOS 的 libsystem 会在 exec 时注入 `__CF_USER_TEXT_ENCODING`
+      （与我们传的 env 无关，Linux CI 上没有），所以"孩子没有第四个来源"这句必须带着这份名单说。
+      与 `git_env()` 的口径差一条并写进 docstring：git 侧 `LANG=C`（只吐按行解析的 plumbing 输出），
+      子进程侧 `LANG=C.UTF-8`（Agent 命令要吐中文标题与 diff，Report 需统一按 UTF-8 解释与脱敏）；
+      两侧共同点是都不注入 `HOME`。计划偏差与补测见 §6 Task 6。
 - [ ] **2.8** `LocalRestrictedRunner` + 叙事纪律：类文档、拒绝消息、Report summary 禁
       "sandbox" 一词。验证：文案断言测试（D1）。
 - [ ] **2.9** shell 拒绝：`shell=True`、shell 语法字符（`;|&$\``）一律拒绝且审计。
@@ -518,7 +546,21 @@
       齐了才勾本条。
 - [ ] **C6** `shell=True` 与 shell 语法字符一律拒绝且有审计。
 - [ ] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
-- [ ] **C8** 执行环境仅白名单变量；宿主密钥、无关环境变量不注入。
+- [x] **C8** 执行环境仅白名单变量；宿主密钥、无关环境变量不注入。
+      证据（2026-11-05，M2 Task 6）：`execution/environment.py` 的 `build_child_env` 产出恰好七键
+      （五个 `STABLEAGENT_*` + `PATH` + `LANG`），宿主 13 键进来仍是那七键；`PATH` 取宿主值、
+      `LANG` 固定 `C.UTF-8`，`GITHUB_TOKEN`/`AWS_SECRET_ACCESS_KEY`/`SSH_AUTH_SOCK`/`PYTHONPATH`/
+      `HOME`/`STABLEAGENT_DB_PATH` 既不在键里也不在任何值里。六例：
+      `test_child_env_is_an_allowlist`、`test_child_env_leaves_the_database_and_host_home_behind`、
+      `test_child_env_has_no_secrets_from_arguments`、真 `os.environ` 那条、无 `PATH` 那条，以及
+      直接证明"子进程可见"的 `test_child_process_sees_only_the_allowlist`（真起解释器打印自己的
+      `os.environ`；多出的键只允许是 macOS 在 exec 时注入的 `__CF_USER_TEXT_ENCODING` 一类，
+      名单写死在 `OS_INJECTED_KEYS` 里）。
+      **本条只覆盖"Agent 命令环境"**：Docker 容器环境（D2）与 git 子进程环境（`git_env()` 四项，
+      Task 3 已证）是另外两张名单，前者随 M2 Task 10/11 收口。
+      接线口径一处留档：本 Task 证的是白名单函数与真子进程可见环境，`CommandRunner` 把它接成
+      `env=build_child_env(...)` 的调用点在 Task 7（步骤 2.6 的实现里），届时的 C7 用例不应被读成
+      C8 的第二次证明。
 
 ### D Sandbox 分层（M2）
 
@@ -993,7 +1035,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~5 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~6 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
@@ -1286,15 +1328,43 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   `STABLEAGENT_TICKET_ID`/`STABLEAGENT_ASSIGNMENT_ID`/`STABLEAGENT_WORKTREE`/
   `STABLEAGENT_REPOSITORY`/`STABLEAGENT_BASE_REF` + `PATH`（取自宿主，非敏感、解析可执行文件
   必需）+ 固定 `LANG=C.UTF-8`；`host` 注入只为测试断言"其余变量一个不漏"。
-- [ ] **Step 1: 写失败的测试**：`test_child_env_is_an_allowlist`——宿主环境塞
+- [x] **Step 1: 写失败的测试**：`test_child_env_is_an_allowlist`——宿主环境塞
   `GITHUB_TOKEN`/`AWS_SECRET_ACCESS_KEY`/`PYTHONPATH`/`SSH_AUTH_SOCK` → 子进程环境里一个都
   没有，只剩五加二；`test_child_env_has_no_secrets_from_arguments`（ticket_id 等按原值透传）。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
+  两条按计划落位，另补四条：`test_child_env_leaves_the_database_and_host_home_behind`
+  （规格 2.3 R5 的"不给 P4 库位置与其他目录"）、`test_child_env_without_host_reads_only_path_from_the_process_environment`
+  （生产路径：真 `os.environ` 里也只取 `PATH`，连必然存在的 `HOME` 都不带走）、
+  `test_child_env_does_not_invent_a_path_when_the_host_has_none`（宿主没 `PATH` 就留空，不硬编码目录）、
+  `test_child_process_sees_only_the_allowlist`（**真起子进程**读自己的环境——步骤 2.7 的验证栏写的是
+  "子进程可见环境断言"，只断言函数返回值不够）。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
   Expected: FAIL — `ModuleNotFoundError: No module named 'stableagent.execution.environment'`。
-- [ ] **Step 3: 实现** `environment.py`；`PATH` 与 `LANG` 的取舍写进 docstring（对规格 2.4 的
+  Actual: 同预期，**收集期即红**（`1 error during collection`，`tests/unit/test_command_runner.py:13`
+  的 import 行），与 Task 2/3/4 的红形态一致。
+- [x] **Step 3: 实现** `environment.py`；`PATH` 与 `LANG` 的取舍写进 docstring（对规格 2.4 的
   细化，账本 Task 6 证据里同样记录）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: hand the child process an allowlisted environment"`
+  `source = os.environ if host is None else host`——`host` 参数只用于注入断言口径，生产路径读真环境但
+  仍只取 `PATH` 一项；取向是"**没有第四个来源**"而不是"过滤已知密钥名"，所以宿主以后新增什么密钥
+  都不需要回来改这里。细化三条（规格 2.4 只说"仓库信息等安全变量"，未点名 `PATH`/`LANG`）：
+  ① `PATH` 必须给且取自宿主——没有它 `pytest`/`python` 这类命令名解析不了，硬编码目录列表等于替宿主
+  决定哪些二进制可信，宿主没有 `PATH` 时留空不猜；② `LANG` 固定 `C.UTF-8` 而不继承宿主（`zh_CN.GBK`
+  会改变子进程字节输出，Report 无法统一按 UTF-8 解释与脱敏）；③ 与 `git.py:git_env()` 的 `LANG=C`
+  **刻意不同**并在 docstring 里写明理由——git 只吐我们按行解析的 plumbing 输出，Agent 命令要吐中文
+  标题与 diff。两处计划外的补充：新模块常量 `CHILD_LANG`（把固定值从字面量里提出来，docstring 与
+  实现同一处说话）、测试里的 `OS_INJECTED_KEYS`（见 Step 4）。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+  Actual: 真子进程那条**第一次跑就红在实测细节上**——`set(seen) == CHILD_KEYS` 收到
+  `Extra items in the left set: '__CF_USER_TEXT_ENCODING'`：macOS 的 libsystem 在 exec 时自己往环境里
+  加这一键，与我们传的 `env` 无关，Linux CI 上不存在。没有把它加进白名单放宽断言，而是把"孩子没有第
+  四个来源"改成带名单的说法（`set(seen) >= CHILD_KEYS` + 差集 ⊆ `OS_INJECTED_KEYS`，名单只有那一键并
+  注明 Linux 上差集为空），红的那次输出如实留在账上；`ruff` 的 `SIM300` 又把 `CHILD_KEYS <= set(seen)`
+  判成 Yoda 条件，改成 `set(seen) >= CHILD_KEYS`。绿：目标文件 **6 passed**、全量
+  **524 passed, 1 skipped**（+6）、总覆盖 99.14%、`execution/environment.py` 8 语句 **100%**；
+  `mypy` Success（49 source files，+1）、`ruff check` All checks passed、`ruff format --check`
+  111 files already formatted；L1 与约束 1 diff 均 0 行（本轮只新增 `execution/` 一个文件与一个新测试文件）。
+- [x] **Step 5: 提交**：`git commit -am "feat: hand the child process an allowlisted environment"`
+  → `150e403`；真子进程那条探针是提交之后才补的（Step 1 的"子进程可见"半边），单独提交
+  `5b54451 test: prove the child process itself sees only the allowlist`，不混进实现提交——同 Task 4 的口径。
 
 ### Task 7: `CommandRunner`——allowlist、cwd、超时、输出上限、脱敏（步骤 2.6）
 
