@@ -343,6 +343,21 @@
       L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行，约束 1 与整个 `orchestration/` 本轮 0 行。
 - [ ] **2.6** `CommandRunner`：命令名精确 allowlist、cwd 锁 worktree、超时、输出上限、
       截断与脱敏入 Report。验证：C7 全断言。
+      进度（2026-11-05，M2 Task 7）：**前四项 + 脱敏**五项齐（C7 已勾，见第 2 节）——
+      `execution/command.py`（89 语句、覆盖 100%）的 `CommandRunner.run(request)` 按
+      ①`confine(worktree_root, request.cwd)` ②空 argv ③`argv[0]` 逐字节命中 allowlist 三段短路，
+      拒绝**不抛异常且不 spawn**（`denied_reason` 是稳定码 `cwd_escape`/`empty_argv`/
+      `command_not_allowed`，Task 9 再加 `shell_syntax`），放行才 `subprocess.run(argv 数组,
+      cwd=收口后路径, env=build_child_env(...), timeout, shell=False)`，超时给
+      `timed_out=True` + `exit_code is None` 并保住已产出的部分输出，`max_output_bytes` 是
+      **含尾标的总预算**且先脱敏后截断。
+      剩最后半句"**截断与脱敏入 Report**"未证：`CommandResult` 现在没有任何生产调用方——落 Report
+      的文本形状属 Task 8（`CommandResult.summary()`），真正写进 `Assignment Report` 的接线属
+      M2 Task 12 / M3。本步不提前勾（C7 的验证栏只要求五项有测试，故 C7 勾、2.6 不勾）。
+      计划外三处（详见 §6 Task 7）：`CommandRequest` 加 `context` 字段（`build_child_env` 需要
+      ticket/assignment/仓库/base ref，而 `worktree_root` 是全 Ticket 共用的根，身份只能随请求走）、
+      构造函数加 `clock`（`started_at`/`ended_at` 的来源，房子口径同 `Store`/`GitWorktreeManager`）、
+      拒绝码表多一个 `empty_argv`。
 - [x] **2.7** `environment.py` 变量白名单（TICKET_ID/ASSIGNMENT_ID/WORKTREE/仓库信息），
       宿主其余环境不注入。验证：子进程可见环境断言（C8、L7）。
       证据（2026-11-05，M2 Task 6）：`execution/environment.py`（8 语句、覆盖 100%）的
@@ -545,7 +560,29 @@
       剩 **命令参数** 半边属 Task 7（`CommandRunner` argv 构造）与 Task 9（shell 语法拒绝），
       齐了才勾本条。
 - [ ] **C6** `shell=True` 与 shell 语法字符一律拒绝且有审计。
-- [ ] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
+- [x] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
+      证据（2026-11-05，M2 Task 7）：`tests/unit/test_command_runner.py` 的 C7 段 14 例，五项逐项对上——
+      ① **allowlist**：`test_denied_command_has_no_side_effect`
+      （空名单 + `sys.executable -c "open('pwned.txt','w')"` → `denied_reason="command_not_allowed"`
+      且文件不存在、`started_at == ended_at` 即只有一次读数 = 没 spawn）+
+      `test_allowlist_matches_argv_zero_byte_for_byte`（名单写 `python3` 不放行绝对路径、名单写绝对路径
+      也不放行裸名：**逐字节精确、不取 basename、不做 PATH 归一化**，归一化猜错的方向是放行）；
+      ② **cwd 锁 worktree**：`test_cwd_escape_denies_before_any_spawn`（root 外的 cwd 被拒且不在那里留痕）+
+      `test_relative_cwd_is_confined_into_the_root`（相对 root 的写法由 runner 收口，孩子 `getcwd()`
+      看到的是解析后的绝对路径）+ `test_allowed_command_runs_inside_its_worktree`；
+      ③ **超时**：`test_timeout_has_no_exit_code_but_keeps_partial_output`（`sleep(2)` 配 `timeout_s=0.2`
+      → `timed_out=True`、`exit_code is None`、已 flush 的 `partial` 仍在 stdout）+
+      `test_default_timeout_applies_when_the_request_does_not_ask`（请求不填走 runner 默认）；
+      ④ **输出上限**：`test_output_over_the_cap_is_truncated_within_budget`（200KB →
+      `len(stdout.encode()) <= 64*1024`、尾标 `[truncated N bytes]`、未超限的 stderr 原样）+
+      `test_tiny_cap_stays_within_its_own_budget`（上限可配到 200 字节，总长含尾标仍不越界）；
+      ⑤ **脱敏**：`test_secrets_are_redacted_before_truncation`（**顺序可证**：100 A + `SEKRET` + 100 A
+      配 128 字节预算，先截后脱敏会让 `SEKRET` 活下来）+ `test_empty_redaction_entries_are_ignored`。
+      另两例钉形状：`test_denied_reasons_are_stable_codes_not_prose`（三条码 + 两病并发时报①，
+      且码是 snake_case 标识符不是文案）、`test_nonzero_exit_is_a_result_not_a_denial`（退出码 3 是
+      命令的结论，不设拒绝理由也不抛）。
+      **本条不含"落 Report"半边**：`CommandResult` 目前无生产调用方，文本形状属 Task 8、
+      写入 `Assignment Report` 的接线属 M2 Task 12/M3（第 1 节步骤 2.6 的进度记同一条界线）。
 - [x] **C8** 执行环境仅白名单变量；宿主密钥、无关环境变量不注入。
       证据（2026-11-05，M2 Task 6）：`execution/environment.py` 的 `build_child_env` 产出恰好七键
       （五个 `STABLEAGENT_*` + `PATH` + `LANG`），宿主 13 键进来仍是那七键；`PATH` 取宿主值、
@@ -1035,7 +1072,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~6 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~7 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
@@ -1383,15 +1420,55 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   shell=False)`；④ stdout/stderr 先按 `redact` 逐个替换为 `***` 再截断（保留头部 +
   `...[truncated N bytes]` 尾标）。拒绝**不抛异常**：返回 `denied_reason` 非空的
   `CommandResult`（规格 2.4 要求被拒绝原因在结果里），且不 spawn。
-- [ ] **Step 1: 写失败的测试**（C7 五项各一）：allowlist 外的命令名被拒且无副作用；
+- [x] **Step 1: 写失败的测试**（C7 五项各一）：allowlist 外的命令名被拒且无副作用；
   cwd 越出 worktree root 被拒（复用 Task 1 的 confine）；`sys.executable -c "import time;
   time.sleep(2)"` 配 `timeout_s=0.2` → `timed_out=True` 且 `exit_code is None`；打印 200KB
   → `truncated=True` 且长度 ≤ 上限；`redact=("tk-secret-value",)` → 输出里是 `***`。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
+  五项按计划各落一例，另补九例把口径钉住（相对 cwd、精确匹配的双向拒绝、默认超时、200 字节的小上限、
+  空 redact 项、非零退出码、拒绝原因码表、放行路径的形状、以及 `build_child_env` 真被 spawn 用上的
+  接线例 `test_spawned_child_sees_the_request_context`）。两处口径先定在测试里：
+  ① **拒绝必须"无副作用"可证**——被拒的命令写成会在 worktree 里建文件的脚本，断言文件不存在，
+  再加 `started_at == ended_at`（没 spawn 就只有一次时钟读数）；② **脱敏先于截断可证**——
+  `100×'A' + 'SEKRET' + 100×'A'` 配 128 字节预算，先截后脱敏会让 `SEKRET` 活在结果里。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_command_runner.py`
   Expected: FAIL — `ImportError: cannot import name 'CommandRunner'`。
-- [ ] **Step 3: 实现** `command.py`；不提供 `shell` 参数（结构性禁 `shell=True`）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: run allowlisted commands with timeouts and redaction"`
+  Actual: `ModuleNotFoundError: No module named 'stableagent.execution.command'`（收集期即红，比计划
+  早一层：整个模块还不存在，还没轮到"名字导不到"；`ModuleNotFoundError` 是 `ImportError` 的子类）。
+  实现后第一轮另有 **13 例红在测试装置自身**——`NameError: name 'FixedClock' is not defined`：
+  Task 6 那一段没用过 `FixedClock`，我追加 C7 段时用了它却没补 import。补 `from tests.support import
+  FixedClock` 后 20 passed，与实现无关，如实记在这儿。
+- [x] **Step 3: 实现** `command.py`；不提供 `shell` 参数（结构性禁 `shell=True`）。
+  `run(self, request)` 只有一个形参，签名里没有 `shell`；`subprocess.run` 那一项显式写 `shell=False`。
+  计划偏差四处：
+  ① **`CommandRequest` 加 `context: CommandContext` 字段**（计划的 dataclass 只有
+  `argv/cwd/timeout_s`）：计划的 ③ 要求 `env=build_child_env(...)`，而它需要
+  ticket_id/assignment_id/repository/base_ref，除了随请求走没有别的来源。放 request 不放 runner 的
+  理由是 `worktree_root` 是**全部 Ticket 共用的根**，一个 runner 服务多个 Ticket；`worktree` 故意不进
+  context——它是 `run()` 收口后的 cwd，由 runner 填，调用方没有"报一个别的目录"的余地。字段位置在
+  `timeout_s` 之前（dataclass 不允许无默认值的字段排在有默认值的之后）。
+  ② **构造函数加 `clock`**（计划未列）：`started_at`/`ended_at` 要有来源，房子口径是注入 `Clock`
+  （`Store`、`GitWorktreeManager` 同形），测试绝不读墙钟；配套在测试里加了 `AdvancingClock`
+  来证 `ended_at > started_at`（真跑过＝两次读数），拒绝路径断言两次读数相等。
+  ③ **拒绝码表多一个 `empty_argv`**：空 argv 没有可判定的命令名，不挡就会 `IndexError`；
+  码表写进 `command.py` 的 docstring（Task 9 的 `shell_syntax` 追加进同一张表）。
+  ④ **`max_output_bytes` 语义定为"含尾标的总预算"**：Step 1 写的是"长度 ≤ 上限"，而尾标本身要占位——
+  用 `dropped=len(data)` 那一份尾标形态预留（真实尾标的位数只会更少），于是"正文 + 尾标 ≤ 预算"恒成立；
+  切口落在半个 UTF-8 字符上时 `decode(..., "ignore")` 丢掉那半个。附带一条：`subprocess.run` 显式
+  带 `encoding="utf-8", errors="replace"`，不靠宿主 locale 猜孩子吐出的字节怎么解码（与孩子拿到的
+  `LANG=C.UTF-8` 同源），因此这里的上限确实是**字节**数——与 `git.py` 的 `max_output_chars`
+  （字符数）是两套口径，名字沿用计划不改。
+  另记一条 spawn 语义：allowlist 里的裸名由 `execvp` 按**父进程** `PATH` 解析，孩子环境里那份 `PATH`
+  只影响它以后再 spawn 的进程；名单里的名字不存在时 `FileNotFoundError` 原样抛出——那是部署配置错误，
+  不是策略拒绝，吞掉它只会让"为什么什么都没跑"无处可查（本轮不为它加拒绝码，避免造计划外的策略）。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+  Actual: 目标文件 **20 passed**（C7 段 14 例 + Task 6 的 6 例）、全量 **538 passed, 1 skipped**（+14）、
+  总覆盖 99.17%、`execution/command.py` 89 语句 **100%**（单跑目标文件即 100%，不靠别的文件凑）；
+  `mypy` Success（50 source files，+1）、`ruff check` All checks passed、`ruff format --check`
+  112 files already formatted（一处 docstring 超 100 列被 `E501` 挡过，改行重写）；
+  L1 与约束 1 diff 均 0 行，本轮 `orchestration/` 只被 import `Clock`，零改动。
+- [x] **Step 5: 提交**：`git commit -am "feat: run allowlisted commands with timeouts and redaction"`
+  → `e915dd3`。账本回填单独提交；步骤 2.6 的"**截断与脱敏入 Report**"半边本轮不勾（`CommandResult`
+  还没有生产调用方），C7 的验证栏只要求五项有测试，故 C7 勾、2.6 记进度不勾。
 
 ### Task 8: `LocalRestrictedRunner` 与叙事纪律（步骤 2.8）
 
