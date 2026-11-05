@@ -4,7 +4,7 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 16/46、里程碑步骤 18/40（M1 9/9、M2 9/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **DoD 17/46、里程碑步骤 19/40（M1 9/9、M2 10/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
@@ -119,8 +119,25 @@
       `_result()` 记的是**请求**的 argv，不是装配出的 docker argv。
       **本轮没有证的**：容器内实际生效的隔离强度（从未在真 Docker 上跑过，Task 11 的双条件用例
       是第一条），以及宿主凭据会不会经 `docker` daemon 间接可达。prompt/日志侧脱敏仍未闭合。
+      进度（2026-11-05，M2 Task 11 的容器环境实测半边）：上面那句"从未在真 Docker 上跑过"作废——
+      维护者授权后在本机 opt-in 跑了一次（`docker` marker + `STABLEAGENT_DOCKER=1` + 本地已 pin
+      的 `python@sha256:8ce0c4b7…`，不 pull），容器里进程自己打印的环境是：五个 `STABLEAGENT_*`
+      齐全、`STABLEAGENT_WORKTREE` 就是 `/workspace`、`GITHUB_TOKEN`/`AWS_SECRET_ACCESS_KEY`/
+      `GH_TOKEN` 三个名字全部 `<unset>`（`test_container_environment_carries_context_and_no_host_secret`）。
+      同时这一跑兑现了 Task 10 的缺口：客户端超时不带走容器（两个还在跑的容器 ID 被断言抓个正着），
+      于是容器档补了定点清理（按请求摘要命名 + 超时分支 `docker kill`），补完全绿。
+      **仍未闭合**：宿主凭据会不会经 `docker` daemon 间接可达（这一跑只看容器内的环境，没查
+      daemon 侧）；prompt/日志侧脱敏照旧，L7 继续不勾。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
+      进度（2026-11-05，M2 Task 11 的 Docker 半边）：Docker 这一半的形状落定了——`docker` marker
+      注册在 `pyproject.toml`，`STABLEAGENT_DOCKER` 由 `execution.docker.docker_tests_enabled`
+      判（只认 `"1"`），两半分别由集成文件的 `pytestmark` skipif 与 autouse fixture 拦住；
+      默认全量 `575 passed, 6 skipped`，六条 skip 的原因在 `-rs` 里逐条可见（五条 Docker +
+      一条 P2 的 Redis），核心文件 `tests/unit/test_command_runner.py` 单独跑一条都不 skip。
+      本仓库不 pull 镜像：真实用例还要 `STABLEAGENT_DOCKER_IMAGE` 指一个本地已 pin 的引用，
+      缺它同样跳过。**仍未闭合**：真实 GitHub 那一半（M4 的 WP-5.5 才有可选 smoke test），
+      以及"CI 上确实没有 Docker 可用"这一条只能靠 CI 日志而不是本地断言——L8 继续不勾。
 
 ## 1. 里程碑与步骤
 
@@ -472,8 +489,30 @@
       在客户端被杀后的清理语义，都留给 Task 11 的双条件用例；③ `network_profiles` 的值（origin
       名单）不参与装配，Docker 没有 origin 级出口控制，强制点在授权层；④ `--name` 不给——固定名
       要处理并发冲突，随机名又无法定点清理，这是 ②的另一半。
-- [ ] **2.11** Docker 测试条件：`docker` marker + `STABLEAGENT_DOCKER=1` 双条件，默认跳过且
+- [x] **2.11** Docker 测试条件：`docker` marker + `STABLEAGENT_DOCKER=1` 双条件，默认跳过且
       原因可见。验证：无 Docker 环境全量绿（D3、L8）。
+      证据（2026-11-05，M2 Task 11）：三条落点各管一段——`pyproject.toml` 的 `markers` 注册
+      `docker: 需要真实 Docker 守护进程（同时设置 STABLEAGENT_DOCKER=1 才运行）`；
+      `execution.docker.docker_tests_enabled(env)` 判环境变量（只有恰好 `"1"` 算开，`false`
+      经 `bool()` 会读成"开"，而"开"的代价是在离线 CI 起容器）；
+      `tests/integration/test_docker_runner.py` 的 `pytestmark` skipif 拦环境变量那一半，
+      autouse fixture `_gate_conditions` 读 `config.getoption("markexpr")` 拦 marker 那一半。
+      实测三档（同一个文件、同五条用例）：默认环境 `5 skipped`，原因
+      `未设置 STABLEAGENT_DOCKER=1：真实 Docker 用例跳过（CI 离线，L8）`；只给环境变量不给 `-m`
+      仍 `5 skipped`，原因 `未按 -m docker 选中 docker marker：真实容器用例跳过（双条件缺一）`；
+      两个开关都给但没给 `STABLEAGENT_DOCKER_IMAGE` 再 `5 skipped`，原因点名"本文件不 pull
+      镜像（L8），只认本地已 pin 的引用"。默认全量 `575 passed, 6 skipped`（第 6 条是 P2 的
+      Redis 用例），`-rs` 摘要里五条原因逐条可见，`-m docker` 单独选是 `5 skipped, 576 deselected`。
+      **本轮另有一次 opt-in 真跑**（维护者当场授权；本机 Docker server 29.5.2，镜像
+      `python@sha256:8ce0c4b7…`，取自 `docker inspect --format='{{index .RepoDigests 0}}' python:3.11`）：
+      五条容器用例第一次执行就是 `4 passed, 1 failed`——红的正是超时那条
+      （`超时后仍在运行的容器：172ea7a0a804 / 34494846dac3`），Task 10 记下的"客户端超时不带走
+      容器"兑现；按那一轮的约定补了定点清理（`--name` 走请求摘要 + 超时分支 `docker kill`），
+      补完全绿 `5 passed`。四条封闭事实是容器里进程的实际下场而不是 argv：worktree 挂载可读且
+      cwd 就是 `/workspace`、`--network none` 下 connect 以 `OSError` 收场、根盘写被 `Read-only`
+      挡住而 `/tmp` 可写、容器环境里五个 `STABLEAGENT_*` 到位且三个宿主密钥名一个不见（L7）。
+      门禁与覆盖：`mypy` 52 files、`ruff check` 通过、`ruff format --check` 116 files、
+      `docker.py` 覆盖 100%、L1 与约束 1 diff 0 行。装配口径的改动见 §6 Task 11 Step 3。
 - [ ] **2.12** **M2 出口**：全量门禁 + 并行 Ticket 目录互不污染集成用例（C1）+ 账本回填。
 
 ### M3：MCP 与 GitHub 闭环（规格 WP-5.4 + WP-5.5；ADR-05 决策 4/8/9）
@@ -750,7 +789,25 @@
       （L8），"这些参数确实封闭"要等 Task 11 的 `docker` marker + `STABLEAGENT_DOCKER=1` 双条件
       用例；同理 `CommandResult.mode` 恒写 `docker`
       （`test_docker_results_never_impersonate_local_restricted`）证的是读侧不冒充，不是容器内发生了什么。
-- [ ] **D3** Docker 不可用时测试跳过、核心门禁不受影响。
+- [x] **D3** Docker 不可用时测试跳过、核心门禁不受影响。
+      证据（2026-11-05，M2 Task 11）：跳过侧四条 + 不受影响侧一条，全部在
+      `tests/unit/test_sandbox.py` 的 D3 段——① `test_docker_marker_is_registered` 读
+      `pyproject.toml` 全文断 marker 文本在位且只写一次（未注册的 marker 只 warn 不 fail，
+      只能钉配置本身）；② `test_docker_gate_needs_the_env_flag_set_to_one` 跑五档语料
+      （缺键 / `""` / `"0"` / `"true"` / `"1"`），只有最后一档为真；③
+      `test_docker_cases_skip_in_the_default_environment` 与 ④
+      `test_docker_cases_stay_skipped_when_only_the_env_flag_is_set` 各起一次**嵌套 pytest**
+      子进程，断的是真实收集结果（returncode 0 + `-rs` 输出里出现对应原因文本），不是自家 helper
+      的返回值——嵌套跑前剥掉 `STABLEAGENT_DOCKER`/`STABLEAGENT_DOCKER_IMAGE`，否则开发机上
+      导出过这两个变量就会让"默认跳过"变成看机器脸色；⑤
+      `test_core_suite_does_not_depend_on_docker` 用同一个嵌套跑法验核心文件：`passed` 且
+      **一条都不 skip**（被牵连的跳过在 L8 这里也算不合格）。
+      口径记两句：本条勾的是"不可用/未选中时不拖累门禁"，容器档的强度由 D2（参数装配）+ Task 11
+      那次 opt-in 真跑（容器内实际下场）合起来证；两者都不是永久证明——换镜像、换 Docker 版本
+      或换 daemon 就得重跑那五条（`pytest -q -m docker` + 两个环境变量）。
+      另记一条**顺序偏离**：D3 的 ⑤ 一次即绿（它断的是既有事实），Step 2 只有四条转红；
+      而 §6 Task 11 Step 3 补的清理行为是先实现后补单测——红因来自真实 opt-in 运行而不是单测，
+      倒叙不做修饰，细节写在 §6 Task 11 Step 3。
 
 ### E MCP（M3）
 
@@ -796,7 +853,15 @@
 git diff 234f620..HEAD --stat -- stableagent/core/   # 必须 0 行（L1）
 ```
 
-Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行（L8）。
+Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行（L8）。Docker 这一半的形状
+（2026-11-05，M2 Task 11）是三条同时给：
+
+```bash
+# 不满足这三条就是 skip，不是 fail；本文件绝不 `docker pull`，所以镜像引用得自己指一个本地已 pin 的
+STABLEAGENT_DOCKER=1 \
+STABLEAGENT_DOCKER_IMAGE="$(docker inspect --format='{{index .RepoDigests 0}}' python:3.11)" \
+.venv/bin/pytest -q -m docker tests/integration/test_docker_runner.py
+```
 
 ## 4. 任务级实施计划（占位）
 
@@ -1218,14 +1283,15 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~10 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~11 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。顶部计数本次一并校正：Task 5~8 四次收口只勾条目、没改第 0 节
 > 上方的汇总行，账上停在 `DoD 10/46、里程碑 13/40（M2 4/12）`，而 Task 9 开工前的真实值是
 > `DoD 13/46`（Task 6/7/8 各加一项 C8/C7/D1，未计入）、`里程碑 16/40（M2 7/12）`（Task 5 勾 2.5 起
 > 就少算）；本轮按 Task 9 收口后的真实值改写为 `DoD 15/46`（第 2 节 15 项 + 第 0 节 0 项）、
 > `里程碑 17/40`（M1 9 + M2 8）。
-> 这是记账疏漏，不是判定变化——被改写的只有汇总行，各条证据原文未动。（Task 10 收口后再推进一格：
-> `DoD 16/46、里程碑 18/40（M2 9/12）`，即文件头那一行。）
+> 这是记账疏漏，不是判定变化——被改写的只有汇总行，各条证据原文未动。此后每收口一个 Task 只推进
+> 汇总行一处：Task 10 收口为 `DoD 16/46、里程碑 18/40（M2 9/12）`，Task 11 收口为
+> `DoD 17/46、里程碑 19/40（M1 9/9、M2 10/12）`，即文件头那一行。
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
 > （`EffectKind` 加成员属 ADR-05 决策 5 点名允许，`service.py` 一字不动——约束 1）；`control/`
@@ -1874,22 +1940,103 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 - Modify: `pyproject.toml`（`[tool.pytest.ini_options]` 增加 `markers`）
 - Create: `tests/integration/test_docker_runner.py`
 - Test: `tests/unit/test_sandbox.py`（追加 D3 用例）
+- 计划外一处（本轮实际改动，理由见 Step 3）：Modify `stableagent/execution/docker.py`——
+  `docker_tests_enabled` 是 Interfaces 点名要产出的、但 Files 没列这个文件；同文件另加了
+  `container_name` / `--name` / 超时分支的 `_kill`，那是 opt-in 真跑兑现 Task 10 缺口之后的清理
 
 **Interfaces:**
 - Produces: marker `docker: 需要真实 Docker 守护进程（同时设置 STABLEAGENT_DOCKER=1 才运行）`；
   `execution.docker.docker_tests_enabled(env: Mapping | None = None) -> bool`——两个条件
   （`STABLEAGENT_DOCKER == "1"`）就位才返回真；集成用例 `pytestmark = [pytest.mark.docker,
   pytest.mark.skipif(...)]`，skip 原因写明环境变量名。
-- [ ] **Step 1: 写失败的测试**：`test_docker_marker_is_registered`（读 `pyproject.toml` 断言
+- [x] **Step 1: 写失败的测试**：`test_docker_marker_is_registered`（读 `pyproject.toml` 断言
   marker 文本在位——注册缺失时 `--strict-markers` 之外不报错，只能这样钉）；
   `test_docker_tests_require_both_conditions`（`{}` → False、`{"STABLEAGENT_DOCKER": "1"}` →
   True）；集成文件在默认环境下被 skip。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
+  实际落五条，三处按计划、两处按读到的事实改：① marker 那条同名，另加"文本只写一次"；
+  ② 计划那条**改名** `test_docker_gate_needs_the_env_flag_set_to_one`——`docker_tests_enabled`
+  只判环境变量，叫 "both conditions" 就是替函数吹它没做的半边，语料也从两档扩到五档
+  （缺键 / `""` / `"0"` / `"true"` / `"1"`）；③④ "默认环境被 skip" 拆成两条，因为双条件必须
+  分别证：`test_docker_cases_skip_in_the_default_environment`（两个开关都不给）与
+  `test_docker_cases_stay_skipped_when_only_the_env_flag_is_set`（只给环境变量、不给 `-m`），
+  两条都在**子进程里真跑一次 pytest**（`-p no:cacheprovider --no-cov -q -rs`），断 returncode 0
+  且 `-rs` 输出里出现对应原因文本——不是断自家 helper 的返回值；⑤ 另加
+  `test_core_suite_does_not_depend_on_docker`：拿同一个嵌套跑法跑 `tests/unit/test_command_runner.py`，
+  断 `passed` 且一条都不 skip（被门禁牵连的跳过在 L8 这里也不合格）。
+  子进程环境先剥掉 `STABLEAGENT_DOCKER`/`STABLEAGENT_DOCKER_IMAGE`（`GATE_VARS`），否则开发机上
+  导出过这两个变量就会让"默认跳过"变成看机器脸色。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
   Expected: FAIL — marker 未注册 / `docker_tests_enabled` 不存在。
-- [ ] **Step 3: 实现** marker 与开关函数。
-- [ ] **Step 4: 跑到绿**：`pytest -q -rs` 输出 skip 原因可见（`STABLEAGENT_DOCKER`），全量绿
+  Actual: `4 failed, 22 passed`。① `assert 'docker: 需要真实 Docker 守护进程（同时设置
+  STABLEAGENT_DOCKER=1 才运行）' in '[build-system]\nrequires = ["hatchling"]…'`——`markers`
+  整段不在配置里；② `AttributeError: module 'stableagent.execution.docker' has no attribute
+  'docker_tests_enabled'`；③④ 两条嵌套用例 `assert 4 == 0`，stderr 是
+  `ERROR: file or directory not found: tests/integration/test_docker_runner.py`。
+  第五条一次即绿（它断的是既有事实），如实记下：五条里四条按预期转红，不是五条。
+- [x] **Step 3: 实现** marker 与开关函数。
+  `pyproject.toml` 的 `markers` 一条 + `docker.py` 的 `docker_tests_enabled`（严格比对 `"1"`：
+  `bool("false")` 会读成"开"，而"开"的代价是在离线 CI 起容器，错方向代价不对称）+
+  `tests/integration/test_docker_runner.py`（206 行，五条容器用例）。八处写在名字旁边：
+  ① `config.getoption("marker")` 直接抛 `ValueError: no option named 'marker'`：`-m` 的 dest 是
+  `markexpr`。这条红是集成文件被嵌套跑到的那一刻以 `5 errors` 露出来的（`1 failed` 的单测把子进程
+  输出整段贴在断言消息里），不是靠读 pytest 源码想到的。
+  ② 双条件的第二半只能落在 autouse fixture：`skipif` 在 import 期求值，拿不到 `config`，读不到
+  本次跑有没有 `-m docker`。计划的 Interfaces 写 `pytestmark=[docker, skipif(...)]`，那只拦得住
+  环境变量一半——少了 fixture 这一半，谁在 shell 里导出过 `STABLEAGENT_DOCKER=1`，一次普通全量跑
+  就会起容器。
+  ③ 第三道 `STABLEAGENT_DOCKER_IMAGE` 是计划没写的：不给它，两条开关齐了以后用例要么 pull（联网，
+  违反 L8）要么对着不存在的镜像名红一片。它不是门禁是**参数**——没有本地已 pin 的镜像就没有可执行
+  的目标，所以原因文本点名"本文件不 pull 镜像"。
+  ④ 五条容器用例的数量与内容是计划没定的（Files 只说"集成用例"）：worktree 挂载可读 + cwd 就是
+  挂载点、`--network none` 下 connect 以 `OSError` 收场、根盘写被 `Read-only` 挡住而 `/tmp` 可写、
+  容器环境白名单（L7）、超时后不留运行容器。前四条读的是容器里进程的下场而不是 argv，正是 D2 没敢
+  声称的那一半。探针代码全部写成单表达式且不含换行/分号——它们要过同一份 `SHELL_METACHARACTERS`
+  判定，测试自己也在规则之下（C6 的连带效果，口径同 Task 9）。
+  ⑤ **一处顺序偏离：超时清理是实现先于单测**。红因来自 opt-in 真跑（维护者当场授权；本机 Docker
+  server 29.5.2，镜像取 `docker inspect --format='{{index .RepoDigests 0}}' python:3.11` 的 digest）：
+  第一次执行 `4 passed, 1 failed`，失败的是超时那条，断言消息直接打出还在跑的容器 ID
+  （`172ea7a0a804`、`34494846dac3`——第二次跑的现场）。按 Task 10 写下的"验不过就在这一档补清理路径"
+  落了 `--name` + 超时分支 `docker kill`，然后才补 `test_sandbox.py` 的四条离线用例
+  （`test_container_name_is_a_stable_digest_of_the_request`、
+  `test_timeout_kills_the_named_container_it_started`、`test_a_finished_command_is_not_killed`、
+  `test_a_failing_kill_does_not_rewrite_the_timeout`）。为了确认它们不是跟着实现写的空转，把
+  `_execute` 里 `self._kill(...)` 那一行临时摘掉再跑：`2 failed, 2 passed`——两条超时用例转红
+  （`assert (1 == 2)`：`docker run` 之后再没有第二次调用），命名与"不补刀"两条照绿；随后把那一行
+  装回去，`30 passed`。摘/装只在这一轮临时用过，代码里没留标记。
+  ⑥ 容器名走请求摘要（`sha256` 前 16 hex，覆盖 ticket/assignment/repository/base_ref + cwd + argv）
+  而不是 uuid：`build_argv` 必须继续是请求的纯函数，否则 Task 10 的
+  `test_run_hands_the_assembled_argv_and_the_allowlisted_env_to_docker`（断 argv 逐字节相等）当场失效。
+  选摘要而不是随机名的另一半：同一请求并发重跑会撞名并以非零退出**显式**失败——那正是"同一条命令
+  被跑了两遍"该被看见而不是被合并的样子。这条推翻了 Task 10 写在模块文档里的"不传 `--name`"，
+  文档已按实测改写，账本不回填历史。
+  ⑦ `_kill` 的成败不进 `CommandResult`：`contextlib.suppress(subprocess.TimeoutExpired, OSError)`
+  咽掉（形式是 ruff SIM105 逼出来的，从 try/except/pass 换过来，语义没变）。清理失败留下的是一个
+  还在跑的容器，那是双条件用例的断言对象；把清理工具的 stderr 拼进命令输出等于伪造正文。
+  ⑧ `FakeSpawn` 加 `raise_once`：第一次 spawn 抛（被掐的是 `docker run`），后续调用正常返回——
+  不加这个，清理那条调用到底发没发出去就测不到。
+- [x] **Step 4: 跑到绿**：`pytest -q -rs` 输出 skip 原因可见（`STABLEAGENT_DOCKER`），全量绿
   （L8：核心门禁不受 Docker 可用性影响）+ 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "test: gate docker cases on a marker and an env var"`
+  证据（2026-11-05）：`tests/unit/test_sandbox.py` 30 例（D1 7 + D2 14 + D3/清理 9）单独跑
+  `30 passed`；默认全量 `575 passed, 6 skipped`、总覆盖 `99.21%`、`docker.py` 覆盖 100%。
+  `-rs` 摘要里五条原因逐条可见（`未设置 STABLEAGENT_DOCKER=1：…`×5，第六条是 P2 的 Redis 用例），
+  三条门禁态实测：默认 `5 skipped` / 只给环境变量 `5 skipped`（原因 `未按 -m docker 选中 docker
+  marker…`）/ 两开关齐但没给镜像 `5 skipped`（原因点名 `STABLEAGENT_DOCKER_IMAGE`）；
+  `-m docker` 单独选是 `5 skipped, 576 deselected`。门禁：`mypy` = `Success: no issues found in
+  52 source files`、`ruff check` = `All checks passed!`、`ruff format --check` =
+  `116 files already formatted`（115→116：新增集成文件；SIM105 挡过一次，见 Step 3 ⑦）。
+  opt-in 那一跑补完清理后 `5 passed in 4.72s`。方向扫描（L2）：集成文件在 `tests/` 下，不进
+  `stableagent` 的 import 方向语料；`docker.py` 新增 `contextlib`/`hashlib`/`os` 三个 stdlib 导入，
+  仍只依赖同包与 `orchestration.model`。L1 `git diff 234f620..HEAD` 对 `stableagent/core/` 与
+  `orchestration/service.py` 均 0 行。
+- [x] **Step 5: 提交**：`git commit -am "test: gate docker cases on a marker and an env var"`
+  → 实际提交 `19dfdd6`，消息 `feat: gate docker cases on two conditions and clean up on timeout`。
+  两处不按字面：① 前缀从 `test:` 改 `feat:`——本轮含生产改动（`docker_tests_enabled`、`--name`、
+  超时清理），`test:` 会低报；② 依旧没用 `-am`，改成显式 `git add` 四个路径
+  （`pyproject.toml`、`stableagent/execution/docker.py`、`tests/unit/test_sandbox.py`、
+  `tests/integration/test_docker_runner.py`）——`docs/blog/01`、`docs/blog/02`、`docs/README.md`
+  里用户的在制编辑仍在工作树，`docs/blog/03-durable-outbox.md`、`docs/blog/README.md` 仍未跟踪，
+  且新建的集成文件本就不在 `-am` 的射程里。步骤 2.11 与 D3 随之勾选，`L7`、`L8` 仍不勾（各自
+  缺的那一半写在 §0 的进度里），M2 出口（C1、2.12）属 Task 12。
 
 ### Task 12: M2 出口——并发目录互不污染与账本回填（步骤 2.12）
 
