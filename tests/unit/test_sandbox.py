@@ -180,7 +180,7 @@ def test_timeout_summary_names_the_missing_exit_code(tmp_path: pathlib.Path) -> 
     runner = _runner(tmp_path, ["python3"])
 
     timed_out = runner.run(
-        _request(worktree, "python3", "-c", "import time; time.sleep(5)", timeout_s=0.05)
+        _request(worktree, "python3", "-c", "__import__('time').sleep(5)", timeout_s=0.05)
     )
 
     assert timed_out.timed_out and timed_out.exit_code is None

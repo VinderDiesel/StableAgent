@@ -1,11 +1,13 @@
-"""C8 + L7（环境半边）与 C7（步骤 2.6）：子进程环境是白名单而不是宿主复印件，
-命令边界是 allowlist + cwd 收口 + 超时 + 输出上限 + 脱敏，被拒不抛异常也不 spawn。
+"""C8 + L7（环境半边）、C7（步骤 2.6）与 C6（步骤 2.9）：子进程环境是白名单而不是宿主复印件，
+命令边界是 allowlist + cwd 收口 + 超时 + 输出上限 + 脱敏 + shell 语法拒绝，被拒不抛异常也不 spawn。
 
-Task 6 落 `build_child_env`，Task 7 落 `CommandRunner` 并把它接进真实的 `subprocess.run`。
+Task 6 落 `build_child_env`，Task 7 落 `CommandRunner` 并把它接进真实的 `subprocess.run`，
+Task 9 加 shell 语法字符表与拒绝审计回调。
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import pathlib
@@ -141,7 +143,7 @@ def test_child_process_sees_only_the_allowlist(tmp_path: pathlib.Path) -> None:
     """
     worktree = tmp_path / "worktrees" / "sa-01234567-add-rate-limiter"
     worktree.mkdir(parents=True)
-    probe = "import json,os;print(json.dumps(dict(os.environ)))"
+    probe = "print(__import__('json').dumps(dict(__import__('os').environ)))"
 
     done = subprocess.run(
         [sys.executable, "-c", probe],
@@ -220,14 +222,14 @@ def test_allowed_command_runs_inside_its_worktree(tmp_path: pathlib.Path) -> Non
     runner = _runner(tmp_path, [sys.executable], clock=AdvancingClock())
 
     result = runner.run(
-        _request(worktree, sys.executable, "-c", "import os;print('hello');print(os.getcwd())")
+        _request(worktree, sys.executable, "-c", "print('hello', __import__('os').getcwd())")
     )
 
     assert result.denied_reason is None and result.exit_code == 0
     assert not result.timed_out and not result.truncated
     assert "hello" in result.stdout
     assert str(worktree) in result.stdout
-    assert result.argv == (sys.executable, "-c", "import os;print('hello');print(os.getcwd())")
+    assert result.argv == (sys.executable, "-c", "print('hello', __import__('os').getcwd())")
     assert result.ended_at > result.started_at  # 真跑过：两次读数之间推进过
 
 
@@ -307,7 +309,7 @@ def test_timeout_has_no_exit_code_but_keeps_partial_output(tmp_path: pathlib.Pat
             worktree,
             sys.executable,
             "-c",
-            "import sys,time;sys.stdout.write('partial\\n');sys.stdout.flush();time.sleep(2)",
+            "print('partial', flush=True) or __import__('time').sleep(2)",
             timeout_s=0.2,
         )
     )
@@ -321,7 +323,7 @@ def test_default_timeout_applies_when_the_request_does_not_ask(tmp_path: pathlib
     worktree = _worktree(tmp_path)
 
     result = _runner(tmp_path, [sys.executable], timeout_s=0.1).run(
-        _request(worktree, sys.executable, "-c", "import time;time.sleep(2)", timeout_s=None)
+        _request(worktree, sys.executable, "-c", "__import__('time').sleep(2)", timeout_s=None)
     )
 
     assert result.timed_out and result.exit_code is None
@@ -336,7 +338,8 @@ def test_output_over_the_cap_is_truncated_within_budget(tmp_path: pathlib.Path) 
             worktree,
             sys.executable,
             "-c",
-            "import sys;sys.stdout.write('x'*200_000);sys.stderr.write('y'*100)",
+            "(__import__('sys').stdout.write('x'*200_000),"
+            " __import__('sys').stderr.write('y'*100))",
         )
     )
 
@@ -363,7 +366,8 @@ def test_secrets_are_redacted_before_truncation(tmp_path: pathlib.Path) -> None:
     """顺序可证：先脱敏再截断。若反过来，落在切口前的 `SEKRET` 就会原样进 Report。"""
     worktree = _worktree(tmp_path)
     script = (
-        "import sys;sys.stdout.write('A'*100 + 'SEKRET' + 'A'*100);sys.stderr.write('err SEKRET')"
+        "(__import__('sys').stdout.write('A'*100 + 'SEKRET' + 'A'*100),"
+        " __import__('sys').stderr.write('err SEKRET'))"
     )
 
     result = _runner(tmp_path, [sys.executable], max_output_bytes=128, redact=("SEKRET",)).run(
@@ -395,7 +399,7 @@ def test_nonzero_exit_is_a_result_not_a_denial(tmp_path: pathlib.Path) -> None:
     worktree = _worktree(tmp_path)
 
     result = _runner(tmp_path, [sys.executable]).run(
-        _request(worktree, sys.executable, "-c", "import sys;sys.exit(3)")
+        _request(worktree, sys.executable, "-c", "__import__('sys').exit(3)")
     )
 
     assert (result.exit_code, result.denied_reason, result.timed_out) == (3, None, False)
@@ -408,7 +412,10 @@ def test_spawned_child_sees_the_request_context(tmp_path: pathlib.Path) -> None:
 
     result = _runner(tmp_path, [sys.executable]).run(
         _request(
-            worktree, sys.executable, "-c", "import json,os;print(json.dumps(dict(os.environ)))"
+            worktree,
+            sys.executable,
+            "-c",
+            "print(__import__('json').dumps(dict(__import__('os').environ)))",
         )
     )
 
@@ -428,10 +435,117 @@ def test_relative_cwd_is_confined_into_the_root(tmp_path: pathlib.Path) -> None:
 
     result = _runner(tmp_path, [sys.executable]).run(
         CommandRequest(
-            argv=(sys.executable, "-c", "import os;print(os.getcwd())"),
+            argv=(sys.executable, "-c", "print(__import__('os').getcwd())"),
             cwd=relative,
             context=_context(),
         )
     )
 
     assert result.stdout.strip() == str(worktree.resolve())
+
+
+# --------------------------------------------------------------------------- C6（步骤 2.9）
+
+#: 计划的注入语料（§6 Task 9）。每串都放在**非首元**位置：argv[0] 带语法字符时它本来就不在
+#: 名单上，会先撞 ③`command_not_allowed`，那样测不到 ④——把命令名留在名单里、payload 放后面。
+SHELL_CORPUS = ["echo; rm -rf /", "a|b", "a&b", "a$HOME", "`id`", "line\nbreak"]
+
+
+def test_shell_metacharacters_in_any_argument_are_denied_without_spawn(
+    tmp_path: pathlib.Path,
+) -> None:
+    """C6 的字符表半边：六条语料全部 `shell_syntax`，不 spawn、正文为空、只有一次时钟读数。"""
+    worktree = _worktree(tmp_path)
+    seen: list[tuple[CommandRequest, str]] = []
+
+    def audit(request: CommandRequest, reason: str) -> None:
+        seen.append((request, reason))
+
+    runner = _runner(tmp_path, [sys.executable], audit=audit)
+
+    for payload in SHELL_CORPUS:
+        request = _request(worktree, sys.executable, "-c", payload)
+        result = runner.run(request)
+        assert result.denied_reason == "shell_syntax", payload
+        assert result.exit_code is None and result.stdout == "" and result.stderr == ""
+        assert result.started_at == result.ended_at  # 没 spawn：只有一次读数
+
+    assert [reason for _, reason in seen] == ["shell_syntax"] * len(SHELL_CORPUS)
+    assert [req for req, _ in seen] == [
+        _request(worktree, sys.executable, "-c", payload) for payload in SHELL_CORPUS
+    ]
+
+
+def test_carriage_return_is_in_the_table_too(tmp_path: pathlib.Path) -> None:
+    """`\r` 单独一例：语料表按计划的六串走，`\n\r` 这一对里只有 `\r` 需要自己的证据。"""
+    worktree = _worktree(tmp_path)
+
+    result = _runner(tmp_path, [sys.executable]).run(
+        _request(worktree, sys.executable, "-c", "print('a')\rprint('b')")
+    )
+
+    assert result.denied_reason == "shell_syntax"
+
+
+def test_dollar_in_an_argument_denies_even_when_the_payload_is_benign(
+    tmp_path: pathlib.Path,
+) -> None:
+    """字符表的代价写在这里：`US$5` 这种无辜正文也会被拒。方向是拒不是放，
+    所以错的只会是可用性——要放行文本类参数得换 policy，不在本轮开后门。"""
+    worktree = _worktree(tmp_path)
+
+    result = _runner(tmp_path, [sys.executable]).run(
+        _request(worktree, sys.executable, "-c", "print('US$5')")
+    )
+
+    assert result.denied_reason == "shell_syntax"
+
+
+def test_metacharacter_in_argv_zero_reports_the_allowlist_code_first(
+    tmp_path: pathlib.Path,
+) -> None:
+    """优先级不被本轮改写：一次请求只报第一条。argv[0] 带语法字符时 ③ 先命中——
+    两条都是拒绝、都不 spawn，所以 C6 的"一律拒绝"不因顺序而打折。"""
+    worktree = _worktree(tmp_path)
+
+    result = _runner(tmp_path, [sys.executable]).run(_request(worktree, "echo; rm -rf /"))
+
+    assert result.denied_reason == "command_not_allowed"
+
+
+def test_every_denial_is_audited_once(tmp_path: pathlib.Path) -> None:
+    """审计回调挂在**所有**拒绝上（计划把它挂在 shell 那条下）：`reason` 形参的全部意义
+    就是让调用方按码分派，只给一个码的回调不需要这个形参。"""
+    worktree = _worktree(tmp_path)
+    codes: list[str] = []
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    runner = _runner(tmp_path, [sys.executable], audit=lambda _req, reason: codes.append(reason))
+    runner.run(_request(worktree, "rm", "-rf", "/"))
+    runner.run(CommandRequest(argv=(sys.executable,), cwd=outside, context=_context()))
+    runner.run(_request(worktree))  # 空 argv
+
+    assert codes == ["command_not_allowed", "cwd_escape", "empty_argv"]
+
+
+def test_allowed_command_leaves_the_audit_hook_untouched(tmp_path: pathlib.Path) -> None:
+    """放行不记拒绝账：回调只在拒绝这条路上跑，成功/超时/非零退出都不该有拒绝记录。"""
+    worktree = _worktree(tmp_path)
+    calls: list[str] = []
+
+    result = _runner(tmp_path, [sys.executable], audit=lambda _r, reason: calls.append(reason)).run(
+        _request(worktree, sys.executable, "-c", "print('ok')")
+    )
+
+    assert result.denied_reason is None and result.exit_code == 0
+    assert calls == []
+
+
+def test_run_has_no_shell_switch() -> None:
+    """结构性约束：`run()` 的签名只有 `self, request`，源码里没有 `shell=True`——
+    不是"被关掉了"，是写不出来（口径同 `command.py` 模块文档）。"""
+    params = inspect.signature(CommandRunner.run).parameters
+    assert list(params) == ["self", "request"]
+    assert "shell" not in params
+    assert "shell=True" not in inspect.getsource(CommandRunner.run)

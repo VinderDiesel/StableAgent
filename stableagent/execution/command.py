@@ -1,17 +1,19 @@
-"""命令边界：argv 数组 + 精确 allowlist + cwd 收口 + 超时 + 输出上限与脱敏（规格 2.4，C7）。
+"""命令边界：argv 数组 + 精确 allowlist + cwd 收口 + 超时 + 输出上限与脱敏 + shell 语法拒绝
+（规格 2.4，C7、C6）。
 
 结构性约束先说清楚：`run()` 只有 `request` 一个形参，**没有 `shell` 开关**，也不接受命令字符串——
-`shell=True` 在这里不是"被关掉"，是写不出来（Task 9 再把 shell 语法字符挡在 argv 元素里）。
+`shell=True` 在这里不是"被关掉"，是写不出来。
 
 拒绝**不抛异常**：规格 2.4 要求被拒原因待在 `CommandResult` 里，且拒绝发生在 spawn 之前，所以
-被拒的命令没有任何副作用。拒绝原因是稳定码，不是文案（映射由调用方按码做）：
+被拒的命令没有任何副作用。每一次拒绝都过一遍可注入的 `audit(request, reason)` 回调（默认 no-op，
+M3 接 Report/审计）。拒绝原因是稳定码，不是文案（映射由调用方按码做）：
 
 | 码 | 触发 | 顺序 |
 |---|---|---|
 | `cwd_escape` | `confine(worktree_root, request.cwd)` 抛 `PathEscapeError` | ① |
 | `empty_argv` | `argv` 为空（没有可判定的命令名） | ② |
 | `command_not_allowed` | `argv[0]` 不在 allowlist 里 | ③ |
-| `shell_syntax` | 任一 argv 元素含 shell 语法字符 | Task 9 |
+| `shell_syntax` | 任一 argv 元素含 `SHELL_METACHARACTERS` 之一 | ④ |
 
 两条口径写在名字旁边：
 
@@ -23,11 +25,18 @@
 * **`max_output_bytes` 是含尾标的总预算**：截断后 `stdout`/`stderr` 各自的 UTF-8 字节数不超过它，
   尾标 `...[truncated N bytes]` 里的 N 是被丢掉的字节数。先按 `redact` 逐个替换成 `***`、再截断，
   顺序反过来会让落在切口前的密钥原样进 Report。
+
+④ 为什么在 `shell=False` 之下还要拦 shell 语法：本边界管的是**请求**，不是这一档实现怎么 spawn。
+`CommandRequest` 会流过不同的 runner（`DockerRunner` 里换成形如 `sh -c` 的包装、集成层里可能拼命令
+串），把语法字符挡在请求里，"这个请求在任何实现下都不会被 shell 解释"才是可证的性质，而不依赖
+"当前这个实现恰好没起 shell"。代价说清楚：这是字符表策略，必然误伤正文（`US$5`、带 `;` 的代码片段
+都会被拒），方向是**拒而不是放**，所以错的只会是可用性；要放行文本类参数得换 policy，不在这里开口。
 """
 
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +52,14 @@ REDACTED = "***"
 #: 本地受限执行的模式名。叙事纪律（ADR-05 决策 7）：这一档统一写 `local-restricted`，
 #: 换实现就得换字符串——`DockerRunner` 不得沿用默认值冒充本地执行。
 LOCAL_RESTRICTED = "local-restricted"
+
+#: shell 语法字符（规格 2.4 / C6）：`;` `&` `|` `$` 反引号、换行、回车。
+#: 判的是"这个请求有没有可能被 shell 解释"，不是"当前实现有没有起 shell"——见模块文档 ④。
+SHELL_METACHARACTERS = frozenset(";&|$`\n\r")
+
+
+def _no_audit(request: CommandRequest, reason: str) -> None:
+    """拒绝审计的默认回调：什么都不做。M3 把它接到 Report/审计写入，本轮不预设目的地。"""
 
 
 @dataclass(frozen=True)
@@ -125,6 +142,7 @@ class CommandRunner:
         max_output_bytes: int = 64 * 1024,
         timeout_s: float = 60.0,
         redact: tuple[str, ...] = (),
+        audit: Callable[[CommandRequest, str], None] = _no_audit,
     ) -> None:
         self._allowlist = frozenset(allowlist)
         self._worktree_root = Path(worktree_root)
@@ -132,9 +150,10 @@ class CommandRunner:
         self._max_output_bytes = max_output_bytes
         self._timeout_s = timeout_s
         self._secrets = tuple(redact)
+        self._audit = audit
 
     def run(self, request: CommandRequest) -> CommandResult:
-        """判定 → spawn → 归一化输出；三条判定按 ①cwd ②空 argv ③allowlist 的顺序短路。"""
+        """判定 → spawn → 归一化输出；四条判定按 ①cwd ②空 argv ③allowlist ④shell 语法短路。"""
         reason = self._deny_reason(request)
         if reason is not None:
             return self._denied(request, reason)
@@ -190,7 +209,7 @@ class CommandRunner:
         )
 
     def _deny_reason(self, request: CommandRequest) -> str | None:
-        """① cwd 收口 ② 空 argv ③ allowlist——顺序即优先级，一次请求只报第一条。
+        """① cwd 收口 ② 空 argv ③ allowlist ④ shell 语法——顺序即优先级，一次请求只报第一条。
 
         判定与 `run()` 里的取路径各调一次 `confine`：同一个收口实现（C4），两次结果必然同形，
         换来的是"理由"与"路径"各自只有一个来源。
@@ -203,10 +222,17 @@ class CommandRunner:
             return "empty_argv"
         if request.argv[0] not in self._allowlist:
             return "command_not_allowed"
+        if any(char in SHELL_METACHARACTERS for arg in request.argv for char in arg):
+            return "shell_syntax"
         return None
 
     def _denied(self, request: CommandRequest, reason: str) -> CommandResult:
+        """拒绝的唯一出口：一次读数（没 spawn 的证据）+ 一次审计回调。
+
+        回调抛出的异常原样传出——拒绝已经决定，记录失败不能把结论改成放行。
+        """
         now = self._clock.now_ms()
+        self._audit(request, reason)
         return CommandResult(
             argv=request.argv,
             exit_code=None,

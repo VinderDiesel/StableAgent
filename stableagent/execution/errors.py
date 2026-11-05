@@ -2,6 +2,8 @@
 
 被拒绝的命令默认不是异常——`CommandRunner` 把拒绝写进 `CommandResult.denied_reason`；
 本家族的 `CommandDeniedError` 只用于"调用方违反了执行前提"的场合（ADR-05 决策 6/7）。
+命令拒绝的四个稳定码（`cwd_escape` / `empty_argv` / `command_not_allowed` / `shell_syntax`）
+的表与顺序写在 `command.py` 的模块文档里，本模块不重复一份——两处名单迟早会漂。
 """
 
 from __future__ import annotations
