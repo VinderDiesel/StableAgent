@@ -40,6 +40,10 @@ from stableagent.orchestration.model import Clock
 TRUNCATION_MARKER = "...[truncated {dropped} bytes]"
 REDACTED = "***"
 
+#: 本地受限执行的模式名。叙事纪律（ADR-05 决策 7）：这一档统一写 `local-restricted`，
+#: 换实现就得换字符串——`DockerRunner` 不得沿用默认值冒充本地执行。
+LOCAL_RESTRICTED = "local-restricted"
+
 
 @dataclass(frozen=True)
 class CommandContext:
@@ -70,7 +74,11 @@ class CommandRequest:
 
 @dataclass(frozen=True)
 class CommandResult:
-    """一次执行（或一次拒绝）的全部事实：拒绝时 `exit_code is None` 且两路输出为空。"""
+    """一次执行（或一次拒绝）的全部事实：拒绝时 `exit_code is None` 且两路输出为空。
+
+    `mode` 由生产者写明自己是谁：`CommandRunner` 是 `local-restricted`，容器实现必须换成自己的
+    名字。默认值是本地执行那一个，因为默认生产者就是本地的 `CommandRunner`。
+    """
 
     argv: tuple[str, ...]
     exit_code: int | None
@@ -81,10 +89,32 @@ class CommandResult:
     truncated: bool
     timed_out: bool
     denied_reason: str | None
+    mode: str = LOCAL_RESTRICTED
+
+    def summary(self) -> str:
+        """进 Report 的一行事实：模式、结果码、是否截断、耗时。
+
+        不含 `stdout`/`stderr` 的任何原文——正文里可能有密钥，也可能根本不是我们的文本，
+        而 Report 是长期留存的那一份。要正文就读 `CommandResult` 本身。
+        结果码三分：被拒写稳定码（`denied=...`），超时没有退出码（`timed_out`），其余写
+        `exit=N`。模式串只来自 `mode`，本方法不推断也不美化它。
+        """
+        if self.denied_reason is not None:
+            outcome = f"denied={self.denied_reason}"
+        elif self.timed_out:
+            outcome = "timed_out"
+        else:
+            outcome = f"exit={self.exit_code}"
+        return (
+            f"{self.mode} {outcome} "
+            f"output={'truncated' if self.truncated else 'intact'} "
+            f"duration_ms={self.ended_at - self.started_at}"
+        )
 
 
 class CommandRunner:
-    """按 allowlist 放行的本地命令执行器；它不是安全沙箱（叙事纪律见 `execution/sandbox.py`）。"""
+    """按 allowlist 放行的本地命令执行器：模式是 `local-restricted`，它不是安全边界——
+    包装与叙事纪律见 `LocalRestrictedRunner`。"""
 
     def __init__(
         self,
