@@ -1,4 +1,4 @@
-"""worktree 的创建与复用（规格 2.3，ADR-05 决策 6）。
+"""worktree 的创建、复用与显式清理（规格 2.3 + 2.5，ADR-05 决策 6）。
 
 `prepare(ticket, repository=..., base_ref=...)` 的 `repository` 参数是**本地克隆的根目录**；
 写进 ownership 与 `WorktreeHandle` 的 `repository` 字段是该克隆的 remote 身份——已由传输层剥掉
@@ -7,7 +7,12 @@
 复用判定四要素全等才复用：① 仓库 remote（记录在案 vs 克隆当前）② Ticket metadata
 ③ base ref ④ ownership 标记 `.stableagent-worktree.json`——存在、可解析、且其分支标记指向本
 Ticket。任一不符 → `WorktreeReuseError` 带逐项诊断，**且不清理现场**：Ticket 结束后 worktree
-默认保留供审查，删除只属于显式 cleanup（Task 5）。
+默认保留供审查，删除只属于 `cleanup(handle, confirm=True)`。
+
+生命周期没有第三条路：本 manager 无析构、无定时器，也不接在 Ticket 状态机上——`cleanup` 是唯一
+会删目录的入口，且必须显式确认（规格 2.5）。它**不传 `--force`**：ownership 标记是本系统自己写进
+工作区的唯一未跟踪文件，删掉它再让 git 的脏检查决定去留，于是"未提交内容不会被一次清理抹掉"
+这条锁由 git 守着，而不是由我们额外造一个 `discard` 参数。
 """
 
 from __future__ import annotations
@@ -18,8 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from stableagent.execution.errors import WorktreeReuseError
-from stableagent.execution.git import Git
+from stableagent.execution.errors import CleanupNotConfirmedError, WorktreeReuseError
+from stableagent.execution.git import Git, GitError
 from stableagent.execution.naming import workspace_name
 from stableagent.execution.paths import confine
 from stableagent.orchestration.model import Clock, Ticket
@@ -42,13 +47,18 @@ _RECORDED_KEYS = tuple(element[1] for element in _ELEMENTS)
 
 @dataclass(frozen=True)
 class WorktreeHandle:
-    """一次 prepare 的结果：路径、受控分支名、归属与 ownership 文件位置。"""
+    """一次 prepare 的结果：路径、受控分支名、归属、ownership 文件位置，以及主克隆的路径。
+
+    `repository` 是脱敏后的 remote 身份，`clone` 是本地主克隆目录——清理时 git 需要在一个仍然
+    存在的 worktree 里执行，被删的目录本身不行，所以这个路径必须随 handle 一起交付。
+    """
 
     path: Path
     branch: str
     ticket_id: str
     base_ref: str
     repository: str
+    clone: Path
     ownership_file: Path
 
 
@@ -72,6 +82,7 @@ class GitWorktreeManager:
             ticket_id=ticket.id,
             base_ref=base_ref,
             repository=remote,
+            clone=clone,
             ownership_file=ownership_file,
         )
         if path.exists():
@@ -82,6 +93,33 @@ class GitWorktreeManager:
         self._git.run(["worktree", "add", "-b", branch, str(path), base_ref], cwd=clone)
         self._write_ownership(handle)
         return handle
+
+    def cleanup(
+        self,
+        handle: WorktreeHandle,
+        *,
+        confirm: bool = False,
+        delete_branch: bool = False,
+    ) -> None:
+        """显式清理：`confirm=True` 才动手；分支默认保留，`delete_branch=True` 才 `git branch -D`。
+
+        顺序是刻意的：先摘掉自己的 ownership 标记（否则 git 会把它当未跟踪文件拒绝），再
+        `git worktree remove`；remove 失败说明工作区里有**别人的**未提交内容，标记按字节写回——
+        四要素之④不能因为一次失败的清理而消失，否则下一次 prepare 无从复用。
+        """
+        if not confirm:
+            raise CleanupNotConfirmedError(handle.path)
+        saved = handle.ownership_file.read_bytes() if handle.ownership_file.is_file() else None
+        if saved is not None:
+            handle.ownership_file.unlink()
+        try:
+            self._git.run(["worktree", "remove", str(handle.path)], cwd=handle.clone)
+        except GitError:
+            if saved is not None:
+                handle.ownership_file.write_bytes(saved)
+            raise
+        if delete_branch:
+            self._git.run(["branch", "-D", handle.branch], cwd=handle.clone)
 
     def _remote(self, clone: Path) -> str:
         """克隆的 origin 身份（脱敏后）；读不到就拒绝 prepare，不写无主 ownership。"""

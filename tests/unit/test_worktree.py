@@ -10,13 +10,18 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 
 import pytest
 
 from stableagent.execution.effects import prepare_idempotency_key, prepare_worktree_handler
-from stableagent.execution.errors import PathEscapeError, WorktreeReuseError
+from stableagent.execution.errors import (
+    CleanupNotConfirmedError,
+    PathEscapeError,
+    WorktreeReuseError,
+)
 from stableagent.execution.git import (
     GitError,
     GitResult,
@@ -33,10 +38,18 @@ from stableagent.execution.naming import (
 )
 from stableagent.execution.paths import confine
 from stableagent.execution.worktree import GitWorktreeManager, WorktreeHandle
-from stableagent.orchestration.model import Effect, EffectKind, EffectState, Ticket
+from stableagent.orchestration.model import (
+    Effect,
+    EffectKind,
+    EffectState,
+    Ticket,
+    TicketAction,
+    TicketStatus,
+)
 from stableagent.orchestration.outbox import EffectDispatcher
+from stableagent.orchestration.service import OrchestrationService
 from stableagent.orchestration.store import Store
-from tests.support import FixedClock
+from tests.support import FixedClock, SequenceIds
 
 HOSTILE_TITLES = [
     "main; rm -rf /",
@@ -526,3 +539,143 @@ async def test_prepare_effect_without_ticket_row_fails_loudly(tmp_path: pathlib.
         assert not (tmp_path / "worktrees").exists()
     finally:
         store.close()
+
+
+# ------------------------------------------- 2.5：生命周期默认保留、清理需显式确认（Task 5）
+
+
+def _removal_calls(recorder: RecordingGit) -> list[tuple[str, ...]]:
+    """清理动作的指纹：`worktree remove` 与 `branch -D`——没调用就必须一条都不存在。"""
+    return [
+        argv for argv, _ in recorder.calls if argv[:2] in {("worktree", "remove"), ("branch", "-D")}
+    ]
+
+
+def test_worktree_survives_ticket_end(tmp_path: pathlib.Path) -> None:
+    """规格 2.5：终态不触发删除——推完状态机后目录、分支、ownership 都还在，git 调用里也没有 remove。
+
+    这里不用 `__del__`、不用定时器、也不给 service 传 manager：生命周期两侧根本没有接线，
+    所以断言"没有任何删除调用"就是"没有自动删除"的证据。
+    """
+    clone = _make_clone(tmp_path)
+    clock = FixedClock()
+    manager, recorder = _manager(tmp_path / "worktrees", clock)
+    ticket = _ticket("Add rate limiter")
+    store = Store(tmp_path / "lifecycle.db", clock=clock)
+    try:
+        service = OrchestrationService(store, clock=clock, ids=SequenceIds())
+        with store.transaction():
+            store.insert_ticket(ticket)
+        handle = manager.prepare(ticket, repository=str(clone), base_ref="main")
+
+        service.queue_ticket(ticket.id)
+        service.transition_ticket(ticket.id, TicketAction.START)
+        service.transition_ticket(ticket.id, TicketAction.DELIVER)
+        service.complete_ticket(ticket.id, "审查完毕")
+        settled = store.get_ticket(ticket.id)
+        assert settled is not None and settled.status is TicketStatus.COMPLETED
+
+        assert handle.path.is_dir()
+        assert handle.ownership_file.is_file()
+        assert _git(handle.path, "rev-parse", "--abbrev-ref", "HEAD") == handle.branch
+        assert _branch_count(clone, handle.branch) == 1
+        assert str(handle.path) in _worktree_paths(clone)
+        assert _removal_calls(recorder) == []
+    finally:
+        store.close()
+
+
+def test_cleanup_requires_confirmation(tmp_path: pathlib.Path) -> None:
+    """confirm 是第一道闸：默认不动现场，连 delete_branch=True 都不能代替确认。"""
+    clone = _make_clone(tmp_path)
+    manager, recorder = _manager(tmp_path / "worktrees", FixedClock())
+    handle = manager.prepare(_ticket("Add rate limiter"), repository=str(clone), base_ref="main")
+
+    with pytest.raises(CleanupNotConfirmedError) as caught:
+        manager.cleanup(handle)
+    assert caught.value.code == "execution.cleanup_unconfirmed"
+    assert str(handle.path) in caught.value.detail
+    assert "confirm=True" in caught.value.detail
+
+    with pytest.raises(CleanupNotConfirmedError):
+        manager.cleanup(handle, confirm=False, delete_branch=True)
+
+    assert handle.path.is_dir()
+    assert handle.ownership_file.is_file()
+    assert _branch_count(clone, handle.branch) == 1
+    assert _removal_calls(recorder) == []
+
+
+def test_cleanup_keeps_branch_by_default(tmp_path: pathlib.Path) -> None:
+    """confirm=True 只删目录：分支留着供审查，git 调用恰是 remote → add → remove 三条。"""
+    clone = _make_clone(tmp_path)
+    manager, recorder = _manager(tmp_path / "worktrees", FixedClock())
+    handle = manager.prepare(_ticket("Add rate limiter"), repository=str(clone), base_ref="main")
+
+    manager.cleanup(handle, confirm=True)
+
+    assert not handle.path.exists()
+    assert str(handle.path) not in _worktree_paths(clone)
+    assert _branch_count(clone, handle.branch) == 1
+    assert [argv for argv, _ in recorder.calls] == [
+        ("remote", "get-url", "origin"),
+        ("worktree", "add", "-b", handle.branch, str(handle.path), "main"),
+        ("worktree", "remove", str(handle.path)),
+    ]
+    assert recorder.calls[-1][1] == clone.resolve()  # 删除在主克隆里执行，不在被删的目录里
+
+
+def test_cleanup_deletes_branch_only_when_asked(tmp_path: pathlib.Path) -> None:
+    """delete_branch=True 才 `git branch -D`，且顺序固定：先 remove 再删分支。"""
+    clone = _make_clone(tmp_path)
+    manager, recorder = _manager(tmp_path / "worktrees", FixedClock())
+    handle = manager.prepare(_ticket("Add rate limiter"), repository=str(clone), base_ref="main")
+
+    manager.cleanup(handle, confirm=True, delete_branch=True)
+
+    assert not handle.path.exists()
+    assert _branch_count(clone, handle.branch) == 0
+    assert [argv for argv, _ in recorder.calls][-2:] == [
+        ("worktree", "remove", str(handle.path)),
+        ("branch", "-D", handle.branch),
+    ]
+    assert {cwd for _, cwd in recorder.calls[-2:]} == {clone.resolve()}
+
+
+def test_cleanup_refuses_uncommitted_work_and_keeps_the_marker(tmp_path: pathlib.Path) -> None:
+    """不传 `--force`：git 的脏检查是第二道锁。被拒后 ownership 必须写回——抹掉标记就等于
+    让下一次 prepare 无从复用（四要素之④），一次失败的清理不该损坏现场。"""
+    clone = _make_clone(tmp_path)
+    manager, recorder = _manager(tmp_path / "worktrees", FixedClock())
+    handle = manager.prepare(_ticket("Add rate limiter"), repository=str(clone), base_ref="main")
+    (handle.path / "draft.md").write_text("未提交的审查内容\n", encoding="utf-8")
+
+    with pytest.raises(GitError) as caught:
+        manager.cleanup(handle, confirm=True)
+    assert caught.value.returncode != 0
+
+    assert handle.path.is_dir()
+    assert (handle.path / "draft.md").is_file()
+    assert _ownership_of(handle)["branch"] == handle.branch
+    assert _worktree_paths(clone) == [str(clone.resolve()), str(handle.path)]
+    assert _branch_count(clone, handle.branch) == 1
+    assert _removal_calls(recorder) == [("worktree", "remove", str(handle.path))]
+
+
+def test_cleanup_of_a_worktree_removed_by_hand_still_deletes_the_branch(
+    tmp_path: pathlib.Path,
+) -> None:
+    """目录已被人工删掉：ownership 随之消失，清理仍要清掉 git 侧登记并按要求删分支。"""
+    clone = _make_clone(tmp_path)
+    manager, recorder = _manager(tmp_path / "worktrees", FixedClock())
+    handle = manager.prepare(_ticket("Add rate limiter"), repository=str(clone), base_ref="main")
+    shutil.rmtree(handle.path)
+
+    manager.cleanup(handle, confirm=True, delete_branch=True)
+
+    assert _branch_count(clone, handle.branch) == 0
+    assert str(handle.path) not in _worktree_paths(clone)
+    assert [argv for argv, _ in recorder.calls][-2:] == [
+        ("worktree", "remove", str(handle.path)),
+        ("branch", "-D", handle.branch),
+    ]

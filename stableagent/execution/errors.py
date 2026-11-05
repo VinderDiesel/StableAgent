@@ -53,5 +53,6 @@ class CleanupNotConfirmedError(ExecutionError):
     def __init__(self, path: Path) -> None:
         super().__init__(
             "execution.cleanup_unconfirmed",
-            f"未确认清理 {path}：需要 confirm=True",
+            f"未确认清理 {path}：现场默认保留供审查，确认删除请调用 "
+            f"manager.cleanup(handle, confirm=True)（连分支一起删再加 delete_branch=True）",
         )
