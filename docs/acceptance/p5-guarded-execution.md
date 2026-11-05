@@ -4,7 +4,7 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口**，当前
-> **DoD 15/46、里程碑步骤 17/40（M1 9/9、M2 8/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **DoD 16/46、里程碑步骤 18/40（M1 9/9、M2 9/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution`，维护者已确认开工，按 Task 推进。
 >
@@ -110,6 +110,15 @@
       `audit(request, reason)` 回调拿到的是完整 `CommandRequest`（含全部 argv 正文与未收口的
       `cwd`），M3 把它接到 Report/审计写入时必须先过一遍脱敏再落盘，否则"正文不进长期记录"会被
       审计路径绕开。`summary()` 那条性质（Task 8）管的是结果行，管不到审计回调。
+      进度（2026-11-05，M2 Task 10 的容器挂载与容器内环境半边）：`-e` 只写**键名**不写值，五个
+      `STABLEAGENT_*` 的值留在交给 docker CLI 的七键白名单环境里（宿主 argv 同机可读、
+      `/proc/<pid>/environ` 不是），装配结果全文找不到 `tk-0001`
+      （`test_docker_env_flags_carry_names_not_values`）；容器里的 `STABLEAGENT_WORKTREE` 是
+      `/workspace`（宿主路径在容器文件系统里不存在，写出去会让环境变量说谎）；`PATH`/`LANG`
+      只给 CLI、不转发进容器；挂载恰好一个（`-v` 出现两次就 fail），宿主目录结构也不进 Report——
+      `_result()` 记的是**请求**的 argv，不是装配出的 docker argv。
+      **本轮没有证的**：容器内实际生效的隔离强度（从未在真 Docker 上跑过，Task 11 的双条件用例
+      是第一条），以及宿主凭据会不会经 `docker` daemon 间接可达。prompt/日志侧脱敏仍未闭合。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
 
@@ -431,8 +440,38 @@
       拒绝上（细节见 §6 Task 9 Step 3）；③ 字符表落地把 8 个既有 `-c` 测试语料逼成
       `__import__` 单表达式写法——**测试自己也被这条规则拦下**，正是 C6 想要的效果，但它是实现的
       连带改动而非计划项。审计的**落点**（写进 Report/审计表）本轮仍是空，属 Task 12 / M3。
-- [ ] **2.10** `DockerRunner` 参数装配断言：`--network none`、非特权、无 socket、CPU/内存/pid/
+- [x] **2.10** `DockerRunner` 参数装配断言：`--network none`、非特权、无 socket、CPU/内存/pid/
       超时、仅挂本 worktree、镜像可配置 + digest pin 文档。验证：不启动容器、只断言 argv（D2）。
+      证据（2026-11-05，M2 Task 10）：`execution/docker.py`（86 语句、覆盖 100%）的
+      `DockerRunner.build_argv(request, *, network_profile=None)` 产出的数组是
+      `docker run --rm --network none --read-only --tmpfs /tmp --pids-limit 128 --memory 512m
+      --cpus 1.0 --security-opt no-new-privileges --cap-drop ALL -v <收口后 worktree>:/workspace
+      -w /workspace (-e <五个 STABLEAGENT_* 键名>)… <image> <request.argv…>`；
+      `test_docker_argv_defaults_are_locked_down` 逐项对上默认值（含"挂载恰好一个且就是本
+      worktree"），`test_docker_argv_never_contains_dangerous_flags` 在默认与已定义 profile 两条
+      装配路径上断 `--privileged` / `docker.sock` / `--net=host` 全文缺席且 `--network` 取值不为
+      `host`。镜像：`test_image_must_be_pinned_not_floating` 拒不带 tag（隐式 `latest`）与
+      `latest`/`LATEST`，收 `alpine:3.19` 与 `name@sha256:<64hex>`；digest pin 指南（`docker inspect
+      --format='{{index .RepoDigests 0}}'`、换 digest 不换 tag）写在类文档。网络：
+      `test_network_profile_only_when_defined` 认"未定义就抛，不降级成 `none` 也不放行"，
+      `test_profile_named_like_a_docker_escape_is_refused` 认 `host`/`none`/`bridge` 这类保留名
+      写了也不给用。环境：`test_docker_env_flags_carry_names_not_values` 断 `-e` 只有键名、
+      装配结果里找不到 `tk-0001`（值留在交给 CLI 的七键白名单环境里，`STABLEAGENT_WORKTREE` 在
+      容器内是 `/workspace`）。执行侧：`test_docker_denials_reuse_the_command_boundary_and_never_spawn`
+      四条判定与本地档同源且 docker CLI 零调用，
+      `test_docker_results_never_impersonate_local_restricted` 认 `mode="docker"` 与 `summary()`
+      起头，`test_run_hands_the_assembled_argv_and_the_allowlisted_env_to_docker` 认 argv
+      逐字节相同 / `shell=False` / `timeout=300.0` / 环境恰为七键，另有超时
+      覆盖、脱敏截断与 `timed_out` 三例。全部用例不启动容器（L8）。本轮实测目标 2 文件
+      `48 passed`、全量 `566 passed, 1 skipped`、总覆盖 `99.20%`，`mypy` 52 files /
+      `ruff check` / `ruff format --check` 115 files 三口径全绿，L1 与约束 1 diff 0 行。
+      四条边界照实写：① 计划写的异常名 `CommandRejectedError` 在本仓库不存在，实现用已收口家族的
+      `CommandDeniedError`（其文档正举着"未定义的 network profile"这个例子），未新增错误类——
+      `errors.py` 的类清单被 `test_execution_error_code_inventory_is_unique_and_prefixed` 钉死；
+      ② **本轮真实容器行为一条都没证**：兑现的是参数的封闭，客户端超时是否带走容器、`--rm`
+      在客户端被杀后的清理语义，都留给 Task 11 的双条件用例；③ `network_profiles` 的值（origin
+      名单）不参与装配，Docker 没有 origin 级出口控制，强制点在授权层；④ `--name` 不给——固定名
+      要处理并发冲突，随机名又无法定点清理，这是 ②的另一半。
 - [ ] **2.11** Docker 测试条件：`docker` marker + `STABLEAGENT_DOCKER=1` 双条件，默认跳过且
       原因可见。验证：无 Docker 环境全量绿（D3、L8）。
 - [ ] **2.12** **M2 出口**：全量门禁 + 并行 Ticket 目录互不污染集成用例（C1）+ 账本回填。
@@ -690,8 +729,27 @@
       结果渲染出的那一行 `summary()`——这正是 D1 与步骤 2.6"截断与脱敏入 Report"共用的一条文本。
       纪律自身也咬过一次人：类文档首版引用了测试文件路径 `tests/unit/test_sandbox.py`，路径里的
       `sandbox` 让 D1 直接转红（`1 failed, 5 passed`），改写后才绿——见 §6 Task 8 Step 2。
-- [ ] **D2** `DockerRunner` 默认参数：network none、非特权、无 socket、资源上限、仅挂本
+- [x] **D2** `DockerRunner` 默认参数：network none、非特权、无 socket、资源上限、仅挂本
       worktree、镜像配置带 pin 指南（argv 构造断言）。
+      证据（2026-11-05，M2 Task 10）：六个用例把"默认封闭"拆成可逐字节读的形状——
+      ① **network none**：`test_docker_argv_defaults_are_locked_down` 断
+      `_flag_value(argv, "--network") == "none"`；② **非特权**：`--security-opt no-new-privileges`
+      与 `--cap-drop ALL` 两项都在，`--read-only` + `--tmpfs /tmp` 也在；③ **无 socket**：
+      `test_docker_argv_never_contains_dangerous_flags` 对默认与已定义 profile **两条**装配路径
+      各跑一遍全文检查（`--privileged`、`docker.sock`、`--net=host` 缺席，`--network` 不为 `host`），
+      并且 `-v` 只出现一次——挂载的第二项（socket 最常见的入口）在结构上就写不出来；
+      ④ **资源上限**：`--pids-limit 128` / `--memory 512m` / `--cpus 1.0` 逐项断值，默认值写在
+      构造函数签名上，`run()` 的超时默认 300 秒由
+      `test_run_hands_the_assembled_argv_and_the_allowlisted_env_to_docker` 断；⑤ **仅挂本
+      worktree**：挂载源是 `confine(worktree_root, request.cwd)` 的产物（C4 的同一个收口点），
+      断言是 `_flag_values(argv, "-v") == [一个元素]`
+      而不是"包含某个前缀"——多一个挂载就 fail；⑥ **镜像 pin 指南**：`image@sha256:<64hex>` 与
+      `name:tag` 收、不带 tag 与 `latest`（含 `LATEST`）拒，指南（取 digest 的命令、换 digest
+      不换 tag）在 `DockerRunner` 类文档第四节。
+      口径记一句：本条勾的是**参数装配**，不是隔离强度——`DockerRunner` 从未在真 Docker 上跑过
+      （L8），"这些参数确实封闭"要等 Task 11 的 `docker` marker + `STABLEAGENT_DOCKER=1` 双条件
+      用例；同理 `CommandResult.mode` 恒写 `docker`
+      （`test_docker_results_never_impersonate_local_restricted`）证的是读侧不冒充，不是容器内发生了什么。
 - [ ] **D3** Docker 不可用时测试跳过、核心门禁不受影响。
 
 ### E MCP（M3）
@@ -1160,13 +1218,14 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 
 ## 6. M2 任务级实施计划（writing-plans 产出，2026-11-04）
 
-> **状态：执行中（M2 Task 1~9 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
+> **状态：执行中（M2 Task 1~10 已收口，2026-11-05）。** 对应第 1 节 M2 的 12 个步骤（2.1~2.12），
 > 展开为 **12 个 Task / 60 个 Step**。顶部计数本次一并校正：Task 5~8 四次收口只勾条目、没改第 0 节
 > 上方的汇总行，账上停在 `DoD 10/46、里程碑 13/40（M2 4/12）`，而 Task 9 开工前的真实值是
 > `DoD 13/46`（Task 6/7/8 各加一项 C8/C7/D1，未计入）、`里程碑 16/40（M2 7/12）`（Task 5 勾 2.5 起
 > 就少算）；本轮按 Task 9 收口后的真实值改写为 `DoD 15/46`（第 2 节 15 项 + 第 0 节 0 项）、
 > `里程碑 17/40`（M1 9 + M2 8）。
-> 这是记账疏漏，不是判定变化——被改写的只有汇总行，各条证据原文未动。
+> 这是记账疏漏，不是判定变化——被改写的只有汇总行，各条证据原文未动。（Task 10 收口后再推进一格：
+> `DoD 16/46、里程碑 18/40（M2 9/12）`，即文件头那一行。）
 > 执行分支 `feat/p5-m2-isolated-execution`（自 `main` 的 M1 收口提交 `5e94377` 切出）。
 > 零语义改动约束沿用 M1：`stableagent/core/` 恒 0 行（L1）；`orchestration` 只允许**兼容性扩展**
 > （`EffectKind` 加成员属 ADR-05 决策 5 点名允许，`service.py` 一字不动——约束 1）；`control/`
@@ -1713,6 +1772,8 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 **Files:**
 - Create: `stableagent/execution/docker.py`
 - Test: `tests/unit/test_sandbox.py`（追加 D2 用例）
+- 计划外一处（本轮实际改动，理由见 Step 3 ①）：Modify `stableagent/execution/command.py`——
+  四条判定、拒绝出口、脱敏截断与超时读数从 `CommandRunner` 的方法提为模块级共享函数
 
 **Interfaces:**
 - Produces: `DockerRunner(image, *, allowlist, worktree_root, network_profiles: Mapping[str,
@@ -1722,16 +1783,90 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   --memory M --cpus C --security-opt no-new-privileges --cap-drop ALL -v <worktree>:/workspace
   -w /workspace -e ... <image> <argv...>`；结构性不出现 `--privileged`、docker socket 挂载、
   `--net=host`。类 docstring 给 digest pin 指南（`image@sha256:...`）。
-- [ ] **Step 1: 写失败的测试**：`test_docker_argv_defaults_are_locked_down`（逐项断言
+- [x] **Step 1: 写失败的测试**：`test_docker_argv_defaults_are_locked_down`（逐项断言
   `--network none`、`--read-only`、`--pids-limit`、`--memory`、`--cpus`、
   `no-new-privileges`、`--cap-drop ALL`、只挂本 worktree）；`test_docker_argv_never_contains_dangerous_flags`
   （argv 全文不含 `--privileged`、`docker.sock`、`host` 网络）；`test_network_profile_only_when_defined`
   （未定义 profile 抛 `CommandRejectedError`，定义后取 profile 名）。全部**不启动容器**。
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
+  实际写 14 例（D2 段），计划三例之外的十一例是接口与纪律要求的：
+  `test_profile_named_like_a_docker_escape_is_refused`（保留名）、
+  `test_image_must_be_pinned_not_floating`（规格 2.5 第 4 条的"不得静默浮动"）、
+  `test_docker_env_flags_carry_names_not_values`（L7）、
+  `test_docker_denials_reuse_the_command_boundary_and_never_spawn`、
+  `test_build_argv_refuses_the_denied_requests_too`、
+  `test_docker_results_never_impersonate_local_restricted`（Task 8 留的验收点）、
+  `test_run_hands_the_assembled_argv_and_the_allowlisted_env_to_docker`、
+  `test_request_timeout_overrides_the_runner_default`、
+  `test_docker_output_is_redacted_and_capped_like_local`、
+  `test_docker_timeout_keeps_partial_output_without_exit_code`、
+  `test_docker_runner_matches_the_protocol_without_inheriting_it`。
+  替身是一个 `FakeSpawn`（记 argv 与 kwargs，可注入异常）配合
+  `monkeypatch.setattr(docker_module.subprocess, "run", fake)`——不加 `spawner` 注入形参，
+  装配与 spawn 的边界由 argv 相等性证明。
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_sandbox.py`
   Expected: FAIL — `ModuleNotFoundError: No module named 'stableagent.execution.docker'`。
-- [ ] **Step 3: 实现** `docker.py`；镜像 pin 指南进 docstring（D2 的证据之一）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: assemble locked-down docker run arguments"`
+  Actual: `ERROR collecting tests/unit/test_sandbox.py` → `ImportError: cannot import name 'docker'
+  from 'stableagent.execution'`（`1 error during collection`，`1 error in 0.14s`）。同型但不同名：
+  收集期就红，因为测试用的是 `from stableagent.execution import docker as docker_module`
+  ——属性导入失败抛 `ImportError`，只有 `import stableagent.execution.docker` 才抛
+  `ModuleNotFoundError`。**这条红只证明模块不存在**，实现落地后另见 Step 3 的两条实测红。
+- [x] **Step 3: 实现** `docker.py`；镜像 pin 指南进 docstring（D2 的证据之一）。
+  `stableagent/execution/docker.py`（86 语句）= `DOCKER = "docker"` 模式常量 +
+  `CONTAINER_WORKDIR = "/workspace"` + `RESERVED_NETWORKS` + `FLOATING_TAGS` + `DockerRunner`
+  （`build_argv` / `run` / `_execute` / `_result` / `_check_image` / `_check_network` /
+  `_container_env` / `_cli_env` / `_fit`）。digest pin 指南在类文档第三条口径里。
+  计划外的六处，逐条写清换来什么：
+  ① **计划 Files 只让新建 `docker.py`，实现同时改了 `command.py`**：把四条判定（`_deny_reason`）、
+  拒绝出口（`_denied`）、脱敏截断（`_fit`）与 `_as_text` 从 `CommandRunner` 的方法提成模块级
+  `deny_reason` / `denied_result` / `fit_output` / `stream_text`，`CommandRunner` 留薄委托。
+  换来的性质是"容器档不会漂出一份更松的复制品"——`LocalRestrictedRunner` 文档早就写过"判定只在
+  `command.py` 一处"，容器档如果复制一份，那句话当场失效。`_as_text` 改名 `stream_text` 是因为
+  跨模块要用（同包同层，L2 允许）。
+  ② **`CommandRejectedError` 不存在**：改用已收口家族的 `CommandDeniedError`，稳定码仍是
+  `execution.command_denied`，reason 取"`码: 诊断对象`"形式（`image_not_pinned: alpine`、
+  `network_profile_reserved: host`、`network_profile_undefined: offnet`、`command_denied: shell_syntax`），
+  调用方按冒号前的前缀分派。不新增错误类：`errors.py` 的类清单被
+  `test_execution_error_code_inventory_is_unique_and_prefixed` 用 `==` 钉死，加一个就得改那条断言。
+  ③ **构造函数比计划多五个形参**：`clock`（`started_at`/`ended_at` 的来源，房子口径同
+  `Store`/`CommandRunner`）、`network_profile`（协议 `run(request)` 只有一个形参，档位参数只能挂
+  runner；给 `CommandRequest` 加 `network_profile` 字段会让本地档收到一个它无法兑现的意图——
+  "看起来被限制了"比没有更糟）、`max_output_bytes`/`redact`/`audit`（换执行档不换文本口径）。
+  ④ **`-e` 只带键名不带值**：计划写的是 `-e ...`，展开形状没定。值留在交给 docker CLI 的那份七键
+  环境里——宿主 argv 是同机所有用户可读的，`/proc/<pid>/environ` 不是。同时容器里的
+  `STABLEAGENT_WORKTREE` 写 `/workspace` 而不是宿主路径（那个路径在容器文件系统里不存在），
+  `PATH`/`LANG` 不转发进容器（否则容器按宿主的目录顺序找可执行文件）。
+  ⑤ **装配也判、抛异常**：`build_argv` 开头再走一遍 `deny_reason`，被拒时抛
+  `CommandDeniedError`，而不是"装配成功、执行才拒"——直接调装配的人拿不到一条能启动的 argv。
+  拒绝作为**结果**只在 `run()` 这条路上成立（`_execute` 先判定，命中就 `denied_result(mode="docker")`）。
+  ⑥ **浮动镜像与保留网络名的拒绝**是计划没写、规格 2.5 第 4 条与结构性默认拒绝要求的；镜像校验
+  放在装配期而非构造期，因为 `CommandDeniedError` 的文案要带 argv，构造期没有——代价是配错镜像
+  要到第一次装配才报，换来"哪些请求被什么规则拒了"只有一个出处。
+  两条**已知未闭合**（本轮不假装解决，Task 11 第一条要验的就是它们）：`timeout_s` 掐的是宿主上
+  的 `docker run` 客户端，客户端被杀不等于容器被杀；不给 `--name`（固定名要处理并发冲突，随机名
+  又让超时后的容器无法定点清理）。都写进了模块文档第四条口径。
+  实现过程中另踩两条红：① 测试替身 `_docker_runner` 把 `IMAGE` 写死在位置参数上，
+  `image=` 覆盖时 `TypeError: DockerRunner.__init__() got multiple values for argument 'image'`
+  （`1 failed, 18 passed`）——改成 image 为关键字默认值；② 首跑覆盖率报
+  `docker.py:131` 未覆盖（`build_argv` 里那条 `raise`），补
+  `test_build_argv_refuses_the_denied_requests_too` 才到 100%——先有覆盖率洞、后有测试，不是想到
+  了才写。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三口径门禁。
+  证据（2026-11-05）：`tests/unit/test_sandbox.py`（D1/D2 段 21 例）+ `tests/unit/test_command_runner.py`
+  27 例 = `48 passed`；全量 `.venv/bin/pytest -q` = `566 passed, 1 skipped`、总覆盖 `99.20%`，
+  `docker.py` 86 语句与 `command.py` 109 语句均 `100%`。门禁：`mypy` = `Success: no issues found in
+  52 source files`（+1：新增 `docker.py`）、`ruff check` = `All checks passed!`、
+  `ruff format --check` = `115 files already formatted`（E501 挡过一次：`run()` 的长签名按
+  `ruff format` 拆行，未删断言）。方向扫描 `test_execution_imports_only_the_layers_below_it`
+  的语料是 `rglob("*.py")`，`docker.py` 自动进扫描并通过（只 import 同包与 `orchestration.model`）。
+  L1 `git diff 234f620..HEAD --stat -- stableagent/core/` = 0 行，约束 1 对 `orchestration/service.py`
+  同为 0 行；L8 本轮新增用例一个容器都不启动（`FakeSpawn` + monkeypatch，默认路径甚至不碰进程）。
+- [x] **Step 5: 提交**：`git commit -am "feat: assemble locked-down docker run arguments"`
+  → `f3d43fd`。**本轮没用 `-am`**：开工前的 `git status` 里出现了两处不是我改的
+  `docs/blog/01`、`docs/blog/02` 未提交编辑（mtime 16:59），而 `plan-03-durable-outbox.md` 已不在
+  磁盘上——`-am` 会把用户的在制编辑一起提交，所以改成显式 `git add` 三个路径
+  （`docker.py` 新建本就未跟踪，`-am` 反而带不上）。已向用户报告，未回滚、未合并那两篇的改动。
+  步骤 2.10 与 D2 随之勾选；`2.6`、`L7` 仍不勾，D3/L8 的双条件门禁属 Task 11，M2 出口（C1、
+  2.12）属 Task 12。
 
 ### Task 11: Docker 测试双条件与 marker（步骤 2.11）
 
