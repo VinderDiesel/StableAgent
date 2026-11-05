@@ -6,8 +6,11 @@ Task 6 只管 `build_child_env`；Task 7 的 C7 五项（allowlist / cwd / 超�
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
+import subprocess
+import sys
 from collections.abc import Mapping
 
 from stableagent.execution.environment import build_child_env
@@ -121,3 +124,38 @@ def test_child_env_does_not_invent_a_path_when_the_host_has_none(tmp_path: pathl
 
     assert env["PATH"] == ""
     assert set(env) == CHILD_KEYS
+
+
+#: macOS 的 libsystem 在 exec 时自己往环境里加 `__CF_USER_TEXT_ENCODING`（值形如 `0x1F5:0x0:0x0`），
+#: 与我们传的 `env` 无关，Linux CI 上不存在。"孩子没有第四个来源"这句话只能带着这份名单说。
+OS_INJECTED_KEYS = {"__CF_USER_TEXT_ENCODING"}
+
+
+def test_child_process_sees_only_the_allowlist(tmp_path: pathlib.Path) -> None:
+    """C8 的"子进程可见"半边：真起一个解释器，让它自己打印 `os.environ`。
+
+    白名单不是 `build_child_env` 的返回值，而是孩子实际拿到的那张表——传给 `subprocess.run` 的
+    环境即使就是那份 13 键宿主快照的产物，孩子手里也只有七键（外加系统自己加的那一类）。
+    """
+    worktree = tmp_path / "worktrees" / "sa-01234567-add-rate-limiter"
+    worktree.mkdir(parents=True)
+    probe = "import json,os;print(json.dumps(dict(os.environ)))"
+
+    done = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=worktree,
+        env=_build(worktree),
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert done.returncode == 0, done.stderr
+    seen = json.loads(done.stdout)
+    assert set(seen) >= CHILD_KEYS
+    assert set(seen) - CHILD_KEYS <= OS_INJECTED_KEYS, set(seen) - CHILD_KEYS
+    assert seen["STABLEAGENT_WORKTREE"] == str(worktree)
+    assert seen["PATH"] == "/usr/bin:/bin" and seen["LANG"] == "C.UTF-8"
+    for banned in ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK", "HOME", "PYTHONPATH"):
+        assert banned not in seen, banned
