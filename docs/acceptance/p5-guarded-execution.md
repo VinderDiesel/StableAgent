@@ -7,8 +7,10 @@
 > 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾），当前
 > **DoD 18/46、里程碑步骤 20/40（M1 9/9、M2 11/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落并已执行（第 6 节，12 Task / 60 Step），执行分支
-> `feat/p5-m2-isolated-execution` **尚未快进 `main`**——M2 的收口口径是本地门禁全绿 + 账本回填，
-> 合并与远端 CI 复现的时机按 P4 惯例由维护者指示（P5 级收口另见步骤 4.7）。
+> `feat/p5-m2-isolated-execution` 已于 2026-11-06 经维护者指示快进 `main` 并推送
+> （`5e94377..31eafa1`，ff-only，无合并提交），远端 CI run `42144235714` = `success`
+> （`quality (3.10)` 与 `quality (3.12)` 两个 job 全绿；矩阵里没有 3.11——3.11 是本地解释器，
+> 等价矩阵另见步骤 4.4）。这不等于 P5 收口：H2/H3 与文档状态翻转仍属 M4（步骤 4.3/4.6/4.7）。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
 > 验收账本（第 0、2 节）。每个可勾选事项写明来源、验证方法或命令、证据占位；全部勾选且第 3 节
@@ -2190,3 +2192,11 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   `docs/blog/03-durable-outbox.md`、`docs/blog/README.md` 仍未跟踪，`-A` 会把它们一起卷进 M2 出口
   提交。提交消息按原文。步骤 2.12 与 C1 随之勾选，2.6/`L3`/`L7`/`L8` 继续不勾（各缺哪一半写在
   §1 与 §0 对应条目里），M2 以 11/12 收口；M3 开工按计划另行确认。
+  后续（2026-11-06，维护者指示"merge 到 main 后推送"）：合并前先取一次全量门禁复现——
+  `581 passed, 6 skipped`、总覆盖 `99.21%`、`mypy` 52 files、`ruff check` 通过、
+  `ruff format --check` 117 files、L1 与约束 1 对 `31eafa1` 仍 0 行；随后 `git checkout main` +
+  `git merge --ff-only` + `git push origin main`（`5e94377..31eafa1`）。用的是 `--ff-only` 而不是
+  计划里没写明的普通 merge：`main` 是 `31eafa1` 的祖先，快进不产生合并提交，也不需要在合并里
+  重新决定冲突。远端 CI run `42144235714` = `success`（`quality (3.10)`/`quality (3.12)`）。
+  维护者在工作树里的 `docs/README.md`、`docs/blog/01`、`docs/blog/02` 的在制编辑与未跟踪的
+  `docs/blog/03-durable-outbox.md`、`docs/blog/README.md` 全程没进任何提交。
