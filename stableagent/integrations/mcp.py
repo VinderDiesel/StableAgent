@@ -22,7 +22,7 @@ from stableagent.integrations.errors import (
     McpSchemaError,
     McpTimeoutError,
 )
-from stableagent.tools.registry import ToolResult
+from stableagent.tools.registry import Tool, ToolResult
 
 MCP_CHILD_LANG = "C.UTF-8"
 _CLOSE_TIMEOUT_S = 5.0
@@ -199,3 +199,61 @@ class McpSession:
         if result.get("isError"):
             return ToolResult(ok=False, error=text or "mcp tool failed without an error message")
         return ToolResult(ok=True, output=text)
+
+
+def mcp_tool_name(server: str, tool: str) -> str:
+    """Provider 侧工具名：OpenAI function name 只接受 [a-zA-Z0-9_-]，故用双下划线。"""
+    return f"{server}__{tool}"
+
+
+def mcp_allowlist_key(server: str, tool: str) -> str:
+    """Mandate.allowed_mcp 的键形状（control/policy.py 的 Resource kind="mcp" 口径）。"""
+    return f"{server}:{tool}"
+
+
+class McpToolAdapter:
+    """发现 ≠ 授权：可见集 = `tools/list ∩ allowed`，未列入者连 Tool 对象都不产出。
+
+    调用前的 revalidate/authorize/审计不在这里——由 `control.tool_filter.guard_mcp_tool`
+    包在外层完成，本类因此不需要认识授权层（ADR-05 决策 8）。
+    """
+
+    def __init__(self, session: McpSession, *, server: str, allowed: frozenset[str]) -> None:
+        self._session = session
+        self._server = server
+        self._allowed = allowed
+        self._keys: dict[str, str] = {}
+
+    def keys(self) -> dict[str, str]:
+        """工具名 → allowlist 键的映射表；filter 只吃这张表，不做字符串反解。"""
+        return dict(self._keys)
+
+    async def tools(self) -> list[Tool]:
+        specs = await self._session.list_tools()
+        tools: list[Tool] = []
+        self._keys = {}
+        for spec in specs:
+            key = mcp_allowlist_key(self._server, spec.name)
+            if key not in self._allowed:
+                continue
+            name = mcp_tool_name(self._server, spec.name)
+            self._keys[name] = key
+            tools.append(self._build(name, spec))
+        return tools
+
+    def _build(self, name: str, spec: McpToolSpec) -> Tool:
+        session = self._session
+        tool_name = spec.name
+
+        async def execute(self: Tool, arguments: dict[str, Any]) -> ToolResult:
+            return await session.call_tool(tool_name, arguments)
+
+        # Tool 的 name/description/parameters 是 ClassVar：动态造子类，不给 ClassVar 赋实例值。
+        namespace = {
+            "name": name,
+            "description": spec.description,
+            "parameters": spec.input_schema,
+            "execute": execute,
+        }
+        tool_class = type(f"McpTool_{name}", (Tool,), namespace)
+        return tool_class()

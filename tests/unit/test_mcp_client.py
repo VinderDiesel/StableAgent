@@ -6,17 +6,28 @@ Task 2 只覆盖 transport；session/adapter 在 Task 3/4 追加到本文件。
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
 
+from stableagent.context.budget import count_orphan_tool_calls
+from stableagent.context.engine import ContextEngine
+from stableagent.core.state import ContextConfig, Message, ToolCall
 from stableagent.integrations.errors import (
     McpProcessExitedError,
     McpProtocolError,
     McpSchemaError,
     McpTimeoutError,
 )
-from stableagent.integrations.mcp import McpSession, StdioMcpTransport
+from stableagent.integrations.mcp import (
+    McpSession,
+    McpToolAdapter,
+    StdioMcpTransport,
+    mcp_allowlist_key,
+    mcp_tool_name,
+)
+from stableagent.tools.registry import ToolRegistry
 
 
 class FakeMcpTransport:
@@ -289,3 +300,103 @@ async def test_session_is_error_without_text_still_has_a_readable_error() -> Non
     transport = FakeMcpTransport([{"content": [], "isError": True}])
     result = await McpSession(transport).call_tool("x", {})
     assert result.ok is False and result.error
+
+
+# ---------------------------------------------------------------- Task 4：McpToolAdapter（E4）
+
+
+def _specs_transport() -> FakeMcpTransport:
+    return FakeMcpTransport(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "read_file",
+                        "description": "读文件",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                    {"name": "drop_table", "inputSchema": {"type": "object"}},
+                ]
+            }
+        ]
+    )
+
+
+async def test_adapter_only_exposes_the_intersection() -> None:
+    adapter = McpToolAdapter(
+        McpSession(_specs_transport()), server="fs", allowed=frozenset({"fs:read_file"})
+    )
+    tools = await adapter.tools()
+    assert [tool.name for tool in tools] == ["fs__read_file"]
+    assert adapter.keys() == {"fs__read_file": "fs:read_file"}
+    assert tools[0].parameters == {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+    }
+    assert tools[0].description == "读文件"
+
+
+async def test_adapter_empty_allowlist_exposes_nothing() -> None:
+    adapter = McpToolAdapter(McpSession(_specs_transport()), server="fs", allowed=frozenset())
+    assert await adapter.tools() == []
+    assert adapter.keys() == {}
+
+
+async def test_adapter_tool_calls_the_session() -> None:
+    transport = _specs_transport()
+    transport.replies.append({"content": [{"type": "text", "text": "file body"}]})
+    adapter = McpToolAdapter(
+        McpSession(transport), server="fs", allowed=frozenset({"fs:read_file"})
+    )
+    tool = (await adapter.tools())[0]
+    result = await tool.execute({"path": "a.txt"})
+    assert result.ok is True and result.output == "file body"
+    assert transport.calls[-1] == (
+        "tools/call",
+        {"name": "read_file", "arguments": {"path": "a.txt"}},
+    )
+
+
+def test_mcp_names_are_provider_safe_and_allowlist_keys_are_not() -> None:
+    assert mcp_tool_name("fs", "read_file") == "fs__read_file"
+    assert mcp_allowlist_key("fs", "read_file") == "fs:read_file"
+    assert re.fullmatch(r"[a-zA-Z0-9_-]+", mcp_tool_name("fs", "read_file"))
+
+
+async def test_adapter_output_flows_through_evidence_and_context_budget() -> None:
+    """E4：MCP 输出走 ToolResult→Evidence→Message→ContextEngine，超长受压缩预算。"""
+    long_text = "字" * 4000
+    transport = _specs_transport()
+    transport.replies.append({"content": [{"type": "text", "text": long_text}]})
+    adapter = McpToolAdapter(
+        McpSession(transport), server="fs", allowed=frozenset({"fs:read_file"})
+    )
+    tool = (await adapter.tools())[0]
+    registry = ToolRegistry()
+    registry.register(tool)
+    evidence = await registry.call(ToolCall(id="c1", name=tool.name, arguments={}))
+    assert evidence.ok is True and evidence.output == long_text
+
+    # loop 把 Evidence 投影成 tool 消息后才进 context（core/loop.py:118-126）
+    messages = [
+        Message(role="user", content="读文件"),
+        Message(role="assistant", content="", tool_calls=[ToolCall(id="c1", name=tool.name)]),
+        Message(role="tool", content=str(evidence.output), tool_call_id="c1", name=tool.name),
+    ]
+    engine = ContextEngine(
+        ContextConfig(
+            max_context_tokens=200,
+            compression="hybrid",
+            keep_recent_messages=0,
+            tool_result_excerpt_chars=80,
+        )
+    )
+    assembled = engine.assemble(messages)
+    joined = "\n".join(m.content for m in assembled)
+    # 超长 MCP 输出没有绕过预算：原文不再整段出现在视图里，总量被压到远小于原文。
+    assert long_text not in joined
+    assert len(joined) < len(long_text) // 10
+    assert count_orphan_tool_calls(assembled) == 0
