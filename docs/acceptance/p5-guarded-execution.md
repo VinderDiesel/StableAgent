@@ -3660,3 +3660,581 @@ git diff main..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p5-m3-
 - **类型一致性**：`Decision`（非 AuthorizationDecision）、`TicketInput`（非 Input）、
   `EffectHandler` async-only、allowlist 键 `server:tool` 与工具名 `server__tool` 的映射表
   在 Task 4/5/6 三处一致；`PermanentEffectError` 在 Task 9/10/11 同名同 code。
+
+---
+
+## 8. M4 任务级实施计划（writing-plans 产出，2026-11-07）
+
+> **For agentic workers:** 用 `superpowers:executing-plans` 逐 Task 执行（本会话内联）。
+> Step 用 `- [ ]` 勾选跟踪。执行完成后按本文件既有口径回填实测证据。
+>
+> **状态：待执行。** 对应第 1 节 M4 的 7 个步骤（4.1~4.7），展开为 **10 个 Task / 48 个 Step**。
+> 前 9 个 Task 全部本地可完成；Task 10 的**推送与远端 CI 半步必须维护者显式授权**，未授权时
+> 只做到"本地出口全绿 + H3 留空"，不得把 4.7 勾成完成。
+>
+> **Goal:** 用一条全离线示例证明"显式请求 → 授权 → worktree → 修改 → 审批 → PR effect"的
+> 完整闭环，用五类拒绝证明失败路径没有外部副作用，并把心脏覆盖闸门、Python 等价矩阵、
+> ADR 证据与文档状态收口到可复核的数字。
+>
+> **Architecture:** 不新增生产包，不改变方向锁。唯一的生产改动是两处 M3 遗留的守卫缺口：
+> ① 把第六个 revalidate 时机 `worktree` 接进 `prepare_worktree` effect 的执行面；
+> ② 人工 `denied` 时把仍 RUNNING 的 Assignment 转 FAILED（B2 的 Assignment 半边）。
+> 其余全部落在示例、测试、CI 工作流与文档。
+>
+> **Tech Stack:** Python 3.10+、pydantic v2、asyncio subprocess、pytest/pytest-asyncio、
+> 本地裸 git 远端 + `FakeGitHubClient`、GitHub Actions、uv（本地矩阵）。
+>
+> **Spec:** [P5 规格 WP-5.6 与退出清单](../specs/p5-guarded-execution-repository-integration.md)、
+> [ADR-05"测试与证据"](../design-decisions/05-guarded-execution.md)、本文件 §1 M4、§2 G/H。
+
+### Global Constraints（每个 Task 都隐含遵守）
+
+- L1：`git diff 234f620..HEAD -- stableagent/core/` 恒 0 行。
+- 约束 1：`stableagent/orchestration/service.py` 一字不动；`orchestration/` 不再新增任何扩展。
+- L2：方向只能 integrations → execution → control → orchestration → core；旧包零 import 三新包；
+  `integrations/mcp.py` 不 import `control`/`execution`。
+- L3：`Store.transaction()` 体内禁 `await`；示例与 handler 的 I/O 都在事务外。
+- L4：外部文本只进 digest/Report；示例里的 Issue 正文不得改变任何授权结论。
+- L5：六个 revalidate 时机逐一先于动作执行并有审计行；M4 补齐 `worktree`。
+- L6：`merge`/`enable_auto_merge` 不进 `EffectKind`；示例的 auto merge 拒绝必须落在
+  `StaticPolicyConfig` 构造期与 `create_mandate`/`authorize` 运行期，而不是新增绕过路径。
+- L7：凭据不进 prompt/日志/Report/Ticket/AgentState/worktree 元数据/effect payload；
+  示例只用 local remote 与 fake client，不读任何 token。
+- L8：全量测试与 CI 不依赖 Docker、公网、真实 GitHub；示例只起本地 git 与 Python 进程。
+- 门禁：`.venv/bin/pytest -q`、`.venv/bin/mypy`、
+  `.venv/bin/ruff check stableagent tests examples benchmarks`、
+  `.venv/bin/ruff format --check stableagent tests examples benchmarks`。
+- **推送红线**：`git push`、`gh` 远端操作、真实 GitHub/Docker smoke 一律等维护者明确授权；
+  未授权时 Task 10 只记录"本地出口绿、H3 待远端 CI"。
+
+### 开工前实测基线（2026-11-07，`main@d849adb`）
+
+- 工作树干净；`origin/main` 仍是 `f41ea35`（M3 只做了本地快进，未推送）。
+- 全量 `pytest -q`：**668 passed, 3 failed, 6 skipped**，总覆盖 **99.16%**。三条失败全部是
+  宿主 macOS 把 `LC_CTYPE` 注入子进程所致：`test_child_process_sees_only_the_allowlist`、
+  `test_spawned_child_sees_the_request_context`，以及嵌套复跑同两条的
+  `test_core_suite_does_not_depend_on_docker`。`env -u NO_PROXY -u no_proxy` 下仍复现，
+  与 M3 记录一致。
+- `mypy` Success 60 files；`ruff check` All checks passed；`ruff format --check` 133 files。
+- 心脏闸门当前 **18 文件**（`.github/workflows/ci.yml:29-52`），契约测试
+  `tests/unit/test_ci_focus_gate.py` 钉的是 `"18 文件"` 与 6 个 M2 新文件。
+- **第六个 revalidate 时机仍无生产调用点**：`grep -rn 'revalidate(' stableagent/` 只有
+  `integrations/repository.py`（launch/recover/deliver）、`integrations/github_effects.py`
+  （external_write）、`control/tool_filter.py`（mcp_call）三处；
+  `execution/effects.py::prepare_worktree_handler` 只取 Ticket 再 `manager.prepare`。
+- **B2 的 Assignment 半边仍未闭合**：`ApprovalService.decide(..., False, ...)` 只翻审批行，
+  不碰 Assignment；`ApprovalService` 的既有用例多数没有真实 Assignment，改动必须保持
+  "无 assignment_id / Assignment 不存在时静默不动"。
+- 当前 7 个拟入闸文件的覆盖率（读 `coverage.xml`，非估算）：`control/policy.py` 100%、
+  `control/approval.py` 100%、`execution/worktree.py` 100%、`execution/command.py` 100%、
+  `execution/sandbox.py` 100%、`integrations/github.py` 100%、`integrations/mcp.py` 97.87%。
+  扩闸后不会因覆盖率低于 90% 而红。
+- 本机只有 Python 3.10.20；`uv python list` 显示 3.11.16 / 3.12.14 可下载。`.matrix/`
+  已在 `.gitignore:20`，`uv venv` 产出的目录不会入库。
+- 示例即测试的既有形状：`tests/integration/test_ticket_example.py` 用
+  `asyncio.create_subprocess_exec(sys.executable, EXAMPLE, ...)` 跑
+  `examples/04_ticket_orchestration.py`，按行解析 JSON，末行断言固定文案；示例自身不 import
+  `tests.*`。M4 沿用同一形状。
+
+### 写计划时已核实的接口（回源复验）
+
+- `GitHubIntake.submit(request, *, actions, allowed_paths=(), allowed_commands=(),
+  allowed_mcp=(), network_profile=None, base_ref=None, requires_approval=False)
+  -> RequestOutcome(admission, ticket_id, duplicate)`；建 Ticket 时 `title=request.text[:40]`，
+  直接落 `QUEUED`。
+- `GuardedTicketOps` 之外，没有别的类负责 Assignment 终态；`Store.get_assignment(id)`、
+  `Store.update_assignment(assignment)` 可用；`next_assignment_status` 支持
+  `RUNNING --FAIL--> FAILED`。
+- `ApprovalService.submit(ticket_id, action, digest, reason, assignment_id=None)`；
+  `decide(approval_id, approve, by)` 目前只写审批行；`ApprovalGate.check(...)` 每次 check
+  恰好一行 authorize 审计。
+- `GitWorktreeManager(root, *, git, clock).prepare(ticket, *, repository, base_ref)`
+  的 `repository` 是**本地克隆根目录**；分支/目录名由 `workspace_name(ticket)` 决定，
+  Ticket id 必须是 `tk-` + 至少 8 位十六进制。
+- `prepare_worktree_handler(manager, store)` 的 payload 是
+  `{ticket_id, assignment_id, repository, base_ref}`；它不做授权。
+- `github_resource(action, payload)` 支持 comment/pull_request/review；
+  `github_effect_key(kind, stable_id, digest)`；`github_pull_request_handler(...,
+  push_branch: Callable[[str], Awaitable[None]] | None = None)` 在同一个 effect 里先 push
+  再建 PR。
+- `CommandRunner(allowlist, *, worktree_root, clock, ...).run(CommandRequest(argv, cwd,
+  context))`；`deny_reason` 的稳定码是 `cwd_escape` / `empty_argv` /
+  `command_not_allowed` / `shell_syntax`；拒绝时 `started_at == ended_at`。
+- `EffectDispatcher(store, handlers, *, clock).dispatch_due(limit=10)` 返回成功数；
+  `PermanentEffectError` 直接 FAILED，不占退避预算。
+- `Action` 枚举含 `ENABLE_AUTO_MERGE`；`StaticPolicyConfig(grantable_actions={...})`
+  在构造期拒绝它（`AdmissionRejectedError`），`create_mandate(actions=["enable_auto_merge"])`
+  在运行期拒绝（`auto_merge_not_grantable`），`authorize` 对任何 Mandate 都返回
+  `not_granted`。
+
+### 九处取向（先写理由，执行期不再讨论）
+
+1. **第六个时机放在 integrations 的薄包装，不改 `execution/effects.py`**：`worktree` 复检
+   需要 Policy 与 Audit，属于授权面；`execution` 的 handler 只该做"建目录"这一件事。
+   `integrations/repository.py` 已经是"执行面守卫"的落点（`RepositoryWorkerExecutor`），
+   新增 `guarded_prepare_worktree_handler` 与它同层，方向锁不变。
+2. **B2 在 `ApprovalService.decide` 收口**：人工拒绝是唯一能确定"这份批准永远不会变成
+   approved"的时刻；在同一事务里把仍 RUNNING 的 Assignment 转 FAILED，才不会出现
+   "批准 denied、Assignment 还在跑、换个动作继续试"的缝。无 `assignment_id` 或行不存在时
+   静默不动，保住既有审批单测。
+3. **示例 05 单文件双 phase**：`--phase run` 证 G1，`--phase reject` 证 G2。示例即测试用
+   子进程跑两遍；示例不 import `tests.*`，只依赖 `stableagent.*`、stdlib 与本地 git。
+4. **拒绝示例不造假**：五类拒绝全部走真 `StaticPolicy` / 真 `Store` / 真 `ApprovalGate`，
+   断言审计行、effect 行与客户端调用数；"零外部副作用"用 `FakeGitHubClient.calls == []`
+   与 push 计数 0 证明，不用"我们认为它会拒"代替。
+5. **auto merge 拒绝展示两道**：构造期（配置里出现即抛）与运行期（`create_mandate` 拒绝），
+   两者都不产生 Ticket/effect/审计。第三道 `authorize` 返回 `not_granted` 由既有单测覆盖。
+6. **PR 的 push 与 create 共用一个 effect**：沿用 M3 决策 9。示例的 `push_branch` 回调在
+   worktree 内 `git push origin HEAD:refs/heads/<head>`，推的是本地裸远端；重放不会多推一次。
+7. **`LC_CTYPE` 只改测试口径**：它是 macOS CPython 在 exec 时自行注入的键，不是
+   `build_child_env` 的产物。把 `OS_INJECTED_KEYS` 扩为
+   `{"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}` 并保留注释；产品白名单一字不动。
+8. **Python 矩阵用 uv 下载解释器，下载失败要记账**：3.10 用现有 `.venv`；3.11/3.12 用
+   `uv venv --python 3.11 .matrix/py311` + `uv pip install -e '.[dev]'`。若解释器不可得，
+   记录"不可得"与原因，**不伪造矩阵结果**。
+9. **状态翻转分两段**：本地全绿后文档只能写"本地收口、待远端 CI"；H3 与 4.7 的远端半步
+   必须等维护者授权推送并看到 3.10/3.12 双绿后才勾。P4 的口径不提前借用。
+
+### Task ↔ 里程碑步骤与 DoD 对照
+
+| Task | 步骤 | 本 Task 产生的 DoD 证据 |
+|---|---|---|
+| 1 | 4.1 前置（A4 遗留） | A4/L5 的 `worktree` 时机 |
+| 2 | 4.1 前置（B2 遗留） | B2 的 Assignment 半边 |
+| 3 | 4.1 前置（H2 基线） | H2 的宿主环境差异收口 |
+| 4 | 4.1 | G1（run phase + 示例即测试） |
+| 5 | 4.2 | G2（五类拒绝） |
+| 6 | 4.3 | H3 的本地半边、H4 的心脏文件半边 |
+| 7 | 4.4 | H2 的 Python 等价矩阵 |
+| 8 | 4.5 | G3 |
+| 9 | 4.6 | G4 |
+| 10 | 4.7 + H1/H2/H4 | M4 出口；H3 远端半步待授权 |
+
+---
+
+### Task 1: `worktree` 复检接线（A4/L5 的第六个时机）
+
+**Files:**
+- Modify: `stableagent/integrations/repository.py`
+- Modify: `tests/unit/test_repository_executor.py`
+
+**Interfaces:**
+- Consumes: `prepare_worktree_handler(manager, store)`、`StaticPolicy.revalidate`、
+  `AuditWriter.revalidated`、`Store.get_ticket/get_mandate/insert_report`。
+- Produces: `guarded_prepare_worktree_handler(manager, store, *, policy, audit, clock=None,
+  ids=None) -> EffectHandler`。拒绝时写 `ReportKind.BLOCKED`（details 至少含
+  `{"when": "worktree", "policy_version": ...}`）并抛 `PermanentEffectError`；
+  manager 的 `prepare` 调用次数必须为 0。
+
+- [ ] **Step 1: 写失败用例**
+
+```python
+class _PrepareManager:
+    def __init__(self) -> None:
+        self.prepared: list[str] = []
+
+    def prepare(self, ticket, *, repository, base_ref):
+        self.prepared.append(ticket.id)
+        return object()
+
+
+def _prepare_effect(ticket, assignment):
+    return Effect(
+        id="ef-prepare",
+        kind=EffectKind.PREPARE_WORKTREE,
+        idempotency_key=f"prepare:{assignment.id}",
+        payload={
+            "ticket_id": ticket.id,
+            "assignment_id": assignment.id,
+            "repository": "/tmp/clone",
+            "base_ref": "main",
+        },
+        due_at=0,
+    )
+
+
+async def test_prepare_revalidates_before_the_manager(tmp_path: pathlib.Path) -> None:
+    store, policy, audit, ticket, assignment = _rig(tmp_path)
+    manager = _PrepareManager()
+    handler = guarded_prepare_worktree_handler(
+        manager, store, policy=policy, audit=audit,
+        clock=FixedClock(), ids=SequenceIds(),
+    )
+    await handler(_prepare_effect(ticket, assignment))
+    assert manager.prepared == [ticket.id]
+    rows = store.list_audit(ticket_id=ticket.id, kind="revalidate")
+    assert rows[-1]["action"] == "worktree"
+    assert store.list_reports(ticket.id) == []
+
+
+async def test_expired_mandate_parks_before_prepare(tmp_path: pathlib.Path) -> None:
+    store, policy, audit, ticket, assignment = _rig(tmp_path, expires_at=1)
+    manager = _PrepareManager()
+    handler = guarded_prepare_worktree_handler(
+        manager, store, policy=policy, audit=audit,
+        clock=FixedClock(), ids=SequenceIds(),
+    )
+    with pytest.raises(PermanentEffectError):
+        await handler(_prepare_effect(ticket, assignment))
+    assert manager.prepared == []
+    report = store.list_reports(ticket.id)[-1]
+    assert report.kind is ReportKind.BLOCKED
+    assert report.details == {"when": "worktree", "policy_version": P5_POLICY_VERSION}
+```
+
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov
+  tests/unit/test_repository_executor.py -k prepare`，Expected: import 失败（函数不存在）。
+
+- [ ] **Step 3: 实现**：把现有 `RepositoryWorkerExecutor._park` 的写报告部分提成模块级
+  `_blocked_report(store, ids, clock, *, ticket_id, assignment_id, when, decision)`，
+  `_park` 改为调用它；新增 `guarded_prepare_worktree_handler`，顺序固定为
+  "取 Ticket/Mandate → revalidate → 审计 → 拒绝 park/放行 delegate"。
+  缺 Ticket/Mandate 一律 `PermanentEffectError`（重放不会长出这两行）。
+
+- [ ] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_repository_executor.py` 全绿；
+  既有 `_park` 用例详情字段不变。
+
+- [ ] **Step 5: 提交**：`git commit -am "feat: revalidate the worktree timing before prepare"`
+
+### Task 2: `denied` 使 Assignment 失败（B2 收口）
+
+**Files:**
+- Modify: `stableagent/control/approval.py`
+- Modify: `tests/unit/test_approval_service.py`
+
+**Interfaces:**
+- `ApprovalService.decide(approval_id, approve, by)` 的签名与返回值不变。
+- 仅当 `approve=False`、`approval.assignment_id` 非空且该 Assignment 当前为 `RUNNING` 时，
+  在同一事务内转 `FAILED`（`failure="approval_denied"`、`ended_at=now`）。其他状态静默不动。
+
+- [ ] **Step 1: 写失败用例**
+
+```python
+def test_denial_fails_a_running_assignment(store: Store, clock: FixedClock) -> None:
+    policy, approvals, _ = _env(store, clock)
+    mandate = _mandate(policy)
+    store.insert_mandate(mandate)
+    ticket = Ticket(
+        id="tk-00000001", title="t", task="t", created_at=clock.now_ms(),
+        status=TicketStatus.RUNNING, mandate_id=mandate.id,
+    )
+    store.insert_ticket(ticket)
+    assignment = Assignment(
+        id="as-00000001", ticket_id=ticket.id, status=AssignmentStatus.RUNNING
+    )
+    store.insert_assignment(assignment)
+    approval = approvals.submit(
+        ticket.id, Action.PUSH_BRANCH, _digest(BRANCH_A), "high_risk",
+        assignment_id=assignment.id,
+    )
+    approvals.decide(approval.id, False, "octocat")
+    failed = store.get_assignment(assignment.id)
+    assert failed.status is AssignmentStatus.FAILED
+    assert failed.failure == "approval_denied"
+    assert failed.ended_at == clock.now_ms()
+    assert approvals.get(approval.id).status is ApprovalStatus.DENIED
+
+
+def test_denial_without_a_running_assignment_is_still_decidable(
+    store: Store, clock: FixedClock
+) -> None:
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.PUSH_BRANCH, _digest(BRANCH_A), "high_risk")
+    approvals.decide(approval.id, False, "octocat")  # 无 assignment_id：不抛、不造行
+    assert approvals.get(approval.id).status is ApprovalStatus.DENIED
+```
+
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov
+  tests/unit/test_approval_service.py -k denial`，Expected: Assignment 仍 RUNNING。
+
+- [ ] **Step 3: 实现**：`decide` 的终态翻转包进 `with self._store.transaction():`，
+  审批行更新后再调用私有 `_fail_running_assignment(assignment_id, now)`；后者
+  `get_assignment` 为空或状态不是 RUNNING 就直接返回。`update_assignment` 用
+  `next_assignment_status(current, AssignmentAction.FAIL)`，不手写 `"failed"`。
+
+- [ ] **Step 4: 跑到绿**：审批服务全文件 + `tests/unit/test_authorization_audit.py`
+  + `tests/unit/test_guarded_cancel.py` 全绿（既有"无 Assignment"用例零改动）。
+
+- [ ] **Step 5: 提交**：`git commit -am "feat: fail the assignment when an approval is denied"`
+
+### Task 3: macOS `LC_CTYPE` 测试口径收口（H2 基线）
+
+**Files:**
+- Modify: `tests/unit/test_command_runner.py`
+
+**Interfaces:**
+- 只改 `OS_INJECTED_KEYS` 这一处常量与注释；`build_child_env`、`CommandRunner`、
+  任何生产文件 0 行改动。
+
+- [ ] **Step 1: 改常量**：`OS_INJECTED_KEYS = {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}`；
+  注释写清"macOS CPython 在 `LANG` 存在时自行注入 `LC_CTYPE`，与传入 env 无关；
+  这不是白名单放行，Linux 上不存在"。
+- [ ] **Step 2: 复跑三条失败**：`.venv/bin/pytest -q --no-cov
+  tests/unit/test_command_runner.py tests/unit/test_sandbox.py -k
+  'sees_only_the_allowlist or spawned_child or core_suite'`，Expected: 3 passed。
+- [ ] **Step 3: 全量复跑**：`.venv/bin/pytest -q > /tmp/p5-m4-pytest.txt 2>&1`，
+  Expected: **671 passed, 6 skipped, 0 failed**（读回文件再写数字）。
+- [ ] **Step 4: 提交**：`git commit -am "test: accept macos-injected lc_ctype in the child env probe"`
+
+### Task 4: 示例 05 的 run phase（G1）
+
+**Files:**
+- Create: `examples/05_guarded_github_task.py`
+- Create: `tests/integration/test_github_example.py`
+
+**Interfaces:**
+- CLI：`--phase run|reject`、`--dir <目录>`；run 阶段末行
+  `RUN_RESULT status=completed ticket=<id> branch=<branch> pr_calls=1 push_calls=1`。
+- 事件按行 JSON；至少包含 `request`、`worktree`、`write`、`command`、`approval`、
+  `push`、`pr`。示例不读环境变量里的任何 token。
+- 装置：本地裸远端 + 工作克隆（`README.md`、`src/app.py` 内容含 `return a - b`），
+  一次 `main` 提交；Ticket id 用 `tk-<8 位十六进制>` 形状，保证 `workspace_name` 可算。
+
+- [ ] **Step 1: 写示例即测试**
+
+```python
+EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "05_guarded_github_task.py"
+
+
+async def _run_example(*args: str) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(EXAMPLE), *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    assert proc.stdout is not None
+    out = (await proc.stdout.read()).decode()
+    return await proc.wait(), out
+
+
+async def test_run_phase_guards_the_whole_chain(tmp_path: Path) -> None:
+    code, out = await _run_example("--phase", "run", "--dir", str(tmp_path / "demo"))
+    assert code == 0, out
+    assert "RUN_RESULT status=completed" in out
+    lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    ticket = next(line["ticket"] for line in lines if "ticket" in line)
+    branch = next(line["branch"] for line in lines if "branch" in line)
+    assert sum(1 for line in lines if line.get("event") == "pr") == 1
+
+    remote = tmp_path / "demo" / "remote.git"
+    names = subprocess.run(
+        ["git", "--git-dir", str(remote), "branch", "--list", "sa-*"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert branch in names
+    subject = subprocess.run(
+        ["git", "--git-dir", str(remote), "log", "-1", "--format=%s", branch],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert subject == "fix off-by-one"
+
+    store = Store(tmp_path / "demo" / "guarded.db")
+    try:
+        audits = store.list_audit(ticket_id=ticket)
+        ordered = [(row["kind"], row["action"]) for row in audits]
+        assert ("revalidate", "worktree") in ordered
+        assert ordered.index(("revalidate", "worktree")) < ordered.index(
+            ("authorize", "write_repository")
+        )
+        assert ordered.index(("authorize", "write_repository")) < ordered.index(
+            ("authorize", "create_pull_request")
+        )
+        assert [row["kind"] for row in audits if row["kind"] == "revalidate"][-1] == "revalidate"
+    finally:
+        store.close()
+```
+
+- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov
+  tests/integration/test_github_example.py -k run`，Expected: 示例文件不存在或 exit != 0。
+
+- [ ] **Step 3: 实现示例**：按下列顺序写死，任何一步失败都打印结构化 JSON 后 exit 1：
+  1. `_make_fixture(root)`：bare remote、clone、`src/app.py`、main 提交与 push；
+  2. `GitHubIntake.submit(...)`，actions 至少含 `PREPARE_WORKTREE/READ_REPOSITORY/
+     WRITE_REPOSITORY/RUN_COMMAND/COMMIT_CHANGES/PUSH_BRANCH/CREATE_PULL_REQUEST`，
+     `allowed_paths=["src/"]`、`allowed_commands=["git"]`、`base_ref="main"`；
+  3. `guarded_prepare_worktree_handler` 入队 `prepare:{assignment.id}` 并 dispatch；
+     再由 `manager.prepare(...)` 取回同一 handle（复用，不新建）；
+  4. 对 `Resource(kind="path", path="src/app.py")` 做 `authorize` + `audit.authorized`，
+     写文件；对 `git status/add/commit` 逐条做 `RUN_COMMAND` 的 `authorize` + 审计，
+     用 `CommandRunner(allowlist={"git"}, worktree_root=..., clock=...)` 实际执行；
+  5. `github_resource` / `resource_digest` / `github_effect_key` 构造 PR effect；
+     `ApprovalService.submit(...assignment_id=...)` → 打印 pending → `decide(True)` →
+     打印 approved；
+  6. `EffectDispatcher` 用 `{PREPARE_WORKTREE: guarded, GITHUB_PULL_REQUEST: handler}`
+     dispatch；PR handler 的 `push_branch` 回调在 worktree 里 push 到本地裸远端；
+  7. 打印 `push` / `pr` 事件与末行。`FakeGitHubClient` 的
+     `results={"create_pull_request": {"html_url": "https://example.invalid/pull/1"}}`。
+- [ ] **Step 4: 跑到绿**：目标测试 + 全量。
+- [ ] **Step 5: 提交**：`git commit -am "feat: add the offline guarded github example"`
+
+### Task 5: 拒绝示例五连（G2）
+
+**Files:**
+- Modify: `examples/05_guarded_github_task.py`（新增 `--phase reject`）
+- Modify: `tests/integration/test_github_example.py`（新增 reject 用例）
+
+**Interfaces:**
+- 五个场景各打印一行
+  `{"reject": "<code>", "audit": <n>, "effects": <n>, "external_calls": <n>}`；
+  末行 `REJECT_RESULT cases=5 ok=True`。`code` 依次为
+  `actor_not_allowlisted`、`mention_required`、`command_not_allowed`、
+  `approval_pending`、`auto_merge_not_grantable`。
+
+- [ ] **Step 1: 写拒绝用例**
+
+```python
+async def test_reject_phase_has_five_structured_refusals(tmp_path: Path) -> None:
+    code, out = await _run_example("--phase", "reject", "--dir", str(tmp_path / "reject"))
+    assert code == 0, out
+    assert "REJECT_RESULT cases=5 ok=True" in out
+    lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    refusals = [line for line in lines if "reject" in line]
+    assert [line["reject"] for line in refusals] == [
+        "actor_not_allowlisted",
+        "mention_required",
+        "command_not_allowed",
+        "approval_pending",
+        "auto_merge_not_grantable",
+    ]
+    assert all(line["external_calls"] == 0 for line in refusals)
+    assert all(line["audit"] >= 1 for line in refusals)
+    assert [line["effects"] for line in refusals[3:]] == [1, 0]
+```
+
+- [ ] **Step 2: 跑到红**：Expected: `--phase reject` 未实现。
+- [ ] **Step 3: 实现五个场景**：
+  1. actor `mallory` → `intake.submit` 返回 `actor_not_allowlisted`，audit 1 行 deny，
+     `list_tickets` 为空；
+  2. `mentioned=False` → `mention_required`，同样零 Ticket；
+  3. Mandate 只允许命令 `git`；对 `Resource(kind="command", command="rm")` 调 `authorize`
+     → `command_not_allowed` + 审计；再用 `CommandRunner(allowlist={"git"})` 跑
+     `("rm", "-rf", "/")`，断言 `denied_reason == "command_not_allowed"` 且
+     `started_at == ended_at`（未 spawn）；
+  4. 入队 PR effect、不提交审批，dispatch → Gate `approval_pending`，effect FAILED，
+     BLOCKED Report，`client.calls == []`、push 计数 0；
+  5. 构造期 `StaticPolicyConfig(grantable_actions={Action.ENABLE_AUTO_MERGE})` 捕获
+     `AdmissionRejectedError`；再用一个合法 admission 调
+     `create_mandate(actions=[Action.ENABLE_AUTO_MERGE])` 捕获 `auto_merge_not_grantable`；
+     两者都不产生 Ticket/effect。
+  每个场景用独立子目录与独立 Store，互不污染。
+- [ ] **Step 4: 跑到绿**：reject + run + 全量。
+- [ ] **Step 5: 提交**：`git commit -am "feat: show five structured refusals beside the happy path"`
+
+### Task 6: CI FOCUS 18 → 25（H3 的本地半边）
+
+**Files:**
+- Modify: `.github/workflows/ci.yml`
+- Modify: `tests/unit/test_ci_focus_gate.py`
+
+**Interfaces:**
+- 新增七个路径：`control/policy.py`、`control/approval.py`、`execution/worktree.py`、
+  `execution/command.py`、`execution/sandbox.py`、`integrations/github.py`、
+  `integrations/mcp.py`；步骤名改为 `25 文件`。
+
+- [ ] **Step 1: 改契约测试**：`FOCUS_FILES` 列全 **25** 个路径（18 旧 + 7 新），测试改名
+  `test_focus_covers_the_twenty_five_cardiac_files`，断言每个路径都在 workflow 文本中、
+  `"25 文件"` 在文本中、`text.count('".py"') == 0`。
+- [ ] **Step 2: 改 workflow**：FOCUS 元组追加七个路径，步骤名与注释同步为 25。
+- [ ] **Step 3: 跑契约测试**：`.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py`。
+- [ ] **Step 4: 本地同源复现闸门**：跑全量生成 `coverage.xml`，把 CI 内联脚本原样落到
+  `/tmp/p5-m4-focus.py` 执行，读回输出：25 个文件逐个 ≥90%，`BAD=[]`、`MISSING=[]`。
+  数字写进账本（不靠工具回显）。
+- [ ] **Step 5: 提交**：`git commit -am "ci: add the seven p5 guard files to the coverage gate"`
+
+### Task 7: Python 3.10 / 3.11 / 3.12 等价矩阵（4.4）
+
+**Files:**
+- Modify: `docs/acceptance/p5-guarded-execution.md`（只记结果，不新增脚本）
+- 环境：`.matrix/py311`、`.matrix/py312`（`.gitignore` 已覆盖）
+
+- [ ] **Step 1: 建 3.11**：`uv venv --python 3.11 .matrix/py311` 且
+  `uv pip install --python .matrix/py311/bin/python -e '.[dev]'`。
+- [ ] **Step 2: 建 3.12**：同形换版本。若 uv 下载失败，记录失败原因与"不可得"，继续下一版。
+- [ ] **Step 3: 三版全量**：3.10 用 `.venv`，3.11/3.12 用 `.matrix/*/bin/python -m pytest -q`；
+  输出各自重定向到 `/tmp/p5-m4-py{310,311,312}.txt`，读回 `passed/failed/skipped` 与覆盖率。
+- [ ] **Step 4: 等价判定**：三版用例总数一致、0 failed；若某版有 skip 差异，逐条写原因
+  （Docker/平台标记），不把"少跑了"写成"通过"。
+- [ ] **Step 5: 提交**：矩阵结果随 Task 10 的账本回填一起提交（本 Task 不单独提交）。
+
+### Task 8: ADR-05 实测证据与安全声明（G3）
+
+**Files:**
+- Modify: `docs/design-decisions/05-guarded-execution.md`
+
+**Interfaces:**
+- 把"测试与证据（占位，收口时回填）"改为"测试与证据（实测，2026-11-07）"，数字只取
+  Task 3/6/7/10 落盘文件的读数；新增"安全声明（不夸大）"小节。
+
+- [ ] **Step 1: 回填测试证据**：全库用例数/通过数/跳过数/覆盖率；心脏 25 文件逐个覆盖率；
+  L1 零 diff、方向矩阵、事务禁 await、Core 零 diff 的用例名与命令；P0~P4 零回归。
+- [ ] **Step 2: 写安全声明**：明确 ① `local-restricted` 命令执行器**不是**安全边界；
+  ② Docker runner 是可选执行档，未配置时核心门禁照常；③ worktree 是隔离不是沙箱；
+  ④ MCP 只允许 Mandate 指定的 server/tool，discovery 不等于授权；⑤ 凭据不进 payload/日志/
+  Report，真实 GitHub 传输仍需 operator 注入；⑥ 真实 GitHub/Docker smoke 只能显式 opt-in；
+  ⑦ auto merge 是结构性缺席，不是"默认关"。
+- [ ] **Step 3: 提交**：`git commit -am "docs: backfill adr-05 with measured evidence"`
+
+### Task 9: README / CHANGELOG / Roadmap / 索引 / 规格退出清单同步（G4）
+
+**Files:**
+- Modify: `README.md`、`docs/README.md`、`docs/Roadmap.md`、`CHANGELOG.md`
+- Modify: `docs/specs/p5-guarded-execution-repository-integration.md`（退出清单）
+- Modify: `docs/acceptance/p5-guarded-execution.md`（§1 4.1~4.6、§2 G1~G4、头汇总行）
+
+**Interfaces:**
+- 本地全绿但未推送时，状态只能写"本地收口、待远端 CI"；不得写"P5 已完成"。
+- CHANGELOG 的 Unreleased 段补 P5 的 Added/Changed；README 的状态行改为
+  "P5 本地收口待远端 CI"；Roadmap 的 P5 行同步。
+
+- [ ] **Step 1: 逐文件改状态**：先读当前文本再改，避免锚点漂移；每处只改状态与证据句。
+- [ ] **Step 2: 规格退出清单**：九项中本地可证的勾选；涉及远端 CI 的那一项保持未勾并在
+  条目下注明"待 4.7"。
+- [ ] **Step 3: 账本 §1/§2 勾选** 4.1~4.6、G1~G4；H1/H2/H4 待 Task 10 实测后再勾。
+- [ ] **Step 4: 跑文档门禁**：`ruff format --check` 四目录（文档不在范围内，但确认没顺手改
+  坏代码块）；`git diff --check`。
+- [ ] **Step 5: 提交**：`git commit -am "docs: sync the p5 status surfaces before the remote gate"`
+
+### Task 10: M4 出口（H1/H2/H4；4.7 的本地半步）
+
+**Files:**
+- Modify: `docs/acceptance/p5-guarded-execution.md`
+
+**Interfaces:**
+- Consumes: Task 1~9 的全部证据。
+- Produces: 本地出口记录；H3 与 4.7 的远端半步**未授权时不勾**。
+
+- [ ] **Step 1: 全量门禁落盘**
+
+```bash
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p5-m4-pytest.txt 2>&1
+.venv/bin/mypy > /tmp/p5-m4-mypy.txt 2>&1
+.venv/bin/ruff check stableagent tests examples benchmarks > /tmp/p5-m4-ruff.txt 2>&1
+.venv/bin/ruff format --check stableagent tests examples benchmarks >> /tmp/p5-m4-ruff.txt 2>&1
+git diff 234f620..HEAD --stat -- stableagent/core/ > /tmp/p5-m4-l1.txt
+git diff main..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p5-m4-c1.txt
+git diff --check > /tmp/p5-m4-whitespace.txt 2>&1
+```
+
+读回每个文件；预期 `pytest` 0 failed、L1/C1 0 行、mypy/ruff 全绿。
+- [ ] **Step 2: 心脏覆盖 25 文件**：按 Task 6 的同源脚本再跑一次，读回逐个数字与
+  `BAD=[]`/`MISSING=[]`。
+- [ ] **Step 3: 回填账本**：勾选 H1/H2/H4、A4/L1~L8/B2（有实测证据才勾）；
+  头汇总行按实际勾选写；G/H 的证据逐条落到条目下。
+- [ ] **Step 4: 更新 CHANGELOG/ADR 的最终数字**（若 Step 1/2 与 Task 7/8 的读数有差异，
+  以出口读数为准，并注明两次读数的命令）。
+- [ ] **Step 5: 提交**：`git commit -am "docs: close m4 locally with the offline gate evidence"`
+- [ ] **Step 6: 推送与远端 CI——仅维护者授权后执行**：授权后
+  `git push origin main`，等 GitHub Actions 的 3.10/3.12 双绿，把 run ID 写回账本并勾 H3/4.7。
+  未授权时：报告"本地出口全绿、H3/4.7 待授权"，**不执行任何远端写操作**。
+
+### 自检（writing-plans Self-Review）
+
+- **规格覆盖**：WP-5.6 的三条（示例、五类拒绝、ADR/文档）→ Task 4/5/8/9；
+  退出清单九项 → Task 3/4/5/6/7/8/9/10；G1~G4 → Task 4/5/8/9；H1~H4 → Task 3/6/7/10。
+  M3 遗留的 A4/L5（worktree 时机）→ Task 1；B2（denied 使 Assignment 失败）→ Task 2。
+- **占位扫描**：没有"TBD/待补/类似 Task N"；示例的辅助函数在 Task 4 Step 3 已给顺序与
+  接口，执行时按同文件内已有 04 的 `DemoClock/DemoIds/_git` 形状补全。
+- **类型一致性**：`RequestOutcome(admission, ticket_id, duplicate)`、
+  `ApprovalService.submit(..., assignment_id=...)`、`prepare_worktree_handler` 的 payload 四键、
+  `CommandRequest(argv, cwd, context)`、`github_effect_key(kind, stable_id, digest)` 在
+  Task 1/2/4/5 中同名同形；`AssignmentStatus.FAILED` 与 `next_assignment_status` 只在 Task 2
+  使用一次。
