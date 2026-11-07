@@ -331,7 +331,11 @@ async def test_adapter_only_exposes_the_intersection() -> None:
     )
     tools = await adapter.tools()
     assert [tool.name for tool in tools] == ["fs__read_file"]
-    assert adapter.keys() == {"fs__read_file": "fs:read_file"}
+    # keys 覆盖全部发现项：drop_table 未授权但必须被 filter 认出来（E3）
+    assert adapter.keys() == {
+        "fs__read_file": "fs:read_file",
+        "fs__drop_table": "fs:drop_table",
+    }
     assert tools[0].parameters == {
         "type": "object",
         "properties": {"path": {"type": "string"}},
@@ -342,7 +346,7 @@ async def test_adapter_only_exposes_the_intersection() -> None:
 async def test_adapter_empty_allowlist_exposes_nothing() -> None:
     adapter = McpToolAdapter(McpSession(_specs_transport()), server="fs", allowed=frozenset())
     assert await adapter.tools() == []
-    assert adapter.keys() == {}
+    assert set(adapter.keys()) == {"fs__read_file", "fs__drop_table"}
 
 
 async def test_adapter_tool_calls_the_session() -> None:

@@ -2363,6 +2363,13 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
    docs/blog/01-checkpoint-deep-dive.md、docs/specs/p4-ticket-orchestration-kernel.md，
    以及本账本自身的示例块）。这些不在 CI 门禁范围内，也不属于 M3 的改动面，
    **不在 M3 里顺手重排**；后续所有门禁命令一律用 CI 的四个目录。
+3. **E3 抓到真缺口：`McpToolAdapter.keys()` 从"可见集"改为"发现全集"**（Task 6，2026-11-07）。
+   原实现只给已授权工具登记键，`PolicyToolFilter` 于是把**发现但未授权**的名字
+   （集成测试里是 `echo__secret`）当成"非 MCP 工具"原样放行——可见集在适配器裁了一次，
+   过滤器这一层就失效了。现在 `tools()` 先给 `tools/list` 的每一项登记键、再按授权决定是否
+   产出 `Tool`；`tools()` 的返回值（可见集）不变。Task 4 的两条单测断言随之改为全量键：
+   `test_adapter_only_exposes_the_intersection` 与 `test_adapter_empty_allowlist_exposes_nothing`。
+   这条修正正是计划里写好的分支（"若 E3 暴露缺口，回到 Task 4/5 修并登记"）。
 
 ---
 
@@ -2960,6 +2967,9 @@ async def test_discovery_is_not_authorization():
 
 - [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/integration/test_mcp_stdio.py`
   Expected: FAIL — fixture 文件不存在（`FileNotFoundError`）或断言红，按实测记 Actual。
+  Actual（2026-11-07）：2 failed，均为
+  `McpProcessExitedError: [integrations.mcp_process_exited] MCP server 退出，rc=2`——
+  `sys.executable` 能起来，是 Python 找不到脚本而以 rc=2 退出，transport 把空 stdout 读成进程退出。
 - [ ] **Step 3: 实现** fixture（标准库 `json`/`sys`，逐行读、逐行写、`flush()`；
   `tools/call` 对 `secret` 也照回显——授权拒绝必须发生在**我们这一侧**，不能靠 server 自觉）。
 - [ ] **Step 4: 跑到绿**：目标两文件 + 全量（确认无公网、无 Docker）+ 三项静态门禁。

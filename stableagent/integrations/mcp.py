@@ -225,7 +225,11 @@ class McpToolAdapter:
         self._keys: dict[str, str] = {}
 
     def keys(self) -> dict[str, str]:
-        """工具名 → allowlist 键的映射表；filter 只吃这张表，不做字符串反解。"""
+        """工具名 → allowlist 键，覆盖 `tools/list` 的**全部**发现项（含未授权者）。
+
+        覆盖全集而不是可见集：`PolicyToolFilter` 靠这张表认出"这是 MCP 工具且不在授权内"；
+        只登记可见集，未授权的发现项就会被当成非 MCP 工具原样放行（E3 抓到的缺口）。
+        """
         return dict(self._keys)
 
     async def tools(self) -> list[Tool]:
@@ -234,10 +238,10 @@ class McpToolAdapter:
         self._keys = {}
         for spec in specs:
             key = mcp_allowlist_key(self._server, spec.name)
-            if key not in self._allowed:
-                continue
             name = mcp_tool_name(self._server, spec.name)
             self._keys[name] = key
+            if key not in self._allowed:
+                continue
             tools.append(self._build(name, spec))
         return tools
 
