@@ -23,6 +23,7 @@ from typing import Any
 
 from stableagent.control.approval import ApprovalGate, ApprovalService
 from stableagent.control.audit import AuditWriter
+from stableagent.control.errors import AdmissionRejectedError
 from stableagent.control.model import Action, Resource, resource_digest
 from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
 from stableagent.execution.command import CommandContext, CommandRequest, CommandRunner
@@ -36,7 +37,14 @@ from stableagent.integrations.github_effects import (
     github_resource,
 )
 from stableagent.integrations.repository import guarded_prepare_worktree_handler
-from stableagent.orchestration.model import Clock, Effect, EffectKind, IdFactory
+from stableagent.orchestration.model import (
+    Clock,
+    Effect,
+    EffectKind,
+    EffectState,
+    IdFactory,
+    ReportKind,
+)
 from stableagent.orchestration.outbox import EffectDispatcher
 from stableagent.orchestration.store import Store
 
@@ -354,8 +362,219 @@ async def _run_phase(root: Path) -> int:
         store.close()
 
 
-def _reject_phase(root: Path) -> int:
-    raise SystemExit("--phase reject is added by M4 Task 5")
+def _fresh(
+    root: Path,
+) -> tuple[Store, DemoClock, DemoIds, StaticPolicy, AuditWriter, GitHubIntake]:
+    """每个拒绝场景一套独立装置：库、目录、id 序列互不污染。"""
+    root.mkdir(parents=True, exist_ok=True)
+    clock = DemoClock()
+    ids = DemoIds()
+    store = Store(root / "reject.db", clock=clock)
+    policy = _policy(clock, ids)
+    audit = AuditWriter(policy, store, clock=clock, ids=ids)
+    intake = GitHubIntake(store, policy, audit, clock=clock, ids=ids)
+    return store, clock, ids, policy, audit, intake
+
+
+async def _reject_actor(root: Path) -> tuple[str, int, int, int]:
+    store, _clock, _ids, _policy_, audit, intake = _fresh(root)
+    try:
+        outcome = intake.submit(
+            _request(actor="mallory"),
+            actions=[Action.RUN_COMMAND],
+            allowed_commands=["git"],
+        )
+        assert outcome.admission.reason_code == "actor_not_allowlisted", outcome
+        assert store.list_tickets() == []
+        return "actor_not_allowlisted", len(store.list_audit()), 0, 0
+    finally:
+        store.close()
+
+
+async def _reject_mention(root: Path) -> tuple[str, int, int, int]:
+    store, _clock, _ids, _policy_, audit, intake = _fresh(root)
+    try:
+        outcome = intake.submit(
+            _request(mentioned=False),
+            actions=[Action.RUN_COMMAND],
+            allowed_commands=["git"],
+        )
+        assert outcome.admission.reason_code == "mention_required", outcome
+        assert store.list_tickets() == []
+        return "mention_required", len(store.list_audit()), 0, 0
+    finally:
+        store.close()
+
+
+async def _reject_command(root: Path) -> tuple[str, int, int, int]:
+    store, clock, _ids, policy, audit, intake = _fresh(root)
+    try:
+        outcome = intake.submit(
+            _request(),
+            actions=[Action.RUN_COMMAND],
+            allowed_commands=["git"],
+        )
+        assert outcome.ticket_id is not None
+        ticket = store.get_ticket(outcome.ticket_id)
+        assert ticket is not None and ticket.mandate_id is not None
+        mandate = store.get_mandate(ticket.mandate_id)
+        assert mandate is not None
+        resource = Resource(kind="command", command="rm")
+        decision = policy.authorize(mandate, Action.RUN_COMMAND, resource)
+        audit.authorized(mandate, Action.RUN_COMMAND, resource, decision, ticket_id=ticket.id)
+        assert decision.reason == "command_not_allowed", decision
+
+        runner = CommandRunner(frozenset({"git"}), worktree_root=root / "worktrees", clock=clock)
+        result = runner.run(
+            CommandRequest(
+                argv=("rm", "-rf", "/"),
+                cwd=root / "worktrees",
+                context=CommandContext(
+                    ticket_id=ticket.id,
+                    assignment_id=store.list_assignments(ticket.id)[0].id,
+                    repository=REPOSITORY,
+                    base_ref="main",
+                ),
+            )
+        )
+        assert result.denied_reason == "command_not_allowed", result
+        assert result.started_at == result.ended_at, result
+        return "command_not_allowed", len(store.list_audit()), 0, 0
+    finally:
+        store.close()
+
+
+async def _reject_approval(root: Path) -> tuple[str, int, int, int]:
+    store, clock, ids, policy, audit, intake = _fresh(root)
+    try:
+        outcome = intake.submit(
+            _request(),
+            actions=[Action.CREATE_PULL_REQUEST],
+            base_ref="main",
+        )
+        assert outcome.ticket_id is not None
+        ticket = store.get_ticket(outcome.ticket_id)
+        assert ticket is not None
+        assignment = store.list_assignments(ticket.id)[0]
+        gate = ApprovalGate(policy, ApprovalService(store, clock=clock, ids=ids), audit)
+        client = FakeGitHubClient()
+        pushes: list[str] = []
+
+        async def push(head: str) -> None:
+            pushes.append(head)
+
+        dispatcher = EffectDispatcher(
+            store,
+            {
+                EffectKind.GITHUB_PULL_REQUEST: github_pull_request_handler(
+                    store=store,
+                    policy=policy,
+                    audit=audit,
+                    gate=gate,
+                    client=client,
+                    clock=clock,
+                    ids=ids,
+                    push_branch=push,
+                )
+            },
+            clock=clock,
+        )
+        payload: dict[str, Any] = {
+            "ticket_id": ticket.id,
+            "assignment_id": assignment.id,
+            "stable_id": STABLE_ID,
+            "repository": REPOSITORY,
+            "head": "sa-00000001-demo",
+            "base": "main",
+            "title": "Needs an approval first",
+            "body": "No approval was submitted for this write.",
+        }
+        effect = Effect(
+            id=ids.new_id("ef"),
+            kind=EffectKind.GITHUB_PULL_REQUEST,
+            idempotency_key="reject:approval_pending",
+            payload=payload,
+            due_at=clock.now_ms(),
+        )
+        with store.transaction():
+            store.enqueue_effect(effect)
+        await dispatcher.dispatch_due()
+        settled = store.get_effect(effect.id)
+        assert settled is not None and settled.state is EffectState.FAILED, settled
+        assert client.calls == [] and pushes == []
+        blocked = [
+            report
+            for report in store.list_reports(ticket.id)
+            if report.kind is ReportKind.BLOCKED
+            and report.details.get("reason") == "approval_pending"
+        ]
+        assert len(blocked) == 1, blocked
+        return "approval_pending", len(store.list_audit()), 1, 0
+    finally:
+        store.close()
+
+
+async def _reject_auto_merge(root: Path) -> tuple[str, int, int, int]:
+    store, _clock, _ids, policy, audit, _intake = _fresh(root)
+    try:
+        try:
+            StaticPolicyConfig(
+                repository=REPOSITORY,
+                actors=frozenset({ACTOR}),
+                grantable_actions=frozenset({Action.ENABLE_AUTO_MERGE}),
+                allowed_commands=["git"],
+                default_validity_ms=3_600_000,
+            )
+        except AdmissionRejectedError as exc:
+            assert "grantable_must_exclude_auto_merge" in str(exc), exc
+        else:
+            raise AssertionError("auto merge must not be grantable at construction")
+
+        admission = policy.admit_explicit(_request().to_explicit_request())
+        audit.admitted(admission)
+        try:
+            policy.create_mandate(admission, actions=[Action.ENABLE_AUTO_MERGE])
+        except AdmissionRejectedError as exc:
+            assert "auto_merge_not_grantable" in str(exc), exc
+        else:
+            raise AssertionError("auto merge must not be grantable when creating a mandate")
+        assert store.list_tickets() == []
+        return "auto_merge_not_grantable", len(store.list_audit()), 0, 0
+    finally:
+        store.close()
+
+
+async def _reject_phase(root: Path) -> int:
+    cases = (
+        ("actor_not_allowlisted", _reject_actor),
+        ("mention_required", _reject_mention),
+        ("command_not_allowed", _reject_command),
+        ("approval_pending", _reject_approval),
+        ("auto_merge_not_grantable", _reject_auto_merge),
+    )
+    refused: list[str] = []
+    results: list[tuple[str, int, int, int]] = []
+    for expected, case in cases:
+        try:
+            result = await case(root / expected)
+        except Exception as exc:  # 场景未按预期拒绝：结构化报错，绝不把异常当拒绝
+            _emit("reject_error", reject=expected, error=repr(exc))
+            return 1
+        if result[0] != expected:
+            _emit("reject_error", reject=expected, got=result[0])
+            return 1
+        _emit(
+            "reject_case",
+            reject=result[0],
+            audit=result[1],
+            effects=result[2],
+            external_calls=result[3],
+        )
+        refused.append(result[0])
+        results.append(result)
+    ok = all(item[3] == 0 and item[1] >= 1 for item in results)
+    print(f"REJECT_RESULT cases={len(refused)} ok={ok}")
+    return 0 if ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -366,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.dir).resolve()
     if args.phase == "run":
         return asyncio.run(_run_phase(root))
-    return _reject_phase(root)
+    return asyncio.run(_reject_phase(root))
 
 
 if __name__ == "__main__":

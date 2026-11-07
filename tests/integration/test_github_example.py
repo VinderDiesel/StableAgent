@@ -65,3 +65,21 @@ async def test_run_phase_guards_the_whole_chain(tmp_path: Path) -> None:
         )
     finally:
         store.close()
+
+
+async def test_reject_phase_has_five_structured_refusals(tmp_path: Path) -> None:
+    code, out = await _run_example("--phase", "reject", "--dir", str(tmp_path / "reject"))
+    assert code == 0, out
+    assert "REJECT_RESULT cases=5 ok=True" in out
+    lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    refusals = [line for line in lines if "reject" in line]
+    assert [line["reject"] for line in refusals] == [
+        "actor_not_allowlisted",
+        "mention_required",
+        "command_not_allowed",
+        "approval_pending",
+        "auto_merge_not_grantable",
+    ]
+    assert all(line["external_calls"] == 0 for line in refusals)
+    assert all(line["audit"] >= 1 for line in refusals)
+    assert [line["effects"] for line in refusals[3:]] == [1, 0]
