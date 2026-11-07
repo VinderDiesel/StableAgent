@@ -71,6 +71,13 @@ class DeferrableEffectError(OrchestrationError):
         super().__init__("orchestration.effect_deferred", f"effect 此刻顺延，不是失败：{reason}")
 
 
+class PermanentEffectError(OrchestrationError):
+    """重放只会得到同样的拒绝（如复检不过的 Mandate）：dispatcher 直接判死，不占重试预算。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("orchestration.effect_permanent", f"effect 永久失败，不再重试：{reason}")
+
+
 class CyclicDependencyError(OrchestrationError):
     def __init__(self, ticket_id: str, path: list[str]) -> None:
         super().__init__(

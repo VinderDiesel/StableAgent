@@ -94,6 +94,7 @@ def test_error_code_inventory_is_unique_and_prefixed() -> None:
         "IdempotencyConflictError": ("x", "y"),
         "CyclicDependencyError": ("x", ["a", "b"]),
         "DeferrableEffectError": ("x",),
+        "PermanentEffectError": ("x",),
     }
     codes = {}
     for name, args in probes.items():

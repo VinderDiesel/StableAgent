@@ -2377,6 +2377,14 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
    另：计划 Step 3 只写了 `insert_ticket(title=...)`，实现时显式构造
    `TicketStatus.QUEUED` + `queued_at=now`——`Store.list_runnable_tickets` 只挑 `queued`，
    留 `OPEN` 时 launch 后的第一个状态转换就是非法的；该终态与 P4 `queue_ticket` 一致。
+5. **Task 9 提前落 `PermanentEffectError`；`RepositoryWorkerExecutor.__init__` 多两个可选依赖**
+   （2026-11-07）。计划在 Task 9 的 Files 里点名要改 `orchestration/errors.py`，并在 Step 3
+   直接使用该异常，因此在 Task 9 落地（Task 10 只补 dispatcher 的判死分支）。
+   构造签名是 `(inner, *, store, policy, audit, clock=None, ids=None)`，后两者默认
+   `SystemClock()` / `Uuid4Id()`：BLOCKED `Report` 的 `id` 与 `created_at` 必须可注入，
+   否则 `test_expired_mandate_parks_without_starting_the_worker` 无法断言确定性；
+   计划里的三参调用点不受影响。本次对编排层的新增仍属计划允许的那几类扩展
+   （一个异常 + 一个只读查询），`service.py` 零改动（约束 1 门禁 0 行）。
 
 ---
 
