@@ -182,12 +182,77 @@ integrations → execution → control → orchestration → core
 - `EffectKind` 三个新外部写成员对旧 outbox 无影响；旧行 kind 值仍只有 3 类。
 - 公开 API：三个新包不进顶层 `__init__` 重导出（沿用 ADR-04 决策 1 的口径）。
 
-## 测试与证据（占位，收口时回填）
+## 测试与证据（实测，2026-11-07）
 
-- 账本：[P5 验收账本](../acceptance/p5-guarded-execution.md)（DoD 46 项、里程碑 40 步）。
-- 心脏边界回归：依赖方向矩阵、事务禁 await（含新表）、Core 零 diff（
-  `git diff <P4 收口提交>..HEAD -- stableagent/core/` 恒为 0 行）。
-- 本节目的实测数字在 M4 收口时按 ADR-04"测试与证据（实测）"同格式回填，不写预期值。
+全仓 `677 passed, 6 skipped, 0 failed`，行覆盖率 99.04%；6 条 skip 均为 Docker / Redis
+显式 opt-in 用例（`STABLEAGENT_DOCKER`、`STABLEAGENT_REDIS_URL` 未设置），不是失败。下述
+用例全部离线确定性（注入 ID/clock、本地裸 git 远端、`FakeGitHubClient`、无公网/真实 GitHub），
+账本条目以 `A1`–`L8` 引用。P0–P4 的既有用例同场全跑，零回归。
+
+- 心脏覆盖率闸门：`.github/workflows/ci.yml` 的 FOCUS 为 **25 个文件**（P0–P4 的 18 个 +
+  `control/{policy,approval}.py`、`execution/{worktree,command,sandbox}.py`、
+  `integrations/{github,mcp}.py`），每个 ≥90%；`tests/unit/test_ci_focus_gate.py`（1）锁死
+  路径清单、`25 文件` 步骤名与"不许 `.py` 通配兜底"。本地同源复现（CI 内联脚本原样执行）
+  的逐文件读数：
+
+  ```text
+  control/approval.py 99.0%      control/policy.py 100.0%     core/errors.py 98.3%
+  core/loop.py 96.8%             core/checkpoint/manager.py 100.0%
+  core/checkpoint/recovery.py 99.0%  core/checkpoint/storage.py 99.3%
+  context/assembly.py 100.0%     context/budget.py 100.0%     context/capability.py 100.0%
+  context/compression.py 100.0%  context/engine.py 100.0%     context/tokens.py 100.0%
+  execution/command.py 100.0%    execution/sandbox.py 100.0%  execution/worktree.py 100.0%
+  integrations/github.py 100.0%  integrations/mcp.py 97.9%
+  orchestration/executor.py 100.0%  orchestration/model.py 100.0%
+  orchestration/outbox.py 98.7%  orchestration/scheduler.py 100.0%
+  orchestration/service.py 98.3% orchestration/store.py 100.0%  tools/evidence.py 100.0%
+  ```
+
+  最低项为 `core/loop.py` 96.8%，25/25 通过；`BAD=[]`、`MISSING=[]`（脚本 exit 0）。
+- L1 Core 零 diff 与约束 1：`git diff 234f620..HEAD -- stableagent/core/` 与
+  `git diff 234f620..HEAD -- stableagent/orchestration/service.py` 均输出 0 行（实测）。
+  `tests/unit/test_orchestration_boundaries.py::test_loop_py_is_byte_identical_to_p4_base`
+  继续守着同一事实。
+- L2 依赖方向：`tests/unit/test_control_boundaries.py` 的
+  `test_no_legacy_package_imports_p5_layers`（扫描全部非 P5 包）与
+  `test_control_never_imports_execution_or_integrations`（反方向），加上
+  `tests/unit/test_orchestration_boundaries.py::test_core_layers_never_import_orchestration`。
+- L3 事务禁 await：`tests/unit/test_execution_boundaries.py::test_no_transaction_body_awaits`
+  （全 `stableagent/` AST 扫描）配 `test_the_await_scan_finds_a_planted_violation`（扫描器
+  非空转），运行时由 `tests/unit/test_outbox.py::test_handler_never_sees_an_open_transaction`
+  与 `EffectDispatcher.dispatch_due` 的 `assert not store.in_transaction` 守着。
+- L5 六个 revalidate 时机：`tests/unit/test_repository_executor.py`（10）覆盖
+  `launch|recover|retry`；`tests/unit/test_repository_executor.py::test_prepare_revalidates_before_the_manager`
+  与 `test_expired_mandate_parks_before_prepare` 覆盖 `worktree`；
+  `tests/unit/test_github_integration.py::test_write_effects_revalidate_and_check_approval`
+  覆盖 `external_write`；`tests/unit/test_policy_tool_filter.py` 的
+  `test_guarded_tool_denies_without_calling_the_session` 与
+  `test_guarded_tool_allows_and_audits_when_granted` 覆盖 `mcp_call`（审计 `action` 槽为
+  `mcp_call`）。
+- G1/G2：`tests/integration/test_github_example.py`（2）在子进程里跑
+  `examples/05_guarded_github_task.py`——run 面断言远端分支、`fix off-by-one` 提交与
+  审计顺序（`revalidate/worktree` → `authorize/write_repository` →
+  `authorize/create_pull_request`）；reject 面按序得到 `actor_not_allowlisted`、
+  `mention_required`、`command_not_allowed`、`approval_pending`、
+  `auto_merge_not_grantable`，外部调用计数全 0，末行 `REJECT_RESULT cases=5 ok=True`。
+- 解释器矩阵：`uv venv --python 3.10|3.11|3.12` 三套环境（CPython 3.10.20 / 3.11.16 /
+  3.12.14）各自 `677 passed, 6 skipped, 0 failed`、覆盖率 99.04%；三份 skip 清单按行排序后
+  `diff` 为空，即跳过的是同一组显式 opt-in 用例。
+
+## 安全声明（不夸大）
+
+1. `local-restricted` 命令执行器**不是安全边界**：它做 argv 精确 allowlist、cwd 收口、
+   shell 语法拒绝与输出预算，但不限制进程能读写的系统资源；真正的隔离档是可选 Docker runner。
+2. Docker runner 是**可选执行档**：未配置 `STABLEAGENT_DOCKER=1` 时相关用例跳过，核心门禁
+   与 P5 的授权链路照常运行，不以"有容器"为前提。
+3. worktree 是**变更隔离**，不是沙箱：它隔离分支与工作目录，不约束网络、CPU、内存或恶意代码。
+4. MCP 只允许 Mandate 指定的 server/tool：`tools/list` 的 discovery 结果不等于授权，可见集是
+   `tools/list ∩ Mandate.allowed_mcp`，每次调用前还有 `mcp_call` 复检。
+5. 凭据不进 prompt、日志、Report、Ticket/AgentState、worktree metadata 或 effect payload；
+   子进程环境只取 allowlist。真实 GitHub 传输仍需 operator 在进程内注入客户端，fake 不接收 token。
+6. 真实 GitHub / Docker smoke 只能显式 opt-in：默认全仓门禁离线，不访问公网、不要求 Docker。
+7. `merge` / `enable_auto_merge` 是**结构性缺席**：它们不在 `EffectKind`，也不在可授权集合，
+   不是"默认关闭"的开关；构造期、`create_mandate` 与 `authorize` 三处各有拒绝。
 
 ## 前置 ADR 遗留项的处置
 
