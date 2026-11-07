@@ -2393,6 +2393,14 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
    另外计划示例里的 `_enqueue(store, EffectKind.GITHUB_COMMENT, "k")` helper 在
    `test_outbox.py` 并不存在，该用例本地构造 `Effect(id="ef-1", ..., due_at=0)`；
    断言除状态/attempts/last_error 外还数了 handler 只被调用一次、`on_exhausted` 仍触发。
+7. **Task 11 多导出一个 `github_resource(action, payload)`，handler 工厂多 `clock`/`ids`**
+   （2026-11-07）。Interfaces 只列了三个 handler 与 `github_effect_key`，但审批方要提交的
+   `resource_digest` 必须与 handler 判定时算出的完全一致，资源形状不能是 handler 私有知识——
+   否则审批永远 `approval_stale`。因此资源构造提成公开纯函数；正文/标题只以 sha256 进
+   `extra`，原文不落审计（L4/L7）。工厂的 `clock`/`ids` 可选、默认 `SystemClock()` /
+   `Uuid4Id()`，理由同偏差 5：BLOCKED/FAILED Report 的 id 与时间必须可注入。
+   另：payload 缺字段不再交给退避重试——`_text` / `_reviewers` 直接抛
+   `PermanentEffectError`，坏 payload 重放三次只会得到同样结果。
 
 ---
 
