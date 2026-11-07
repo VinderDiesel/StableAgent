@@ -509,3 +509,15 @@ def test_merge_is_structurally_absent() -> None:
             repository="owner/repo", default_validity_ms=1000
         ).grantable_actions
     )
+
+
+def test_effect_kind_has_exactly_seven_members_and_no_merge() -> None:
+    assert {k.value for k in EffectKind} == {
+        "launch_assignment",
+        "deliver_input",
+        "cancel_assignment",
+        "prepare_worktree",
+        "github_comment",
+        "github_pull_request",
+        "github_request_review",
+    }

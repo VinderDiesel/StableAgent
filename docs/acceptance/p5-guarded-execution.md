@@ -3,14 +3,19 @@
 > **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
-> 执行从任务级计划（第 5/6 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口，M2 已于
-> 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾），当前
-> **DoD 18/46、里程碑步骤 20/40（M1 9/9、M2 11/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> 执行从任务级计划（第 5/6/7 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口，M2 已于
+> 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾），
+> **M3 已于 2026-11-07 以 12/12 收口**（第 7 节，13 Task / 65 Step；3.12 出口执行完），当前
+> **DoD 28/46、里程碑步骤 32/40（M1 9/9、M2 11/12、M3 12/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落并已执行（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution` 已于 2026-11-06 经维护者指示快进 `main` 并推送
 > （`5e94377..31eafa1`，ff-only，无合并提交），远端 CI run `42144235714` = `success`
 > （`quality (3.10)` 与 `quality (3.12)` 两个 job 全绿；矩阵里没有 3.11——3.11 是本地解释器，
-> 等价矩阵另见步骤 4.4）。这不等于 P5 收口：H2/H3 与文档状态翻转仍属 M4（步骤 4.3/4.6/4.7）。
+> 等价矩阵另见步骤 4.4）。M3 执行分支 `feat/p5-m3-mcp-github`（自 `main@f41ea35` 切出）已落
+> 12 笔实现提交 + 本收口提交；12 个里程碑步骤与 E1~E4/F1~F6 全部有实测证据。**A4/L1~L8 仍不
+> 整条勾选**：`worktree` revalidate 时机在生产代码里没有调用点（见 §0 L5 与 A4 的 M3 出口行），
+> L1~L8 按 P4 口径等 M4 全量证明。这不等于 P5 收口：H2/H3 与文档状态翻转仍属 M4
+> （步骤 4.3/4.6/4.7）。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
 > 验收账本（第 0、2 节）。每个可勾选事项写明来源、验证方法或命令、证据占位；全部勾选且第 3 节
@@ -92,12 +97,29 @@
       M1 出口复核（2026-11-04，Task 9）：授权侧形状齐了——六时机常量 `REVALIDATE_TIMINGS`、
       `AuditWriter.revalidated` 每判定 1 行（时机写进 `action` 槽）、Gate 无全等批准即 deny（`approval_pending`/`approval_stale`/
       `approval_denied` 三码）。「时机清单以测试矩阵固化」与逐个先于动作执行的接线由 A4 在 M2/M3 收口，故 L5 与 A4 均保持未勾。
+      M3 出口实测（2026-11-07）：六个时机里 **5 个已接线**——`launch`/`recover`/`retry` 由
+      `RepositoryWorkerExecutor._guard` 在 `inner.launch/recover` 前调用（`deliver` 按 launch 口径）；
+      `external_write` 由 `github_effects._write_effect` 在审批与写之前调用；`mcp_call` 由
+      `control/tool_filter.guard_mcp_tool` 在 delegate 前调用。每条都先落审计再动作：
+      `test_write_effects_revalidate_and_check_approval` 断三写均为 `["revalidate","authorize"]` 顺序且
+      client 零调用，`test_expired_mandate_is_denied_before_the_call` 断 MCP 侧过期即拒，
+      `test_revalidate_precedes_the_action` 断 launch/recover/deliver 三入口。**`worktree` 时机仍无
+      生产调用点**（`grep -rn 'revalidate(' stableagent/` 只有上述三处；M2 的
+      `execution/effects.py::prepare_worktree_handler` 只取 Ticket 再 `manager.prepare`）。因此
+      本条**不勾**：要求是"六个……逐一有审计行"，现在是 5/6；缺项不能由另外五个抵消。
 - [ ] **L6 结构性默认拒绝**：`merge`/`enable_auto_merge` 不在 EffectKind 枚举与 Action
       授权集合中（不是"运行时开关拒绝"，是类型里不存在）。来源：ADR-05 决策 5、被否决表。
       进度（2026-11-04，Task 5 授权集合半边）：`merge` 不在 `Action` 枚举里（13 成员无 merge），
       `enable_auto_merge` 的"不进授权集合"由 config 构造期 + `create_mandate` + `authorize`
       三道把守且各有用例；EffectKind 半边要在 M2（加 `PREPARE_WORKTREE`）与 M3（加四类）之后
       才能证明"merge/auto merge 始终不在枚举里"，届时由本条收口。
+      M3 出口复核（2026-11-07）：枚举恰 7 员（P4 三 + `prepare_worktree` + `github_comment`/
+      `github_pull_request`/`github_request_review`），`test_effect_kind_has_exactly_seven_members_and_no_merge`
+      用集合相等钉死；`test_merge_is_structurally_absent` 同时断言 `merge`/`enable_auto_merge`
+      不在枚举值里、`Action.ENABLE_AUTO_MERGE` 不在 `StaticPolicyConfig(...).grantable_actions`；
+      M2 的 `test_m2_effect_kinds_close_the_whitelist` 继续钉"值集合 ∪ 成员名集合"与
+      `{"merge","enable_auto_merge","auto_merge"}` 不相交。三条全绿，L6 的事实证据已齐；
+      按 P4 口径（L1~L8 等 M4 全量证明后统一勾）本条暂不勾，M4 出口复跑这三条即可。
       进度（2026-11-05，M2 Task 4 的 EffectKind 半边）：枚举现有 4 员（P4 三员 + `prepare_worktree`），
       P4 的白名单闭合用例 `test_m2_effect_kinds_close_the_whitelist` 随之扩容并**顺手钉死缺席**：
       `{"merge", "enable_auto_merge", "auto_merge"}` 与"值集合 ∪ 成员名集合"不相交——两个口径都查，
@@ -151,6 +173,13 @@
       origin 是 `https://github.example/…` 假 URL（不含 userinfo），ownership 里落的仍是脱敏后的
       remote（`test_ownership_never_records_credentials` 那半边在 `test_worktree.py` 已证），
       并发跑的孩子仍只见七键白名单（C8）。出口没有让这句话变得更真，也没有让它更假。
+      M3 出口复核（2026-11-07）：本轮没有把凭据引入任何新面——`ExplicitGitHubRequest` 只有
+      repository/url/actor/text/mentioned/received_at/stable_id 七字段；入口事务与三个 effect 的
+      payload 只有 ticket/assignment/stable_id/url/body/title/reviewers（正文与标题只以 sha256
+      进 `resource_digest`）；`GitHubClient` 协议与 `FakeGitHubClient` 都不接收 token（真实实现的
+      token 只活在其内部，模块 docstring 已写明）；MCP 子进程缺省环境只有 `PATH` 与固定
+      `LANG=C.UTF-8`（`test_stdio_transport_default_env_is_minimal`）。真实 HTTP token 传输尚未
+      实现（M4 的 smoke 才有），prompt/日志侧脱敏也仍未闭合，**L7 不勾**。
 - [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
       进度（2026-11-05，M2 Task 11 的 Docker 半边）：Docker 这一半的形状落定了——`docker` marker
@@ -167,6 +196,13 @@
       取向 ① 写明"不 mock git 输出"，它要跑的 `worktree add` 只读本地对象库，所以它不在 L8
       要拦的那一类（Docker / 真实仓库）里，也不需要 marker。仍未闭合的两半没变：真实 GitHub
       那一半，以及 CI 侧的在场证明（步骤 4.3/4.7）。
+      M3 出口复核（2026-11-07）：新增依赖全是标准库/本地资源——MCP 用
+      `asyncio.create_subprocess_exec` 跑本地 fixture（`tests/fixtures/mcp_echo_server.py`），
+      GitHub 侧只有协议与 fake，写 handler 的集成用例用真 git 裸远端 + `FakeGitHubClient`；
+      没有 Docker、公网或真实 GitHub 调用。全量门禁 `668 passed, 6 skipped, 3 failed`，3 条失败是
+      开工前基线已记录的 macOS `LC_CTYPE` 注入（`test_command_runner` 两条 + 其嵌套复跑
+      `test_sandbox::test_core_suite_does_not_depend_on_docker`），不是 M3 回归。真实 GitHub
+      smoke 与 CI 侧在场证明仍属 M4，**L8 不勾**。
 
 ## 1. 里程碑与步骤
 
@@ -578,29 +614,97 @@
 
 ### M3：MCP 与 GitHub 闭环（规格 WP-5.4 + WP-5.5；ADR-05 决策 4/8/9）
 
-- [ ] **3.1** `McpTransport`：参数数组启动、最小环境、请求 ID、超时、关闭。
+- [x] **3.1** `McpTransport`：参数数组启动、最小环境、请求 ID、超时、关闭。
       验证：fake transport 生命周期用例。
-- [ ] **3.2** `McpSession`：initialize/tools/list/tools/call + JSON-RPC id 与错误校验。
+      证据（2026-11-07，Task 2，提交 `a35e24b`）：`integrations/mcp.py` 的 `StdioMcpTransport`
+      用 `asyncio.create_subprocess_exec(*argv)`（参数数组，不经 shell）、缺省环境只两键
+      `PATH` + `LANG=C.UTF-8`、逐请求单调 id、每请求 `asyncio.wait_for(timeout_s)`、关闭幂等。
+      `tests/unit/test_mcp_client.py` 的 transport 段 11 passed：往返/错 id/JSON-RPC error/超时/
+      进程退出/最小环境/通知不等回复/关闭幂等/空 argv/坏帧（参数化 2）。全量门禁见 3.12。
+- [x] **3.2** `McpSession`：initialize/tools/list/tools/call + JSON-RPC id 与错误校验。
       验证：E1 六类（error/超时/进程退出/schema 错误）。
-- [ ] **3.3** `McpToolAdapter` → 既有 `Tool`；输出走 ToolResult→Evidence→ContextEngine，
+      证据（2026-11-07，Task 3，提交 `9760eb2`）：`initialize` 带 clientInfo 并补
+      `notifications/initialized`；`list_tools`/`call_tool` 校验 `jsonrpc=="2.0"`、响应 id 与请求 id
+      相等、`error` 转 `McpProtocolError`；结果 schema 逐项校验（缺 name、空 name、inputSchema
+      非对象、content 非数组）。session 段 14 passed（schema 用例参数化 4+2 档）。
+- [x] **3.3** `McpToolAdapter` → 既有 `Tool`；输出走 ToolResult→Evidence→ContextEngine，
       超长受 P3 压缩预算。验证：E4 预算断言。
-- [ ] **3.4** 发现 ≠ 授权：Agent 可见集 = `tools/list ∩ Mandate.allowed_mcp`；未列入者不可见、
+      证据（2026-11-07，Task 4，提交 `8b17374`）：adapter 产出既有 `Tool` ABC 子类
+      （name=`server__tool`、description、parameters 动态造类），`execute` 返回既有 `ToolResult`；
+      `test_adapter_tool_calls_the_session` 断参数落到 `tools/call`。E4 的预算用例经
+      `ToolRegistry.call → Evidence → Message(role="tool") → ContextEngine.assemble`：
+      4000 字输出在 `max_context_tokens=200` 下被压到不足原文 1/10，且无孤儿 tool_call。
+- [x] **3.4** 发现 ≠ 授权：Agent 可见集 = `tools/list ∩ Mandate.allowed_mcp`；未列入者不可见、
       不可启动调用。验证：E3 + 离线 stdio fixture（E2）。
-- [ ] **3.5** `ExplicitGitHubRequest` 模型 + 准入四道门（allowlist→mention→单仓库→重复检测）；
+      证据（2026-11-07，Task 6，提交 `08c6ac7`）：真 stdio fixture
+      （`tests/fixtures/mcp_echo_server.py`）断 framing 端到端；
+      `test_discovery_is_not_authorization` 让 server 同时暴露 `echo` 与 `secret`，授权集只有
+      `echo:echo`——adapter 只产出 `echo__echo`，`PolicyToolFilter` 也不放行 `echo__secret`；
+      `secret` 在 server 侧仍可调用，证明裁决权在客户端而非 server 自觉。全程本地子进程。
+- [x] **3.5** `ExplicitGitHubRequest` 模型 + 准入四道门（allowlist→mention→单仓库→重复检测）；
       同稳定 ID 返回同 Ticket 或明确 duplicate。验证：F1 + 每门审计行。
-- [ ] **3.6** `control` 入口事务：Mandate+Ticket+初始 Input+Assignment+launch effect 同一
+      证据（2026-11-07，Task 7，提交 `eb3014f`（与 Task 8 同批））：`GitHubIntake.submit` 依次过
+      actor allowlist → mention → 单仓库 → 稳定 ID 查重；`test_admission_gates_are_ordered_and_audited`
+      对三门各断一次稳定 deny 码与恰好 1 行 `admit` 审计；
+      `test_duplicate_stable_id_returns_the_same_ticket` 断第二次 `duplicate=True`、同 ticket_id、
+      assignment 仍 1 条；`test_external_text_never_changes_the_decision` 把越权指令塞进正文，
+      判定仍 `admitted`（正文只影响 digest/duplicate）。
+- [x] **3.6** `control` 入口事务：Mandate+Ticket+初始 Input+Assignment+launch effect 同一
       `Store.transaction()` 原子写。验证：F2 + 事务内禁 await 扫描（L3）。
-- [ ] **3.7** `RepositoryWorkerExecutor`：launch/recover/deliver 前 revalidate，失败 park 不启动；
+      证据（2026-11-07，Task 8，提交 `eb3014f`）：`test_intake_writes_five_things_in_one_transaction`
+      把 `store.transaction` 包一层观察器，断写入时仍 `in_transaction is True`，并逐件读出 p5-v1
+      Mandate、QUEUED Ticket、1 条 TicketInput、1 条 Assignment、`launch:{assignment}:1` effect；
+      `test_intake_failure_rolls_back_everything` 在 `insert_assignment` 注入异常，断五件全无、
+      due effects 空（审计在事务外不回滚，B4 口径）。入口实现全同步；L3 的"事务内禁 await"
+      扫描由既有 `test_no_transaction_body_awaits` 覆盖。
+- [x] **3.7** `RepositoryWorkerExecutor`：launch/recover/deliver 前 revalidate，失败 park 不启动；
       遇 `p4-local-v1` Mandate 直接拒绝外部执行面。验证：A4 时机矩阵 + 拒绝用例。
-- [ ] **3.8** `PolicyToolFilter` 接 P3 `tool_selector` 接缝：拒绝调用有审计。
+      证据（2026-11-07，Task 9，提交 `574d484`）：`_guard` 在 `inner.launch/recover` 前 revalidate
+      （`attempt > 1` 记 `retry`，`deliver` 按 launch 口径）；`test_revalidate_precedes_the_action`
+      参数化 launch/recover/deliver，断审计行先于 inner 调用且拒绝时 inner 计数为 0；
+      `test_retry_attempt_is_audited_as_retry`、`test_p4_local_mandate_is_refused_on_the_external_surface`、
+      `test_expired_mandate_parks_without_starting_the_worker`（BLOCKED Report + 0 启动）、
+      `test_cancel_delegates_without_revalidation` 各就位；本文件 8 passed。
+- [x] **3.8** `PolicyToolFilter` 接 P3 `tool_selector` 接缝：拒绝调用有审计。
       验证：L5 + 幻觉工具名用例。
-- [ ] **3.9** `GitHubClient` 协议 + fake 实现；错误可重试/不可重试/需人工三分类，状态码保留。
+      证据（2026-11-07，Task 5，提交 `0f68c89`）：`PolicyToolFilter.as_tool_selector` 与 `select`
+      结果相同（P3 接缝用例）；`guard_mcp_tool` 先 revalidate（审计 `mcp_call`）再 authorize
+      （审计）才 delegate。`tests/unit/test_policy_tool_filter.py` 8 passed，含
+      `test_hallucinated_mcp_name_never_reaches_the_session`（幻觉名不进会话）、
+      `test_expired_mandate_is_denied_before_the_call`（过期在调用前拒）、
+      `test_guarded_tool_denies_without_calling_the_session`（拒绝时 session 计数 0）。
+- [x] **3.9** `GitHubClient` 协议 + fake 实现；错误可重试/不可重试/需人工三分类，状态码保留。
       验证：F4 分类表驱动测试。
-- [ ] **3.10** comment / create PR / request review 三个 effect handler：执行前 revalidate +
+      证据（2026-11-07，Task 10，提交 `7a6d55b`）：`GitHubClient` 三方法协议 +
+      `FakeGitHubClient`（记录 calls、`fail_next` 注入一次失败、`isinstance` 过 runtime_checkable）；
+      `classify_github_error` 9 档参数化：None/408/429/5xx → retryable，401/403 → needs_human，
+      其余 4xx → non_retryable；每档断分类、`status_code` 原样保留且错误文本里可见。
+      同批加 `PermanentEffectError` 与 dispatcher 判死分支（`test_permanent_effect_error_fails_without_retrying`
+      断 FAILED/attempts=1/不进退避）。
+- [x] **3.10** comment / create PR / request review 三个 effect handler：执行前 revalidate +
       approval 检查；idempotency key = 外部稳定 id + action/resource digest。验证：F3。
-- [ ] **3.11** 恢复不重复写：重启/超时/重复 effect 下 PR、评论、push 各仅一次。
+      证据（2026-11-07，Task 11，提交 `db23c72`）：三个 handler 共用 `_write_effect`——
+      取 Ticket/Mandate（缺失即永久失败）→ `revalidate(when="external_write")` + 审计 →
+      `ApprovalGate.check`（无批准写 BLOCKED Report `approval_pending` 并永久失败）→ 写。
+      幂等键 = `github_effect_key(kind, stable_id, digest)`（`test_effect_key_binds_kind_stable_id_and_digest`）；
+      `test_write_effects_revalidate_and_check_approval` 对三类写参数化，断审计顺序
+      `["revalidate","authorize"]`、client 调用 0、effect FAILED；
+      `test_approved_write_happens_exactly_once` 断批准后恰好 1 次调用且终态不再领取。
+- [x] **3.11** 恢复不重复写：重启/超时/重复 effect 下 PR、评论、push 各仅一次。
       验证：F5 集成用例（fake client 计调用次数）。
-- [ ] **3.12** **M3 出口**：全量门禁 + L6 类型检查（枚举无 merge 成员）+ 账本回填。
+      证据（2026-11-07，Task 12，提交 `010d96c`）：`tests/integration/test_guarded_ticket_recovery.py`
+      3 passed——真 Store + 真裸远端 git + `FakeGitHubClient`：崩溃重放（effect 已 claim 未跑）
+      后 comment/PR 各 1 次、push 1 次（`sa/tk-1`）、PR attempts=1；重复入队不复活终态；
+      500 退避后重试成功且只再调一次（该用例不注入 push，见偏差 8）。局限写进模块 docstring：
+      保证范围是 claim 后、I/O 前；请求已发出后的崩溃没有幂等键可查。
+- [x] **3.12** **M3 出口**：全量门禁 + L6 类型检查（枚举无 merge 成员）+ 账本回填。
+      证据（2026-11-07，Task 13）：出口测试 `test_effect_kind_has_exactly_seven_members_and_no_merge`
+      绿；全量 `pytest -q` = `668 passed, 3 failed, 6 skipped`（3 条为已知 macOS `LC_CTYPE`
+      环境差异，非回归；总覆盖 99.16%）；`mypy` Success 60 files；`ruff check` All checks passed；
+      `ruff format --check` 133 files already formatted；L1 `git diff 234f620..HEAD -- stableagent/core/`
+      0 行；约束 1 `git diff main..HEAD -- stableagent/orchestration/service.py` 0 行。
+      `integrations/` 逐文件：github.py 100%、github_client.py 100%、github_effects.py 94%
+      （miss 85/205/208/312/321）、mcp.py 98%、repository.py 100%；`execution/` 全部 ≥96%。
 
 ### M4：端到端与收口（规格 WP-5.6；ADR-05"测试与证据"）
 
@@ -670,6 +774,13 @@
       归属修正（2026-11-04，Task 9）：M1 交出的是判定与审计的形状——`REVALIDATE_TIMINGS` 六值 + 
       `StaticPolicy.revalidate(when=...)` 对未知时机名报错 + 每判定 1 行审计；"逐个先于动作执行"
       需要动作真实存在，矩阵收口属 M2（worktree 时机）与 M3（launch/recover/retry/external_write/mcp_call 五处）。
+      M3 出口实测（2026-11-07）：M3 归属的五个时机**已全部接线**——`launch`/`recover`/`retry`
+      在 `integrations/repository.py::_guard`（`deliver` 按 launch 口径），`external_write` 在
+      `integrations/github_effects.py::_write_effect`，`mcp_call` 在
+      `control/tool_filter.py::guard_mcp_tool`；三条用例分别断"审计先于 inner/session/客户端动作"。
+      缺的是 M2 归属的 `worktree`：全库 `revalidate(..., when="worktree")` 零调用点，
+      `execution/effects.py::prepare_worktree_handler` 直接 `manager.prepare`。六缺一，
+      **本条不勾**；补 `worktree` 时机的调用点属 M2 范围内的未完成项，不冒充为 M3 已交付。
 - [x] **A5** 默认拒绝集生效：auto merge、任意 shell、全网访问、未列入 MCP server/tool。
       证据（2026-11-04，Task 5）：`test_default_deny_set_covers_the_four_spec_cases` 逐项断言——
       auto merge 恒 `not_granted`；任意 shell（`sh -c curl evil`）与带附加参数的同一命令
@@ -881,19 +992,71 @@
 
 ### E MCP（M3）
 
-- [ ] **E1** fake transport 覆盖 initialize/list/call/JSON-RPC error/超时/进程退出/schema 错误。
-- [ ] **E2** 本地 stdio fixture 验证真实 framing；全程离线。
-- [ ] **E3** 发现 ≠ 授权：非 allowlist 的 server/tool 不进 capability view、调用被拒且不启动。
-- [ ] **E4** MCP 输出走 ToolResult→Evidence→ContextEngine，超长受压缩预算。
+- [x] **E1** fake transport 覆盖 initialize/list/call/JSON-RPC error/超时/进程退出/schema 错误。
+      证据（2026-11-07，Task 2/3，提交 `a35e24b`/`9760eb2`）：`tests/unit/test_mcp_client.py`
+      的 transport + session 段共 25 例——initialize 带 clientInfo/initialized、list 解析、
+      call 映射 content 与 isError、多 text 段拼接；`test_stdio_transport_rejects_jsonrpc_error`
+      与 `test_session_propagates_jsonrpc_error` 断 `McpProtocolError`；
+      `test_stdio_transport_times_out` / `test_session_propagates_timeout_and_process_exit`
+      断 `McpTimeoutError`/`McpProcessExitedError`；`test_session_rejects_bad_tool_schema`（4 档）
+      与 `test_session_rejects_bad_call_schema`（2 档）断 `McpSchemaError`；另有坏帧 2 档与 id 不匹配。
+- [x] **E2** 本地 stdio fixture 验证真实 framing；全程离线。
+      证据（2026-11-07，Task 6，提交 `08c6ac7`）：`tests/integration/test_mcp_stdio.py` 2 passed。
+      `test_real_stdio_framing_end_to_end` 起 `sys.executable tests/fixtures/mcp_echo_server.py`，
+      真换行分帧完成 initialize/tools/list/tools/call；fixture 是本地标准库脚本，无网络、无 Docker。
+- [x] **E3** 发现 ≠ 授权：非 allowlist 的 server/tool 不进 capability view、调用被拒且不启动。
+      证据（2026-11-07，Task 4/5/6，提交 `8b17374`/`0f68c89`/`08c6ac7`）：可见集三条
+      （`test_filter_hides_mcp_tools_outside_the_mandate`、
+      `test_filter_with_empty_mandate_hides_all_mcp_tools`、
+      `test_adapter_only_exposes_the_intersection`）；调用侧
+      `test_guarded_tool_denies_without_calling_the_session` 与
+      `test_hallucinated_mcp_name_never_reaches_the_session` 断 session 计数 0；
+      `test_discovery_is_not_authorization` 用 server 仍能执行 `secret` 反证"可调用 ≠ 已授权"。
+      `adapter.keys()` 覆盖发现全集是 Task 6 抓到的真缺口（偏差 3）。
+- [x] **E4** MCP 输出走 ToolResult→Evidence→ContextEngine，超长受压缩预算。
+      证据（2026-11-07，Task 4，提交 `8b17374`）：
+      `test_adapter_output_flows_through_evidence_and_context_budget` 把 4000 字 MCP 输出经
+      `ToolRegistry.call` 变 `Evidence`，再按 loop 的真实投影（`Message(role="tool")`）喂
+      `ContextEngine.assemble`；断言原文不再整段出现、总量 < 原文 1/10、
+      `count_orphan_tool_calls == 0`。没有假造"MCP → ContextEngine"直连。
 
 ### F GitHub 显式闭环（M3）
 
-- [ ] **F1** 重复显式请求（同稳定 ID）返回同一 Ticket 或明确 duplicate。
-- [ ] **F2** Mandate+Ticket+Input+Assignment+launch effect 同一事务原子创建。
-- [ ] **F3** comment/PR/request-review 三个写 effect 执行前均验证授权与幂等键。
-- [ ] **F4** GitHub 错误三分类（可重试/不可重试/需人工）入 Report，状态码不吞。
-- [ ] **F5** 恢复与重试路径不重复 PR、评论、push（fake client 调用计数断言）。
-- [ ] **F6** merge/auto-merge 在 EffectKind 与授权集合中结构性不存在。
+- [x] **F1** 重复显式请求（同稳定 ID）返回同一 Ticket 或明确 duplicate。
+      证据（2026-11-07，Task 7，提交 `eb3014f`）：`test_duplicate_stable_id_returns_the_same_ticket`
+      断首次 `duplicate=False`、第二次 `duplicate=True` 且 ticket_id 相同、assignment 仍 1 条；
+      查重键是 `Mandate.scope == admission.stable_id` 的只读查询
+      `Store.get_ticket_by_mandate_scope`（入口事务内执行）；
+      `test_external_text_never_changes_the_decision` 断正文改动不改变 admission 结论与 duplicate。
+- [x] **F2** Mandate+Ticket+Input+Assignment+launch effect 同一事务原子创建。
+      证据（2026-11-07，Task 8，提交 `eb3014f`）：`test_intake_writes_five_things_in_one_transaction`
+      与 `test_intake_failure_rolls_back_everything`（细节见 §1 3.6）。五件 = p5-v1 Mandate、
+      QUEUED Ticket、TicketInput、Assignment、`launch:{assignment_id}:1` effect，同一
+      `Store.transaction()`；失败注入后五件全无、due effects 空。
+- [x] **F3** comment/PR/request-review 三个写 effect 执行前均验证授权与幂等键。
+      证据（2026-11-07，Task 11，提交 `db23c72`）：`WRITE_ACTIONS` 三类写参数化——
+      `test_write_effects_revalidate_and_check_approval` 断每类写先落 `external_write`
+      revalidate 审计、再落 authorize deny、client 零调用；`test_approved_write_happens_exactly_once`
+      断批准后每类写恰好 1 次；`test_effect_key_binds_kind_stable_id_and_digest` 钉幂等键三元组；
+      `test_expired_mandate_parks_before_approval_or_write` 断过期 Mandate 连审批都不查、直接 park。
+- [x] **F4** GitHub 错误三分类（可重试/不可重试/需人工）入 Report，状态码不吞。
+      证据（2026-11-07，Task 10/11，提交 `7a6d55b`/`db23c72`）：
+      `test_github_errors_are_classified_and_keep_the_status` 9 档参数化（None/408/429/5xx →
+      retryable；401/403 → needs_human；404/422 → non_retryable），每档断分类、状态码原样保留且
+      文本可见；写 handler 侧 `test_api_errors_report_and_choose_retry_or_permanent` 断 500 →
+      RETRY_WAIT、404 → FAILED，Report `details == {"status_code","category"}`。
+- [x] **F5** 恢复与重试路径不重复 PR、评论、push（fake client 调用计数断言）。
+      证据（2026-11-07，Task 12，提交 `010d96c`）：`tests/integration/test_guarded_ticket_recovery.py`
+      3 passed（细节见 §1 3.11）。崩溃重放用例断
+      `client.calls == ["create_comment","create_pull_request"]`、`pushed == ["sa/tk-1"]`、远端分支存在、
+      两 effect 均 SUCCEEDED 且 PR attempts == 1；重复入队不产生第二次调用；500 退避后只再调一次。
+      **保证范围限于"claim 后、I/O 前"的崩溃窗口**（偏差 8）。
+- [x] **F6** merge/auto-merge 在 EffectKind 与授权集合中结构性不存在。
+      证据（2026-11-07，Task 11/13，提交 `db23c72` + 收口）：`test_effect_kind_has_exactly_seven_members_and_no_merge`
+      用集合相等钉死 7 成员；`test_merge_is_structurally_absent` 断 `merge`/`enable_auto_merge`
+      不在枚举值、`Action.ENABLE_AUTO_MERGE` 不在 `grantable_actions`；M2 既有
+      `test_m2_effect_kinds_close_the_whitelist` 断"值 ∪ 成员名"与三个禁用名不相交；
+      构造期拒绝与 `create_mandate`/`authorize` 两道拒绝用例仍在。
 
 ### G 示例与文档（M4）
 
@@ -2208,9 +2371,10 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 `superpowers:subagent-driven-development`
 > （推荐）或 `superpowers:executing-plans` 逐 Task 执行。Step 用 `- [ ]` 勾选跟踪。
 >
-> **状态：计划已落，未开工。** 对应第 1 节 M3 的 12 个步骤（3.1~3.12），展开为
-> **13 个 Task / 65 个 Step**（3.1 拆成"包骨架"与"transport"两个 Task）。
-> 执行分支 `feat/p5-m3-mcp-github`（自 `main@f41ea35` 切出）。
+> **状态：已执行完（2026-11-07），13 Task / 65 Step 全勾；M3 以 12/12 收口。** 对应第 1 节
+> M3 的 12 个步骤（3.1~3.12），展开为 **13 个 Task / 65 个 Step**（3.1 拆成"包骨架"与
+> "transport"两个 Task）。执行分支 `feat/p5-m3-mcp-github`（自 `main@f41ea35` 切出）。
+> 逐 Task 的提交与用例数见下方"执行结果汇总"；偏差 1~8 是执行期发现并逐条记录的口径变化。
 >
 > **Goal:** 让 Worker 能在 Mandate 授权下调用 stdio MCP 工具，并把显式 GitHub 请求走通
 > "准入 → 同事务建票 → 隔离执行 → 审批后的 comment/PR/review 回写"，全程离线可测。
@@ -2411,6 +2575,28 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
    退避重试用例故意不注入 `push_branch`：若 push 已发生、随后 PR 请求 500，重放会再推一次
    （服务端幂等，但调用计数为 2），那不属于"写只发生一次"的断言范围。
 
+### 执行结果汇总（2026-11-07）
+
+| Task | 提交 | 关键用例（首跑即绿 / 红后转绿） | 偏差 |
+|---|---|---|---|
+| 1 | `1397d4a` | `test_integrations_boundaries.py` 5 passed | — |
+| 2 | `a35e24b` | transport 段 11 passed（超时/退出/坏帧/最小环境） | — |
+| 3 | `9760eb2` | session 段 14 passed（schema 参数化） | — |
+| 4 | `8b17374` | adapter 5 passed（含 E4 预算） | — |
+| 5 | `0f68c89` | `test_policy_tool_filter.py` 8 passed | 1 |
+| 6 | `08c6ac7` | 真 stdio 2 passed | 3 |
+| 7+8 | `eb3014f` | F1 6 + F2 2 passed | 4 |
+| 9 | `574d484` | `test_repository_executor.py` 8 passed | 5 |
+| 10 | `7a6d55b` | 分类 9 + fake 3 + outbox 永久失败 1 passed | 6 |
+| 11 | `db23c72` | 写 handler 12 passed | 7 |
+| 12 | `010d96c` | 恢复 3 passed（一次即绿） | 8 |
+| 13 | 本收口提交 | 7 员枚举 1 passed + 全量门禁 + 本回填 | — |
+
+M3 新增/修订用例合计 **89**：`integrations_boundaries` 5、`mcp_client` 30、`policy_tool_filter` 8、
+`github_integration` 33、`repository_executor` 8、`mcp_stdio` 2、`guarded_ticket_recovery` 3。
+全量门禁读数见 3.12；Task 10 另动了 `test_outbox.py`（+1）与 `test_orchestration_model.py`
+（白名单 4 → 7），Task 13 的出口用例计入 `github_integration` 的 33。
+
 ---
 
 ### Task 1: `integrations/` 包骨架、错误家族与方向锁（步骤 3.1 前半）
@@ -2425,7 +2611,7 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
   `McpSchemaError`/`GitHubApiError`（后者带 `.category`、`.status_code`）。
 - Consumes: 无（最上游新包）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 """integrations 包口径：独立版本、顶层不重导出、稳定错误家族、方向锁最上游。"""
@@ -2506,12 +2692,12 @@ def test_mcp_module_never_imports_control_or_execution() -> None:
     assert not [n for n in _imports_of(mcp) if n.startswith(forbidden)]
 ```
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q --no-cov tests/unit/test_integrations_boundaries.py`
 Expected: FAIL — 收集期 `ModuleNotFoundError: No module named 'stableagent.integrations'`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `__init__.py` 照抄 `execution/__init__.py`：docstring 写明"集成层是最上游，认识 execution/
 control/orchestration/core，反向不许"，只导出版本常量。`errors.py`：
@@ -2553,10 +2739,10 @@ class GitHubApiError(IntegrationsError):
         self.category = category
 ```
 
-- [ ] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_control_boundaries.py` +
+- [x] **Step 4: 跑到绿**：目标文件 + `tests/unit/test_control_boundaries.py` +
   `tests/unit/test_execution_boundaries.py`（新包入 L2 矩阵后仍绿）+ 全量 `pytest -q`；
   `mypy`/`ruff check`/`ruff format --check` 全绿；L1 与约束 1 diff 均 0 行。
-- [ ] **Step 5: 提交**：`git commit -am "feat: open the integrations package with a stable error family"`
+- [x] **Step 5: 提交**：`git commit -am "feat: open the integrations package with a stable error family"`
 
 ### Task 2: `StdioMcpTransport`——参数数组、最小环境、请求 ID、超时、关闭（步骤 3.1）
 
@@ -2571,7 +2757,7 @@ class GitHubApiError(IntegrationsError):
   `StdioMcpTransport(command: Sequence[str], *, env: Mapping[str, str] | None = None,
   cwd: Path | None = None, timeout_s: float = 30.0)`；常量 `MCP_CHILD_LANG = "C.UTF-8"`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 class FakeMcpTransport:
@@ -2679,12 +2865,12 @@ async def test_stdio_transport_child_env_is_minimal(tmp_path):
 默认（`env=None`）只给 `PATH` + `LANG`。默认路径另加一条断言：孩子看到的键集合
 `<= {"PATH", "LANG"} | OS_INJECTED_KEYS`（豁免集合按 Task 13 的平台口径处理）。
 
-- [ ] **Step 2: 跑到红**
+- [x] **Step 2: 跑到红**
 
 Run: `.venv/bin/pytest -q --no-cov tests/unit/test_mcp_client.py`
 Expected: FAIL — `ImportError: cannot import name 'StdioMcpTransport'`。
 
-- [ ] **Step 3: 实现**（要点，不省略关键行）
+- [x] **Step 3: 实现**（要点，不省略关键行）
 
 ```python
 class McpTransport(Protocol):
@@ -2748,8 +2934,8 @@ class StdioMcpTransport:
 超时 `kill()`，最后置 `self._process = None`。`_write` 用 `json.dumps(...) + "\n"` 编码后
 `stdin.write` + `await drain()`。
 
-- [ ] **Step 4: 跑到绿**：目标文件 + 边界矩阵 + 全量；三项静态门禁全绿。
-- [ ] **Step 5: 提交**：`git commit -am "feat: add a stdio mcp transport with minimal child env"`
+- [x] **Step 4: 跑到绿**：目标文件 + 边界矩阵 + 全量；三项静态门禁全绿。
+- [x] **Step 5: 提交**：`git commit -am "feat: add a stdio mcp transport with minimal child env"`
 
 ### Task 3: `McpSession`——initialize / tools/list / tools/call 与 schema 校验（步骤 3.2）
 
@@ -2765,7 +2951,7 @@ class StdioMcpTransport:
   `async list_tools() -> list[McpToolSpec]`、
   `async call_tool(name: str, arguments: dict[str, Any]) -> ToolResult`。
 
-- [ ] **Step 1: 写失败的测试**（六类各一例，全部用 `FakeMcpTransport`）
+- [x] **Step 1: 写失败的测试**（六类各一例，全部用 `FakeMcpTransport`）
 
 ```python
 async def test_session_initialize_sends_client_info_and_initialized_notification():
@@ -2815,15 +3001,15 @@ async def test_session_rejects_bad_schema():
         await McpSession(FakeMcpTransport([{"content": "nope"}])).call_tool("x", {})
 ```
 
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_mcp_client.py`
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/unit/test_mcp_client.py`
   Expected: FAIL — `ImportError: cannot import name 'McpSession'`。
-- [ ] **Step 3: 实现**：`initialize` 发 `protocolVersion="2024-11-05"`、`capabilities={}`、
+- [x] **Step 3: 实现**：`initialize` 发 `protocolVersion="2024-11-05"`、`capabilities={}`、
   `clientInfo`，随后 `notify("notifications/initialized", {})`；`list_tools` 校验 `tools` 是列表、
   每项有非空 `name`（str），`inputSchema` 缺省补 `{"type": "object", "properties": {}}`；
   `call_tool` 校验 `content` 是列表，拼接 `type == "text"` 的 `text`，`isError` 为真时
   `ToolResult(ok=False, error=拼接文本 or "mcp tool failed")`。schema 不符一律 `McpSchemaError`。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: add the mcp session with json-rpc and schema checks"`
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁。
+- [x] **Step 5: 提交**：`git commit -am "feat: add the mcp session with json-rpc and schema checks"`
 
 ### Task 4: `McpToolAdapter`——映射为既有 `Tool`，输出走 Evidence 与压缩预算（步骤 3.3）
 
@@ -2838,7 +3024,7 @@ async def test_session_rejects_bad_schema():
   `McpToolAdapter(session, *, server: str, allowed: frozenset[str])`，方法
   `async tools() -> list[Tool]`、`keys() -> dict[str, str]`（工具名 → allowlist 键）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 async def test_adapter_only_exposes_the_intersection():
@@ -2873,13 +3059,13 @@ async def test_adapter_output_flows_through_evidence_and_context_budget():
 `AgentState` 必填 `run_id`/`agent_name`（`core/state.py:83-84`），装置里写
 `AgentState(run_id="r", agent_name="a")`。
 
-- [ ] **Step 2: 跑到红**：Expected: FAIL — `ImportError: cannot import name 'McpToolAdapter'`。
-- [ ] **Step 3: 实现**：`tools()` 先 `list_tools()`，只保留 `mcp_allowlist_key(server, spec.name)
+- [x] **Step 2: 跑到红**：Expected: FAIL — `ImportError: cannot import name 'McpToolAdapter'`。
+- [x] **Step 3: 实现**：`tools()` 先 `list_tools()`，只保留 `mcp_allowlist_key(server, spec.name)
   in allowed` 的项；用 `type()` 动态造 `Tool` 子类（`name`/`description`/`parameters` 放进
   namespace，`execute` 是闭包 `async def execute(self, arguments): return await
   session.call_tool(spec.name, arguments)`），避免给 `ClassVar` 赋实例值。`keys()` 返回同一张表。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁。
-- [ ] **Step 5: 提交**：`git commit -am "feat: adapt allowlisted mcp tools into the existing tool contract"`
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁。
+- [x] **Step 5: 提交**：`git commit -am "feat: adapt allowlisted mcp tools into the existing tool contract"`
 
 ### Task 5: `PolicyToolFilter` 与 MCP 调用守卫（步骤 3.8，提前到 3.4 之前）
 
@@ -2897,7 +3083,7 @@ async def test_adapter_output_flows_through_evidence_and_context_budget():
   policy: StaticPolicy, audit: AuditWriter, ticket_id: str | None = None,
   assignment_id: str | None = None) -> Tool`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 def test_filter_hides_mcp_tools_outside_the_mandate(tmp_path):
@@ -2946,9 +3132,9 @@ async def test_hallucinated_mcp_name_never_reaches_the_session(tmp_path):
 `_rig` 用 `tests/support.py` 的 `SequenceIds`/`FixedClock` + 真 `Store(tmp_path)`；
 `_CountingTool` 是 `Tool` 子类，`execute` 自增 `calls` 后返回 `ToolResult(ok=True)`。
 
-- [ ] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
+- [x] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
   'stableagent.control.tool_filter'`。
-- [ ] **Step 3: 实现**：`select` 只丢"在 `mcp_keys` 里且键不在 `mandate.allowed_mcp`"的 spec，
+- [x] **Step 3: 实现**：`select` 只丢"在 `mcp_keys` 里且键不在 `mandate.allowed_mcp`"的 spec，
   非 MCP 工具原样放行（P5 的工具授权面只覆盖 MCP 与命令）；`as_tool_selector` 返回
   `self.select`。`guard_mcp_tool` 用 `type()` 造同形 `Tool` 子类，`execute` 顺序固定：
   ① `policy.revalidate(mandate, when="mcp_call")` + `audit.revalidated(...)`；
@@ -2956,9 +3142,9 @@ async def test_hallucinated_mcp_name_never_reaches_the_session(tmp_path):
   tool=tool_name))` + `audit.authorized(...)`；任一不 allowed 即返回
   `ToolResult(ok=False, error=f"{decision.reason}:{server}:{tool_name}")`，**不 delegate**；
   ③ 都通过才 `await tool.execute(arguments)`。
-- [ ] **Step 4: 跑到绿**：目标文件 + control/execution/integrations 三个边界矩阵 + 全量；
+- [x] **Step 4: 跑到绿**：目标文件 + control/execution/integrations 三个边界矩阵 + 全量；
   三项静态门禁；确认 `control/` 新增文件没有 import `execution`/`integrations`。
-- [ ] **Step 5: 提交**：`git commit -am "feat: filter mcp capability views and guard calls with audit"`
+- [x] **Step 5: 提交**：`git commit -am "feat: filter mcp capability views and guard calls with audit"`
 
 ### Task 6: 发现 ≠ 授权 + 真实 stdio framing（步骤 3.4）
 
@@ -2970,7 +3156,7 @@ async def test_hallucinated_mcp_name_never_reaches_the_session(tmp_path):
 - Consumes: Task 2~5 全部。
 - Produces: 无生产代码（本 Task 只补证据；若 E3 暴露缺口，回到 Task 4/5 修并登记）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/fixtures/mcp_echo_server.py：换行分帧的真 stdio server，只用标准库，不联网。
@@ -3005,15 +3191,15 @@ async def test_discovery_is_not_authorization():
         await transport.close()
 ```
 
-- [ ] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/integration/test_mcp_stdio.py`
+- [x] **Step 2: 跑到红**：`.venv/bin/pytest -q --no-cov tests/integration/test_mcp_stdio.py`
   Expected: FAIL — fixture 文件不存在（`FileNotFoundError`）或断言红，按实测记 Actual。
   Actual（2026-11-07）：2 failed，均为
   `McpProcessExitedError: [integrations.mcp_process_exited] MCP server 退出，rc=2`——
   `sys.executable` 能起来，是 Python 找不到脚本而以 rc=2 退出，transport 把空 stdout 读成进程退出。
-- [ ] **Step 3: 实现** fixture（标准库 `json`/`sys`，逐行读、逐行写、`flush()`；
+- [x] **Step 3: 实现** fixture（标准库 `json`/`sys`，逐行读、逐行写、`flush()`；
   `tools/call` 对 `secret` 也照回显——授权拒绝必须发生在**我们这一侧**，不能靠 server 自觉）。
-- [ ] **Step 4: 跑到绿**：目标两文件 + 全量（确认无公网、无 Docker）+ 三项静态门禁。
-- [ ] **Step 5: 提交**：`git commit -am "test: prove mcp discovery is not authorization over real stdio"`
+- [x] **Step 4: 跑到绿**：目标两文件 + 全量（确认无公网、无 Docker）+ 三项静态门禁。
+- [x] **Step 5: 提交**：`git commit -am "test: prove mcp discovery is not authorization over real stdio"`
 
 ### Task 7: `ExplicitGitHubRequest` 与准入四道门（步骤 3.5）
 
@@ -3030,7 +3216,7 @@ async def test_discovery_is_not_authorization():
   `duplicate: bool`）；`Store.get_ticket_by_mandate_scope(scope: str, *, origin_kind: str)
   -> Ticket | None`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 @pytest.mark.parametrize(
@@ -3072,9 +3258,9 @@ def test_external_text_never_changes_the_decision(tmp_path):
     assert b.duplicate is True  # 判定只看 stable_id，不看正文
 ```
 
-- [ ] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
+- [x] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
   'stableagent.integrations.github'`。
-- [ ] **Step 3: 实现**：`to_explicit_request()` 只搬 5 个判定字段（`url`/`received_at` 不进
+- [x] **Step 3: 实现**：`to_explicit_request()` 只搬 5 个判定字段（`url`/`received_at` 不进
   `ExplicitRequest`，避免外部文本扩权面变宽）；`GitHubIntake.submit` 先
   `policy.admit_explicit` + `audit.admitted`，拒绝即返回；查重方法在 store 侧：
 
@@ -3093,8 +3279,8 @@ def get_ticket_by_mandate_scope(self, scope: str, *, origin_kind: str) -> Ticket
 duplicate 用例与 Task 8 的事务实现**同 Task 内落地**：把 Task 8 的建票代码一并写进本步
 （两 Task 共享一个提交边界时，按实际拆成两次提交，证据分别登记）。
 
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁 + 约束 1（`service.py` 0 行）。
-- [ ] **Step 5: 提交**：`git commit -am "feat: admit explicit github requests through four ordered gates"`
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁 + 约束 1（`service.py` 0 行）。
+- [x] **Step 5: 提交**：`git commit -am "feat: admit explicit github requests through four ordered gates"`
 
 ### Task 8: `control` 入口事务——五件同一事务原子写（步骤 3.6）
 
@@ -3108,7 +3294,7 @@ duplicate 用例与 Task 8 的事务实现**同 Task 内落地**：把 Task 8 �
   allowed_mcp=(), network_profile=None, base_ref=None, requires_approval=False)
   -> RequestOutcome`（建票后 `ticket_id` 非空）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 def test_intake_writes_five_things_in_one_transaction(tmp_path, monkeypatch):
@@ -3150,17 +3336,17 @@ def test_intake_failure_rolls_back_everything(tmp_path, monkeypatch):
     assert store.list_audit(kind="admit")  # 审计在事务外，已落的一行不回滚（B4 口径）
 ```
 
-- [ ] **Step 2: 跑到红**：Expected: FAIL — `outcome.ticket_id is None`。
-- [ ] **Step 3: 实现**：`with store.transaction():` 内依次
+- [x] **Step 2: 跑到红**：Expected: FAIL — `outcome.ticket_id is None`。
+- [x] **Step 3: 实现**：`with store.transaction():` 内依次
   `get_ticket_by_mandate_scope` 查重 → `policy.create_mandate(admission, ...)` →
   `insert_mandate` → `insert_ticket`（`title=request.text[:40]` 只用于显示，路径命名仍由
   `execution.naming` 从 Ticket 派生）→ `insert_input`（`sequence=1, kind="task",
   payload=request.text`）→ `insert_assignment`（`attempt=1`）→ `enqueue_effect`
   （`LAUNCH_ASSIGNMENT`，key `f"launch:{assignment.id}:1"`，payload 带
   `assignment_id`/`ticket_id`）。体内**零 `await`**（L3 扫描会自动覆盖新文件）。
-- [ ] **Step 4: 跑到绿**：目标文件 + `test_execution_boundaries.py` 的 await 扫描 + 全量 +
+- [x] **Step 4: 跑到绿**：目标文件 + `test_execution_boundaries.py` 的 await 扫描 + 全量 +
   三项静态门禁 + 约束 1。
-- [ ] **Step 5: 提交**：`git commit -am "feat: create mandate ticket input assignment and launch atomically"`
+- [x] **Step 5: 提交**：`git commit -am "feat: create mandate ticket input assignment and launch atomically"`
 
 ### Task 9: `RepositoryWorkerExecutor`——执行面前的 revalidate 与 park（步骤 3.7）
 
@@ -3176,7 +3362,7 @@ def test_intake_failure_rolls_back_everything(tmp_path, monkeypatch):
 - Produces: `RepositoryWorkerExecutor(inner: WorkerExecutor, *, store: Store,
   policy: StaticPolicy, audit: AuditWriter)`，实现四方法。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 class _Inner:
@@ -3237,16 +3423,16 @@ async def test_cancel_delegates_without_revalidation(tmp_path):
     ...  # 断言 inner.cancelled == [id] 且无新增 revalidate 行
 ```
 
-- [ ] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
+- [x] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
   'stableagent.integrations.repository'`。
-- [ ] **Step 3: 实现**：私有 `_guard(ticket, assignment, when) -> Mandate`：读 mandate，
+- [x] **Step 3: 实现**：私有 `_guard(ticket, assignment, when) -> Mandate`：读 mandate，
   `policy.revalidate(mandate, when=when)` + `audit.revalidated(...)`；不 allowed 则
   `store.insert_report(Report(kind=BLOCKED, summary=f"worker parked: {decision.reason}",
   details={"when": when, "policy_version": decision.policy_version}))` 并抛
   `PermanentEffectError`。`launch` 的 when 按 `attempt > 1` 选 `retry`/`launch`；
   `recover`→`recover`；`deliver`→`launch`；`cancel` 直接委托。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁 + L1/约束 1。
-- [ ] **Step 5: 提交**：`git commit -am "feat: revalidate mandates before launching recovering or delivering"`
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁 + L1/约束 1。
+- [x] **Step 5: 提交**：`git commit -am "feat: revalidate mandates before launching recovering or delivering"`
 
 ### Task 10: `GitHubClient` 协议、fake 与错误三分类（步骤 3.9）
 
@@ -3265,7 +3451,7 @@ async def test_cancel_delegates_without_revalidation(tmp_path):
   -> GitHubApiError`；`PermanentEffectError(OrchestrationError)`
   （code `orchestration.effect_permanent`）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 @pytest.mark.parametrize(("status", "category"), [
@@ -3296,10 +3482,10 @@ async def test_permanent_effect_error_fails_without_retrying(tmp_path):
     assert "404" in (settled.last_error or "")
 ```
 
-- [ ] **Step 2: 跑到红**：Expected: FAIL — `ImportError: cannot import name
+- [x] **Step 2: 跑到红**：Expected: FAIL — `ImportError: cannot import name
   'PermanentEffectError'`（以及 `EffectKind.GITHUB_COMMENT` 不存在；该枚举成员在本步一并加，
   三个成员一次落地：`GITHUB_COMMENT`/`GITHUB_PULL_REQUEST`/`GITHUB_REQUEST_REVIEW`）。
-- [ ] **Step 3: 实现**：分类表如上（`None` 视为网络故障 → retryable）；dispatcher 在
+- [x] **Step 3: 实现**：分类表如上（`None` 视为网络故障 → retryable）；dispatcher 在
   `except DeferrableEffectError` 之后、`except Exception` 之前加：
 
 ```python
@@ -3311,9 +3497,9 @@ async def test_permanent_effect_error_fails_without_retrying(tmp_path):
 `_fail_permanently` 照 `_fail_or_retry` 但强制 `EffectAction.FAIL`、`due_at` 不变、
 写 `last_error`、触发 `on_exhausted`。`FakeGitHubClient` 记录 `(操作名, kwargs)`，
 `fail_next` 抛一次后清空。
-- [ ] **Step 4: 跑到绿**：目标文件 + **`tests/unit/test_outbox.py` 全量零回归** + 全量 +
+- [x] **Step 4: 跑到绿**：目标文件 + **`tests/unit/test_outbox.py` 全量零回归** + 全量 +
   三项静态门禁；`git diff` 确认 orchestration 只动了点名的三文件。
-- [ ] **Step 5: 提交**：`git commit -am "feat: classify github errors and fail permanent effects without retry"`
+- [x] **Step 5: 提交**：`git commit -am "feat: classify github errors and fail permanent effects without retry"`
 
 ### Task 11: 三个写 effect handler——revalidate + 审批 + 幂等键（步骤 3.10）
 
@@ -3329,7 +3515,7 @@ async def test_permanent_effect_error_fails_without_retrying(tmp_path):
   `github_pull_request_handler(..., push_branch: Callable[[str], Awaitable[None]] | None = None)`、
   `github_request_review_handler(...)`，三者均返回 `EffectHandler`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 @pytest.mark.parametrize(("kind", "action", "client_method"), [
@@ -3364,9 +3550,9 @@ def test_merge_is_structurally_absent():
         repository="owner/repo", default_validity_ms=1000).grantable_actions
 ```
 
-- [ ] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
+- [x] **Step 2: 跑到红**：Expected: FAIL — `ModuleNotFoundError: No module named
   'stableagent.integrations.github_effects'`。
-- [ ] **Step 3: 实现**：三个 handler 共用一个私有 `_write_effect(...)` 工厂，顺序固定：
+- [x] **Step 3: 实现**：三个 handler 共用一个私有 `_write_effect(...)` 工厂，顺序固定：
   ① 读 Ticket/Mandate；② `policy.revalidate(mandate, when="external_write")` + 审计；
   ③ `gate.check(mandate, action, resource, ticket_id=ticket.id)`（它自己写 authorize 审计行）；
   ④ 不 allowed → `Report(BLOCKED, details={"reason": decision.reason, "status_code": ...})`
@@ -3375,8 +3561,8 @@ def test_merge_is_structurally_absent():
   "category": e.category})`，retryable 抛原异常走退避，其余抛 `PermanentEffectError`。
   payload 形状钉在 docstring：`{ticket_id, assignment_id, stable_id, repository, url, body, ...}`，
   **不含凭据**（L7）。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁 + L6 枚举断言。
-- [ ] **Step 5: 提交**：`git commit -am "feat: write github effects behind revalidation and approval"`
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁 + L6 枚举断言。
+- [x] **Step 5: 提交**：`git commit -am "feat: write github effects behind revalidation and approval"`
 
 ### Task 12: 恢复不重复写——PR / 评论 / push 各仅一次（步骤 3.11）
 
@@ -3388,7 +3574,7 @@ def test_merge_is_structurally_absent():
 - Consumes: Task 7~11 全部。
 - Produces: 无生产代码（暴露缺口则回修并登记）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 async def test_replay_after_crash_writes_pr_comment_and_push_once(tmp_path):
@@ -3412,11 +3598,11 @@ async def test_retryable_failure_backs_off_then_succeeds_once(tmp_path):
     ...
 ```
 
-- [ ] **Step 2: 跑到红**：Expected: 若幂等已成立则一次即绿（按 M2 Task 12 口径，"若无共享态则
+- [x] **Step 2: 跑到红**：Expected: 若幂等已成立则一次即绿（按 M2 Task 12 口径，"若无共享态则
   记为一次即绿"）；若红，红因必须写进证据，不改断言迁就实现。
-- [ ] **Step 3: 实现**：按需修 handler/键构造；每处改动登记理由。
-- [ ] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁。
-- [ ] **Step 5: 提交**：`git commit -am "test: prove recovery never duplicates pr comment or push"`
+- [x] **Step 3: 实现**：按需修 handler/键构造；每处改动登记理由。
+- [x] **Step 4: 跑到绿**：目标文件 + 全量 + 三项静态门禁。
+- [x] **Step 5: 提交**：`git commit -am "test: prove recovery never duplicates pr comment or push"`
 
 ### Task 13: M3 出口——全量门禁、L6 类型检查与账本回填（步骤 3.12）
 
@@ -3428,7 +3614,7 @@ async def test_retryable_failure_backs_off_then_succeeds_once(tmp_path):
 - Consumes: Task 1~12 的全部证据。
 - Produces: M3 收口记录（不是 P5 收口——H2/H3/文档翻转仍属 M4）。
 
-- [ ] **Step 1: 写"出口断言"测试**（L6 的类型半边，若 Task 11 已落则确认其在绿）
+- [x] **Step 1: 写"出口断言"测试**（L6 的类型半边，若 Task 11 已落则确认其在绿）
 
 ```python
 def test_effect_kind_has_exactly_seven_members_and_no_merge():
@@ -3438,9 +3624,9 @@ def test_effect_kind_has_exactly_seven_members_and_no_merge():
     }
 ```
 
-- [ ] **Step 2: 跑到红/绿**：`.venv/bin/pytest -q --no-cov tests/unit/test_github_integration.py`
+- [x] **Step 2: 跑到红/绿**：`.venv/bin/pytest -q --no-cov tests/unit/test_github_integration.py`
   Expected: PASS（若红说明前面某 Task 漏了枚举口径，回修）。
-- [ ] **Step 3: 跑全量门禁并落盘**
+- [x] **Step 3: 跑全量门禁并落盘**
 
 ```bash
 env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p5-m3-pytest.txt 2>&1
@@ -3453,10 +3639,10 @@ git diff main..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p5-m3-
 
 读回文件取数字（不靠工具回显）；`execution/` 与 `integrations/` 逐文件覆盖率 ≥90%；
 已知环境差异（macOS `LC_CTYPE`）按开工前基线口径记录，不算回归。
-- [ ] **Step 4: 回填账本**：逐条勾选并追加实测输出；更新头汇总行（预期
+- [x] **Step 4: 回填账本**：逐条勾选并追加实测输出；更新头汇总行（预期
   `DoD 28/46、里程碑 32/40（M1 9/9、M2 11/12、M3 12/12）`，以实际勾选为准）；
   A4 只勾"时机接线已齐"的那一半，L1~L8 仍按 P4 口径等 M4 全量证明。
-- [ ] **Step 5: 提交**：`git commit -am "docs: close m3 with the offline gate evidence"`
+- [x] **Step 5: 提交**：`git commit -am "docs: close m3 with the offline gate evidence"`
 
 ### 自检（writing-plans Self-Review）
 
