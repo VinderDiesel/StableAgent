@@ -13,9 +13,10 @@ import pytest
 from stableagent.integrations.errors import (
     McpProcessExitedError,
     McpProtocolError,
+    McpSchemaError,
     McpTimeoutError,
 )
-from stableagent.integrations.mcp import StdioMcpTransport
+from stableagent.integrations.mcp import McpSession, StdioMcpTransport
 
 
 class FakeMcpTransport:
@@ -191,3 +192,100 @@ async def test_stdio_transport_rejects_malformed_replies(
             await transport.request("initialize", {})
     finally:
         await transport.close()
+
+
+# ---------------------------------------------------------------- Task 3：McpSession（E1）
+
+
+async def test_session_initialize_sends_client_info_and_initialized_notification() -> None:
+    transport = FakeMcpTransport([{"protocolVersion": "2024-11-05", "capabilities": {}}])
+    session = McpSession(transport)
+    result = await session.initialize()
+    assert result["protocolVersion"] == "2024-11-05"
+    assert transport.calls[0][0] == "initialize"
+    assert transport.calls[0][1]["clientInfo"]["name"] == "stableagent"
+    assert transport.calls[1] == ("notifications/initialized", {})
+
+
+async def test_session_list_tools_parses_specs() -> None:
+    transport = FakeMcpTransport(
+        [{"tools": [{"name": "read_file", "description": "d", "inputSchema": {"type": "object"}}]}]
+    )
+    specs = await McpSession(transport).list_tools()
+    assert specs[0].name == "read_file"
+    assert specs[0].description == "d"
+    assert specs[0].input_schema == {"type": "object"}
+    assert transport.calls[-1][0] == "tools/list"
+
+
+async def test_session_list_tools_defaults_missing_schema() -> None:
+    transport = FakeMcpTransport([{"tools": [{"name": "echo"}]}])
+    specs = await McpSession(transport).list_tools()
+    assert specs[0].input_schema == {"type": "object", "properties": {}}
+
+
+async def test_session_call_tool_maps_content_and_is_error() -> None:
+    transport = FakeMcpTransport([{"content": [{"type": "text", "text": "hello"}]}])
+    result = await McpSession(transport).call_tool("read_file", {"path": "a"})
+    assert result.ok is True and result.output == "hello"
+    assert transport.calls[-1] == (
+        "tools/call",
+        {"name": "read_file", "arguments": {"path": "a"}},
+    )
+    failed = FakeMcpTransport([{"content": [{"type": "text", "text": "boom"}], "isError": True}])
+    bad = await McpSession(failed).call_tool("read_file", {})
+    assert bad.ok is False and bad.error == "boom"
+
+
+async def test_session_call_tool_joins_multiple_text_parts() -> None:
+    transport = FakeMcpTransport(
+        [
+            {
+                "content": [
+                    {"type": "text", "text": "a"},
+                    {"type": "image", "data": "x"},
+                    {"type": "text", "text": "b"},
+                ]
+            }
+        ]
+    )
+    result = await McpSession(transport).call_tool("echo", {})
+    assert result.output == "a\nb"
+
+
+async def test_session_propagates_jsonrpc_error() -> None:
+    transport = FakeMcpTransport(fail=McpProtocolError("JSON-RPC error: -32601"))
+    with pytest.raises(McpProtocolError):
+        await McpSession(transport).list_tools()
+
+
+async def test_session_propagates_timeout_and_process_exit() -> None:
+    for error in (McpTimeoutError("tools/list", 1.0), McpProcessExitedError(1)):
+        with pytest.raises(type(error)):
+            await McpSession(FakeMcpTransport(fail=error)).list_tools()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tools": "nope"},
+        {"tools": [{"description": "缺 name"}]},
+        {"tools": [{"name": ""}]},
+        {"tools": [{"name": "x", "inputSchema": "nope"}]},
+    ],
+)
+async def test_session_rejects_bad_tool_schema(payload: dict) -> None:
+    with pytest.raises(McpSchemaError):
+        await McpSession(FakeMcpTransport([payload])).list_tools()
+
+
+@pytest.mark.parametrize("payload", [{"content": "nope"}, {}])
+async def test_session_rejects_bad_call_schema(payload: dict) -> None:
+    with pytest.raises(McpSchemaError):
+        await McpSession(FakeMcpTransport([payload])).call_tool("x", {})
+
+
+async def test_session_is_error_without_text_still_has_a_readable_error() -> None:
+    transport = FakeMcpTransport([{"content": [], "isError": True}])
+    result = await McpSession(transport).call_tool("x", {})
+    assert result.ok is False and result.error

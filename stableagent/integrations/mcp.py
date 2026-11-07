@@ -14,14 +14,20 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from pydantic import BaseModel, Field
+
 from stableagent.integrations.errors import (
     McpProcessExitedError,
     McpProtocolError,
+    McpSchemaError,
     McpTimeoutError,
 )
+from stableagent.tools.registry import ToolResult
 
 MCP_CHILD_LANG = "C.UTF-8"
 _CLOSE_TIMEOUT_S = 5.0
+MCP_PROTOCOL_VERSION = "2024-11-05"
+_DEFAULT_INPUT_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 
 
 class McpTransport(Protocol):
@@ -121,3 +127,75 @@ class StdioMcpTransport:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
+
+
+class McpToolSpec(BaseModel):
+    """`tools/list` 的一项：发现结果只进诊断与授权交集，不直接进 capability view。"""
+
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=lambda: dict(_DEFAULT_INPUT_SCHEMA))
+
+
+class McpSession:
+    """initialize / tools/list / tools/call 三个方法；信封与 id 校验归 transport。"""
+
+    def __init__(
+        self,
+        transport: McpTransport,
+        *,
+        client_name: str = "stableagent",
+        client_version: str = "0.1.0",
+    ) -> None:
+        self._transport = transport
+        self._client_name = client_name
+        self._client_version = client_version
+
+    async def initialize(self) -> dict[str, Any]:
+        result = await self._transport.request(
+            "initialize",
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": self._client_name, "version": self._client_version},
+            },
+        )
+        await self._transport.notify("notifications/initialized", {})
+        return result
+
+    async def list_tools(self) -> list[McpToolSpec]:
+        result = await self._transport.request("tools/list", {})
+        tools = result.get("tools")
+        if not isinstance(tools, list):
+            raise McpSchemaError("tools/list", "tools 不是数组")
+        specs = []
+        for item in tools:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise McpSchemaError("tools/list", "工具项缺少字符串 name")
+            if not item["name"]:
+                raise McpSchemaError("tools/list", "工具 name 为空")
+            schema = item.get("inputSchema", _DEFAULT_INPUT_SCHEMA)
+            if not isinstance(schema, dict):
+                raise McpSchemaError("tools/list", "inputSchema 不是对象")
+            specs.append(
+                McpToolSpec(
+                    name=item["name"],
+                    description=str(item.get("description", "")),
+                    input_schema=schema,
+                )
+            )
+        return specs
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        result = await self._transport.request("tools/call", {"name": name, "arguments": arguments})
+        content = result.get("content")
+        if not isinstance(content, list):
+            raise McpSchemaError("tools/call", "content 不是数组")
+        text = "\n".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and "text" in part
+        )
+        if result.get("isError"):
+            return ToolResult(ok=False, error=text or "mcp tool failed without an error message")
+        return ToolResult(ok=True, output=text)
