@@ -365,7 +365,7 @@ enum members, new config sections).
 | P2 | Checkpoint & recovery: 3 backends, self-healing, snapshot versioning | ✅ done — 34/34, CI matrix green on 3.10 & 3.12 |
 | P3 | Worker context runtime: compression, capability view, budget, evidence | ✅ done — 52/52, CI matrix green on 3.10 & 3.12 (run 41384598912) |
 | P4 | Ticket orchestration: Ticket, Assignment, Scheduler, DAG, Durable Outbox | ✅ done — 60/60, 30/30 milestones, CI matrix green on 3.10 & 3.12 (run 41596839282) |
-| P5 | Guarded execution and repository integration | 🟡 active — M1–M3 done; M4 4.1–4.6 local (DoD 32/46, milestones 38/40); push + remote CI pending |
+| P5 | Guarded execution and repository integration | 🟡 active — M1–M3 done; M4 4.1–4.6 + local exit done (DoD 45/46, milestones 38/40); push + remote CI pending |
 | P6 | Single-repository Super-Agent Beta | ⏳ |
 | P7 | Production hardening and ecosystem | ⏳ |
 

@@ -11,10 +11,11 @@
   `stableagent/integrations/`：GitHub 显式请求入口（五件同事务原子写）、`RepositoryWorkerExecutor`
   六时机复检、三个 GitHub 写 effect handler、GitHub 错误三分类、MCP stdio transport/session/
   tool adapter 与 `mcp_call` 调用守卫
-- M3 分支已本地快进 `main`（`f41ea35..76b8d95`，未推送）；M4 的 4.1~4.6 于 2026-11-07 本地收口：
-  `examples/05_guarded_github_task.py` 的 run/reject 双 phase、五类结构化拒绝、CI 心脏闸门
-  18→25 文件、Python 3.10/3.11/3.12 等价矩阵、ADR-05 实测证据与七条安全声明、README/Roadmap/
-  文档索引与规格退出清单同步
+- M3 分支已本地快进 `main`（`f41ea35..76b8d95`，未推送）；M4 的 4.1~4.6 与 Task 10 本地出口于
+  2026-11-07 本地收口（DoD 45/46、里程碑 38/40）：`examples/05_guarded_github_task.py` 的
+  run/reject 双 phase、五类结构化拒绝、CI 心脏闸门 18→25 文件、Python 3.10/3.11/3.12 等价矩阵、
+  ADR-05 实测证据与七条安全声明、README/Roadmap/文档索引与规格退出清单同步；L1~L8、A4 与 B2
+  的出口复跑一并回填
 - 测试：全仓 `677 passed, 6 skipped, 0 failed`，覆盖率 99.04%；25 个心脏文件逐个 ≥90%
   （最低 `core/loop.py` 96.8%）；三套解释器（3.10.20 / 3.11.16 / 3.12.14）用例总数与 skip 集一致
 - 状态口径：**未推送**，`origin/main` 仍为 `f41ea35`；H3 与 4.7 的远端 CI 3.10/3.12 双绿待

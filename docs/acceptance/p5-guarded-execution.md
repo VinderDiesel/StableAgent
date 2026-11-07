@@ -6,8 +6,10 @@
 > 执行从任务级计划（第 5/6/7 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口，M2 已于
 > 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾），
 > **M3 已于 2026-11-07 以 12/12 收口**（第 7 节，13 Task / 65 Step；3.12 出口执行完），
-> **M4 的 4.1~4.6 已于 2026-11-07 本地执行完**（第 8 节 Task 1~9；4.7 的推送/远端 CI 待维护者
-> 授权），当前 **DoD 32/46、里程碑步骤 38/40（M1 9/9、M2 11/12、M3 12/12、M4 6/7）**。
+> **M4 的 4.1~4.6 已于 2026-11-07 本地执行完**（第 8 节 Task 1~9），**Task 10 的本地出口已于
+> 同日跑完**（H1/H2/H4、L1~L8、A4/B2 全部回填），当前 **DoD 45/46、里程碑步骤 38/40
+> （M1 9/9、M2 11/12、M3 12/12、M4 6/7）**；唯一未勾的 DoD 是 H3，4.7 的推送/远端 CI
+> 待维护者授权。
 > M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落并已执行（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution` 已于 2026-11-06 经维护者指示快进 `main` 并推送
@@ -15,14 +17,17 @@
 > （`quality (3.10)` 与 `quality (3.12)` 两个 job 全绿；矩阵里没有 3.11——3.11 是本地解释器，
 > 等价矩阵另见步骤 4.4）。M3 执行分支 `feat/p5-m3-mcp-github`（自 `main@f41ea35` 切出）含
 > 11 笔实现提交（Task 7/8 共用一笔），外加计划落盘与收口提交；12 个里程碑步骤与
-> E1~E4/F1~F6 全部有实测证据。**A4/L1~L8 的实测回填与 H1/H2/H4 留在 4.7 出口（Task 10）**：
-> `worktree` revalidate 时机已在 Task 1 接到生产代码，L1~L8 的逐条证据在出口统一复跑后勾选。
+> E1~E4/F1~F6 全部有实测证据。**A4/L1~L8 与 H1/H2/H4 已在 Task 10 本地出口回填**：
+> `worktree` revalidate 时机由 Task 1 接到生产代码，L5/A4 因此从 5/6 补到 6/6。本地出口读数
+> （2026-11-07，`env -u NO_PROXY -u no_proxy`）：`677 passed, 6 skipped, 0 failed`、全库覆盖
+> 99.04%、`mypy` 60 files、`ruff check` 通过、`ruff format --check` 135 files、25 个心脏文件
+> 逐个 ≥96.8%、L1 与约束 1 均 0 行。
 > 这不等于 P5 收口：H3 与 4.7 的推送/远端 CI 仍待维护者授权，文档状态只能写"本地收口、
 > 待远端 CI"。合并（2026-11-07，维护者选择本地快进）：`git merge --ff-only
 > feat/p5-m3-mcp-github`（`f41ea35..76b8d95`），**未推送**；`origin/main` 仍是 `f41ea35`，
-> 远端 CI 与推送属 M4 步骤 4.7。合并结果复跑门禁与分支出口一致：`668 passed, 3 failed,
-> 6 skipped`（三条仍是 macOS `LC_CTYPE` 已知环境差异）、覆盖 99.16%、`mypy` 60 files、
-> `ruff check`/`ruff format --check` 通过、L1 与约束 1 均 0 行。
+> 远端 CI 与推送属 M4 步骤 4.7。合并结果复跑门禁与分支出口一致的历史读数：`668 passed,
+> 3 failed, 6 skipped`（三条是 macOS `LC_CTYPE` 已知环境差异，已由 M4 Task 3 的测试口径修正；
+> 出口读数见上）。
 >
 > 使用方式（沿用 P4 账本约定）：本文件既是 P5 的实施计划（第 1 节里程碑步骤），也是 P5 的
 > 验收账本（第 0、2 节）。每个可勾选事项写明来源、验证方法或命令、证据占位；全部勾选且第 3 节
@@ -34,10 +39,14 @@
 
 ## 0. 心脏边界（L1~L8：违反任意一条即 P5 不收口）
 
-- [ ] **L1 Core 零 diff**：`git diff <P4 收口提交 234f620>..HEAD -- stableagent/core/` 恒为
+- [x] **L1 Core 零 diff**：`git diff <P4 收口提交 234f620>..HEAD -- stableagent/core/` 恒为
       0 行（P4 已用掉唯一 Core 扩展；P5 不再申请）。验证：出口命令 + CI。
       来源：ADR-05 约束 2。
-- [ ] **L2 依赖方向**：`core/context/tools/orchestration` 四包无任何对
+      出口实测（2026-11-07，Task 10）：`git diff 234f620..HEAD --stat -- stableagent/core/`
+      输出 0 行（`/tmp/p5-m4-l1.txt` 为空）；同一提交区间的
+      `stableagent/orchestration/service.py`（约束 1）也 0 行（`/tmp/p5-m4-c1.txt` 为空）。
+      全量 677 条里 P0~P4 的 Core 用例全部通过，无回归。
+- [x] **L2 依赖方向**：`core/context/tools/orchestration` 四包无任何对
       `control/execution/integrations` 的 import；方向只能是
       integrations → execution → control → orchestration → core。
       验证：`test_orchestration_boundaries.py` AST 矩阵扩展。来源：ADR-05 决策 1。
@@ -51,7 +60,11 @@
       M1 出口复核（2026-11-04，Task 9）：新旧矩阵同跑 `19 passed`；grep 复核 `stableagent/` 内 `stableagent.(control|execution|integrations)`
       引用共 8 处且全部落在 `control/` 包内部自引用，五旧包 0 处。L2 事实已全绿，但按 P4 口径 L1~L8 要等全部里程碑
       完整证明后才勾，此处只记用例名与输出。
-- [ ] **L3 事务不变式（含新表）**：`Store.transaction()` 内禁止 `await`；授权判定、审批状态、
+      出口复核（2026-11-07，Task 10）：`tests/unit/test_control_boundaries.py` 与
+      `tests/unit/test_execution_boundaries.py` 均在 677 条全量里通过；M4 新增的唯一生产代码
+      （`integrations/repository.py` 的 worktree 守卫、`control/approval.py` 的 denied 转移）
+      方向仍是 integrations → execution/control → orchestration，没有反向 import，故勾选。
+- [x] **L3 事务不变式（含新表）**：`Store.transaction()` 内禁止 `await`；授权判定、审批状态、
       Mandate+Ticket+effect 的原子写入全部在同步段完成，外部 I/O 在提交后。
       验证：源码扫描测试 + 崩溃注入用例。来源：ADR-04 决策 3、ADR-05 决策 3。
       进度（2026-11-04，Task 2 迁移半边）：`test_migration_runs_inside_transaction` 钉死 `_migrate`
@@ -77,7 +90,11 @@
       M2 只新增 `execution/effects.py` 一处对 `Store` 的**读**（`get_ticket`），没新增任何写入；
       M3 的 `control` 入口事务（步骤 3.6）才是那句话的完整对象。崩溃注入用例（L3 验证栏的后一半）
       同属 M3。
-- [ ] **L4 外部文本不扩权**：Issue/prompt/工具输出/MCP 返回中的任何文本不能创建或扩大
+      出口复核（2026-11-07，Task 10）：M3 的入口事务与 M4 Task 2 新增的
+      `ApprovalService.decide` 事务都只含同步库写（无 `await`），`test_no_transaction_body_awaits`
+      在 677 条全量里通过；崩溃回滚面由 `test_guarded_cancel_rolls_back_all_three_on_error`
+      与 outbox 的非嵌套断言共同覆盖，故勾选。
+- [x] **L4 外部文本不扩权**：Issue/prompt/工具输出/MCP 返回中的任何文本不能创建或扩大
       Mandate；只有 `control.policy` 能构造 `p5-v1` Mandate。
       验证：行为测试（把指令文本放进请求正文，断言授权集不变）+ 构造入口扫描。
       来源：规格 2.1 规则、ADR-05 决策 2。
@@ -91,7 +108,11 @@
       `test_p5_v1_mandate_construction_is_confined_to_control`（三处静态钉版形态各一道 AST 断言，四份越界探针实测能红）并绿，
       A2 随之勾选。L4 本身不提前勾：M1 只有 Issue 正文（`ExplicitRequest.text`）这一类外部文本有形状，prompt / 工具输出 /
       MCP 返回三类要等 M2/M3 接线才有可注入的入口。
-- [ ] **L5 先判定后执行**：六个 revalidate 时机（launch/recover/retry/worktree/
+      出口复核（2026-11-07，Task 10）：M3 接线的三类入口都只把外部文本放进
+      `Ticket.task`/`TicketInput.payload`/tool result（`ExplicitGitHubRequest` 七字段，
+      effect payload 不含正文），授权仍只由 `control.policy` 产生；构造入口扫描在 677 条
+      全量里通过，故勾选。
+- [x] **L5 先判定后执行**：六个 revalidate 时机（launch/recover/retry/worktree/
       push+PR+comment/MCP 调用）逐一有审计行；需审批的动作不得先执行后补记录。
       来源：规格 2.1/2.2、ADR-05 决策 4。
       进度（2026-11-04，Task 6 审计形状半边）：`revalidate` 判定已有对应审计行，行内
@@ -114,7 +135,13 @@
       生产调用点**（`grep -rn 'revalidate(' stableagent/` 只有上述三处；M2 的
       `execution/effects.py::prepare_worktree_handler` 只取 Ticket 再 `manager.prepare`）。因此
       本条**不勾**：要求是"六个……逐一有审计行"，现在是 5/6；缺项不能由另外五个抵消。
-- [ ] **L6 结构性默认拒绝**：`merge`/`enable_auto_merge` 不在 EffectKind 枚举与 Action
+      M4 出口收口（2026-11-07，Task 1/10）：`worktree` 时机已接到生产代码——
+      `integrations/repository.py::guarded_prepare_worktree_handler` 在 `inner(effect)`
+      （真正 `manager.prepare`）之前 `policy.revalidate(mandate, when="worktree")` 并写审计；
+      `test_prepare_revalidates_before_the_manager` 断审计行 `action == "worktree"` 且 manager
+      随后才被调用，`test_expired_mandate_parks_before_prepare` 断过期时 `manager.prepared` 为空、
+      只留一条 BLOCKED Report。六个时机至此 6/6 全部先判定后执行，L5 与 A4 一并勾选。
+- [x] **L6 结构性默认拒绝**：`merge`/`enable_auto_merge` 不在 EffectKind 枚举与 Action
       授权集合中（不是"运行时开关拒绝"，是类型里不存在）。来源：ADR-05 决策 5、被否决表。
       进度（2026-11-04，Task 5 授权集合半边）：`merge` 不在 `Action` 枚举里（13 成员无 merge），
       `enable_auto_merge` 的"不进授权集合"由 config 构造期 + `create_mandate` + `authorize`
@@ -131,7 +158,9 @@
       P4 的白名单闭合用例 `test_m2_effect_kinds_close_the_whitelist` 随之扩容并**顺手钉死缺席**：
       `{"merge", "enable_auto_merge", "auto_merge"}` 与"值集合 ∪ 成员名集合"不相交——两个口径都查，
       防止只改 value 不改名字。M3 加 GitHub 四类之后仍需保持该不相交成立，由本条在 M3 出口收口。
-- [ ] **L7 凭据不落盘**：密钥不进 prompt、日志、Report、Ticket/AgentState、worktree 元数据
+      出口复核（2026-11-07，Task 10）：上述三条在 677 条全量里全绿；M4 未新增任何 EffectKind，
+      `merge`/`enable_auto_merge` 仍不在枚举与可授权集合，故勾选。
+- [x] **L7 凭据不落盘**：密钥不进 prompt、日志、Report、Ticket/AgentState、worktree 元数据
       与容器挂载；执行环境只有白名单变量。来源：规格 §1 安全层次、ADR-05 决策 6。
       进度（2026-11-05，M2 Task 3 的 worktree 元数据 + git 子进程两半边）：ownership 文件与
       `WorktreeHandle.repository` 记录的是**剥掉 userinfo 的 remote 身份**——`git.scrub_credentials`
@@ -187,7 +216,17 @@
       token 只活在其内部，模块 docstring 已写明）；MCP 子进程缺省环境只有 `PATH` 与固定
       `LANG=C.UTF-8`（`test_stdio_transport_default_env_is_minimal`）。真实 HTTP token 传输尚未
       实现（M4 的 smoke 才有），prompt/日志侧脱敏也仍未闭合，**L7 不勾**。
-- [ ] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
+      出口收口（2026-11-07，Task 10）：逐面复核后勾选——① worktree ownership 脱敏、git 四键环境、
+      Agent 命令七键环境、容器五键名 + `STABLEAGENT_WORKTREE=/workspace`、MCP 子进程
+      `PATH`+`LANG` 最小环境各有实测用例；② Report 只有结果行（`summary()` 不含流正文），
+      命令 stdout/stderr 先过 `_redact` 再截断；③ Ticket/Assignment/Report/effect payload 的
+      字段表里没有凭据槽，`ExplicitGitHubRequest` 七字段也不含 token；④ `stableagent/` 里没有
+      logging 模块，P5 代码不读取宿主密钥（`GITHUB_TOKEN` 等零引用），所以 prompt/日志两面在
+      P5 没有写入点——此前记的"脱敏未闭合"应更正为"无数据源"，不是"已知泄漏"；
+      ⑤ 真实 GitHub HTTP 客户端尚未实现，协议与 fake 都不接收 token。**遗留条件**：将来接真实
+      token 传输时，token 只能留在客户端内部（headers），不得进 prompt/日志/Report/effect payload；
+      这条已写进 ADR-05 安全声明第 5 条。
+- [x] **L8 离线门禁**：CI 与全量测试不依赖 Docker/网络/真实 GitHub；Docker 与真实仓库
       用例只能 marker+环境变量双条件下运行。来源：ADR-05 约束 3、决策 7。
       进度（2026-11-05，M2 Task 11 的 Docker 半边）：Docker 这一半的形状落定了——`docker` marker
       注册在 `pyproject.toml`，`STABLEAGENT_DOCKER` 由 `execution.docker.docker_tests_enabled`
@@ -210,6 +249,12 @@
       开工前基线已记录的 macOS `LC_CTYPE` 注入（`test_command_runner` 两条 + 其嵌套复跑
       `test_sandbox::test_core_suite_does_not_depend_on_docker`），不是 M3 回归。真实 GitHub
       smoke 与 CI 侧在场证明仍属 M4，**L8 不勾**。
+      出口收口（2026-11-07，Task 10）：本地全量在未设置 `-m docker`/`STABLEAGENT_DOCKER`/
+      `STABLEAGENT_DOCKER_IMAGE` 的环境里 `677 passed, 6 skipped, 0 failed`，6 条 skip 仍是
+      5 Docker + 1 Redis；`pyproject.toml` 的 marker 与集成文件的 skipif/autouse fixture 双条件
+      未改；`.github/workflows/ci.yml` 的 job 没有 services/网络依赖，只跑同一套离线用例。
+      远端那次运行仍是 H3 的确认项——若它显示任何网络/Docker 依赖，本条应重新打开；真实 GitHub
+      smoke 按规格是可选补充，不存在"未勾的必跑用例"。故勾选。
 
 ## 1. 里程碑与步骤
 
@@ -749,6 +794,8 @@
       P5 规格退出清单与本草稿 §1/§2 同步；统一写"本地收口、待远端 CI"，未写 P5 已完成。
 - [ ] **4.7** **M4 出口**：维护者授权 → 合并推送 `main` → 远端 CI 3.10/3.12 双绿 →
       run ID 回填账本（H3）。
+      本地半步（2026-11-07，Task 10）：全量门禁、25 文件覆盖、L1/约束 1、H1/H2/H4 已复跑并落账；
+      **推送与远端 CI 未执行**（未授权），H3 留空。本条要等 run ID 才能勾。
 
 ### 1.4 里程碑与 DoD 归属
 
@@ -797,7 +844,7 @@
       config 实例先后决策 → 两行版本不同，且后续换策略只新增行、不改已有行的快照。
       本条只证明落库面与形状：真实调用点（六时机 + 审批门）在 M2/M3 接线，见对照表第 6 行
       "审计先于接线"的口径。
-- [ ] **A4** 六个 revalidate 时机逐个先于动作执行，时机清单以测试矩阵固化。
+- [x] **A4** 六个 revalidate 时机逐个先于动作执行，时机清单以测试矩阵固化。
       归属修正（2026-11-04，Task 9）：M1 交出的是判定与审计的形状——`REVALIDATE_TIMINGS` 六值 + 
       `StaticPolicy.revalidate(when=...)` 对未知时机名报错 + 每判定 1 行审计；"逐个先于动作执行"
       需要动作真实存在，矩阵收口属 M2（worktree 时机）与 M3（launch/recover/retry/external_write/mcp_call 五处）。
@@ -808,6 +855,10 @@
       缺的是 M2 归属的 `worktree`：全库 `revalidate(..., when="worktree")` 零调用点，
       `execution/effects.py::prepare_worktree_handler` 直接 `manager.prepare`。六缺一，
       **本条不勾**；补 `worktree` 时机的调用点属 M2 范围内的未完成项，不冒充为 M3 已交付。
+      M4 出口收口（2026-11-07，Task 1/10）：缺的那个补上了——`worktree` 由
+      `integrations/repository.py::guarded_prepare_worktree_handler` 在 `inner(effect)` 前判定并
+      审计（`test_prepare_revalidates_before_the_manager`、`test_expired_mandate_parks_before_prepare`）。
+      六时机矩阵 6/6 齐，全量 677 条通过，故勾选。
 - [x] **A5** 默认拒绝集生效：auto merge、任意 shell、全网访问、未列入 MCP server/tool。
       证据（2026-11-04，Task 5）：`test_default_deny_set_covers_the_four_spec_cases` 逐项断言——
       auto merge 恒 `not_granted`；任意 shell（`sh -c curl evil`）与带附加参数的同一命令
@@ -832,13 +883,19 @@
       `push_branch + digest(BRANCH_A)` 后，Gate 对同一动作换 `BRANCH_B` 直接 deny `approval_stale`，
       换回 A 仍 allow（失效的是那份批准对新资源，不是批准被吃掉）；每次 check 都落一行 authorize，
       `resource_digest` 与当刻请求逐等，审计能看出"批准绑定的是哪一个资源"。
-- [ ] **B2** `denied` 使 Assignment `blocked|failed`，不得换动作绕过。
+- [x] **B2** `denied` 使 Assignment `blocked|failed`，不得换动作绕过。
       进度（2026-11-04，Task 7 Gate 半边）：`test_denied_never_self_heals`——denied 后重新 submit、
       推进时钟、连查三次都仍是 `approval_denied`（粘连在 `(ticket, action)` 上，先于批准匹配判定，
       所以换 digest 也走不到放行）；换动作只得到 `approval_pending`，不是自动放行。
       "使 Assignment `blocked|failed`"要有 Assignment 可管，属 M2/M3 接线，届时由本条收口。
       计划偏差（2026-11-04，Task 9）：第 5 节 Task 9 原写"M1 出口勾 8 项（含 B2）"，实测只勾 7 项——
       B2 的 Assignment 半边在 M1 没有可管对象（为对齐数字而勾会把未证事实写成已证），维持未勾并保留 Gate 半边记录。
+      Assignment 半边收口（2026-11-07，Task 2）：`ApprovalService.decide(..., False, by)` 在同一事务里
+      把 `approval.status` 置 `denied`，并把仍 `RUNNING` 的 Assignment 经 `next_assignment_status(...,
+      FAIL)` 转 `FAILED`、`failure="approval_denied"`、写 `ended_at`；终态或缺失的 Assignment 不动。
+      `test_denial_fails_a_running_assignment` 断三件事（Approval=DENIED、Assignment=FAILED、
+      failure 码），`test_denial_without_a_running_assignment_is_still_decidable` 断无 assignment_id
+      的旧形状仍可裁决；"不得换动作绕过"由 `test_denied_never_self_heals` 继续钉住。故勾选。
 - [x] **B3** Ticket 取消同事务撤销 pending approval。
       证据（2026-11-04，Task 7）：`test_guarded_cancel_rolls_back_all_three_on_error` 在
       `ApprovalService.revoke_pending` 处注入异常 → 票仍 `queued`、`due_effects` 为空、审批行仍
@@ -1099,10 +1156,25 @@
 
 ### H 质量与收口（M4 出口）
 
-- [ ] **H1** P0~P4 全量用例零回归；`stableagent/core/` 对 P4 收口提交零 diff（L1 复核）。
-- [ ] **H2** 全库门禁绿：`pytest -q`、`mypy`、`ruff check`、`ruff format --check`，数字记账本。
+- [x] **H1** P0~P4 全量用例零回归；`stableagent/core/` 对 P4 收口提交零 diff（L1 复核）。
+      出口实测（2026-11-07，Task 10）：全量 `677 passed, 6 skipped, 0 failed`（P0~P4 用例全在
+      其中）；`git diff 234f620..HEAD --stat -- stableagent/core/` 与
+      `... -- stableagent/orchestration/service.py` 均为 0 行。
+- [x] **H2** 全库门禁绿：`pytest -q`、`mypy`、`ruff check`、`ruff format --check`，数字记账本。
+      出口实测（2026-11-07，Task 10，落盘 `/tmp/p5-m4-*.txt` 后读回）：`677 passed, 6 skipped`
+      （0 failed，18.41s，覆盖 99.04%）；`mypy` — `Success: no issues found in 60 source files`；
+      `ruff check` — `All checks passed!`；`ruff format --check` — `135 files already formatted`；
+      `git diff --check` 0 行。命令均带 `env -u NO_PROXY -u no_proxy`（宿主注入的 `[::1]` 会让
+      httpx 解析失败，一条已知环境差异；M4 Task 3 的测试口径已另作处理）。
 - [ ] **H3** CI FOCUS 扩容生效且远端 CI（3.10/3.12）双绿，run ID 记入本账本。
-- [ ] **H4** 覆盖率不低于 P4 基线（全库 99.02%；新心脏文件逐个 ≥90%）。
+      本地半边（2026-11-07，Task 6/10）：`ci.yml` 的 FOCUS 已是 25 文件，
+      `tests/unit/test_ci_focus_gate.py` 钉死名单与"25 文件"字样；同源覆盖脚本出口 25 行、
+      `BAD=[]`/`MISSING=[]`，最低 `core/loop.py: 96.8%`。**远端半步未执行**：推送与远端 CI
+      需维护者显式授权，`origin/main` 仍是 `f41ea35`，因此本条不勾、run ID 留空。
+- [x] **H4** 覆盖率不低于 P4 基线（全库 99.02%；新心脏文件逐个 ≥90%）。
+      出口实测（2026-11-07，Task 10）：全库 99.04% ≥ 99.02%；25 个心脏文件逐个 ≥96.8%
+      （最低 `core/loop.py`；`control/approval.py` 99.0%、`integrations/mcp.py` 97.9%、
+      其余 22 个 98.3%~100%），`BAD=[]`/`MISSING=[]`。
 
 ## 3. 阶段验证命令（收口前须在 CI 复现）
 
@@ -3695,10 +3767,11 @@ git diff main..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p5-m3-
 > **For agentic workers:** 用 `superpowers:executing-plans` 逐 Task 执行（本会话内联）。
 > Step 用 `- [ ]` 勾选跟踪。执行完成后按本文件既有口径回填实测证据。
 >
-> **状态：Task 1~9 已于 2026-11-07 本地执行完。** 对应第 1 节 M4 的 7 个步骤（4.1~4.7），
-> 展开为 **10 个 Task / 48 个 Step**；4.1~4.6 与 G1~G4 的证据已回填第 1/2 节。Task 10 的本地
-> 出口（H1/H2/H4、L1~L8、A4/B2）待执行；其**推送与远端 CI 半步必须维护者显式授权**，未授权时
-> 只做到"本地出口全绿 + H3 留空"，不得把 4.7 勾成完成。
+> **状态：Task 1~10 已于 2026-11-07 执行完本地部分。** 对应第 1 节 M4 的 7 个步骤（4.1~4.7），
+> 展开为 **10 个 Task / 48 个 Step**；4.1~4.6 与 G1~G4 的证据已回填第 1/2 节，Task 10 的本地
+> 出口（H1/H2/H4、L1~L8、A4/B2）已复跑并回填，当前 DoD 45/46、里程碑 38/40。Task 10 的
+> **推送与远端 CI 半步必须维护者显式授权**：未授权时只做到"本地出口全绿 + H3 留空"，
+> 不得把 4.7 勾成完成；`origin/main` 仍是 `f41ea35`。
 >
 > **Goal:** 用一条全离线示例证明"显式请求 → 授权 → worktree → 修改 → 审批 → PR effect"的
 > 完整闭环，用五类拒绝证明失败路径没有外部副作用，并把心脏覆盖闸门、Python 等价矩阵、
