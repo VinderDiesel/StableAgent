@@ -68,6 +68,10 @@ class EffectKind(str, Enum):
     # P5/M2（ADR-05 决策 5）：worktree 创建由 outbox 驱动。`effects.kind` 是无 CHECK 的 TEXT，
     # 加成员是非破坏性扩展；merge/auto-merge 永远不进这个枚举（L6）。
     PREPARE_WORKTREE = "prepare_worktree"
+    # P5/M3（步骤 3.9）：GitHub 外部写三条。仅这三条——禁止 merge / auto-merge（L6）。
+    GITHUB_COMMENT = "github_comment"
+    GITHUB_PULL_REQUEST = "github_pull_request"
+    GITHUB_REQUEST_REVIEW = "github_request_review"
 
 
 class ReportKind(str, Enum):

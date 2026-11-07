@@ -14,7 +14,13 @@ import pytest
 from stableagent.control.audit import AuditWriter
 from stableagent.control.model import Action, ExplicitRequest
 from stableagent.control.policy import P5_POLICY_VERSION, StaticPolicy, StaticPolicyConfig
+from stableagent.integrations.errors import GitHubApiError
 from stableagent.integrations.github import ExplicitGitHubRequest, GitHubIntake
+from stableagent.integrations.github_client import (
+    FakeGitHubClient,
+    GitHubClient,
+    classify_github_error,
+)
 from stableagent.orchestration.model import EffectKind, TicketStatus
 from stableagent.orchestration.store import Store
 from tests.support import FixedClock, SequenceIds
@@ -150,3 +156,59 @@ def test_intake_failure_rolls_back_everything(
     assert store.list_tickets() == []
     assert store.due_effects(9_999_999_999_999) == []
     assert store.list_audit(kind="admit")  # 审计在事务外，已落的一行不回滚（B4 口径）
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [
+        (408, "retryable"),
+        (429, "retryable"),
+        (500, "retryable"),
+        (502, "retryable"),
+        (None, "retryable"),
+        (401, "needs_human"),
+        (403, "needs_human"),
+        (404, "non_retryable"),
+        (422, "non_retryable"),
+    ],
+)
+def test_github_errors_are_classified_and_keep_the_status(
+    status: int | None, category: str
+) -> None:
+    error = classify_github_error(status, "boom")
+    assert isinstance(error, GitHubApiError)
+    assert error.category == category
+    assert error.status_code == status
+    assert str(status) in str(error)
+
+
+async def test_fake_client_records_calls_and_returns_configured_results() -> None:
+    client = FakeGitHubClient(results={"create_comment": {"id": 7}})
+    result = await client.create_comment(repository="owner/repo", url="u", body="b")
+    assert result == {"id": 7}
+    assert client.calls == [
+        ("create_comment", {"repository": "owner/repo", "url": "u", "body": "b"})
+    ]
+    assert isinstance(client, GitHubClient)
+
+
+async def test_fake_client_fail_next_raises_once_then_clears() -> None:
+    client = FakeGitHubClient()
+    client.fail_next = GitHubApiError(500, "boom", "retryable")
+    with pytest.raises(GitHubApiError):
+        await client.create_pull_request(
+            repository="owner/repo", head="feat", base="main", title="t", body="b"
+        )
+    assert client.fail_next is None
+    result = await client.create_pull_request(
+        repository="owner/repo", head="feat", base="main", title="t", body="b"
+    )
+    assert result == {}
+    assert [name for name, _ in client.calls] == ["create_pull_request", "create_pull_request"]
+
+
+async def test_fake_client_satisfies_the_protocol_for_all_three_writes() -> None:
+    client = FakeGitHubClient()
+    assert await client.create_comment(repository="o/r", url="u", body="b") == {}
+    assert await client.request_review(repository="o/r", url="u", reviewers=["alice"]) == {}
+    assert [name for name, _ in client.calls] == ["create_comment", "request_review"]

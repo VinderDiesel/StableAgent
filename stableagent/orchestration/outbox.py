@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 
-from stableagent.orchestration.errors import DeferrableEffectError
+from stableagent.orchestration.errors import DeferrableEffectError, PermanentEffectError
 from stableagent.orchestration.model import (
     Clock,
     Effect,
@@ -60,6 +60,9 @@ class EffectDispatcher:
             except DeferrableEffectError as exc:
                 self._defer(claimed, repr(exc))  # 回退与"真实失败"两条账
                 continue
+            except PermanentEffectError as exc:
+                self._fail_permanently(claimed, repr(exc))  # 重放只会被同样拒绝：不进退避
+                continue
             except Exception as exc:  # 副作用失败：退避重试，达上限才失败
                 self._fail_or_retry(claimed, repr(exc))
                 continue
@@ -101,6 +104,18 @@ class EffectDispatcher:
         self._outcomes.append((updated.id, updated.state))
         if state is EffectState.FAILED and self._on_exhausted is not None:
             self._on_exhausted(updated, detail)  # 钩子在事务外：service 会开自己的短事务（L6）
+        return updated
+
+    def _fail_permanently(self, effect: Effect, detail: str) -> Effect:
+        """重放只会得到同样的拒绝（如 404）：直接 FAILED、保持 due_at、不占退避预算。"""
+        state = next_effect_status(effect.state, EffectAction.FAIL)
+        with self._store.transaction():
+            updated = self._store.update_effect(
+                effect.model_copy(update={"state": state, "last_error": detail})
+            )
+        self._outcomes.append((updated.id, updated.state))
+        if self._on_exhausted is not None:
+            self._on_exhausted(updated, detail)  # 钩子在事务外（L6）
         return updated
 
     def _defer(self, effect: Effect, detail: str) -> Effect:

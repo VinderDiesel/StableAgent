@@ -2385,6 +2385,14 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
    否则 `test_expired_mandate_parks_without_starting_the_worker` 无法断言确定性；
    计划里的三参调用点不受影响。本次对编排层的新增仍属计划允许的那几类扩展
    （一个异常 + 一个只读查询），`service.py` 零改动（约束 1 门禁 0 行）。
+6. **Task 10 的枚举落点与白名单断言**（2026-11-07）。`EffectKind` 定义在
+   `orchestration/model.py`（Task 10 的 Files 只列 `errors.py` / `outbox.py`），三个 GitHub
+   成员按 Step 2 的口径一次落在这里。`tests/unit/test_orchestration_model.py` 的
+   `test_m2_effect_kinds_close_the_whitelist` 用 `==` 钉四项，新成员会让全量当场变红，
+   因此断言同步扩到七项——这正是该用例注释写的"白名单只按里程碑点名扩容"，不是放宽。
+   另外计划示例里的 `_enqueue(store, EffectKind.GITHUB_COMMENT, "k")` helper 在
+   `test_outbox.py` 并不存在，该用例本地构造 `Effect(id="ef-1", ..., due_at=0)`；
+   断言除状态/attempts/last_error 外还数了 handler 只被调用一次、`on_exhausted` 仍触发。
 
 ---
 

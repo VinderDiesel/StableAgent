@@ -164,3 +164,37 @@ async def test_backoff_fn_is_injected_and_exhaustion_fires_hook(store: Store) ->
     assert await dispatcher.dispatch_due() == 0
     assert store._effect_row("ef-1").state is EffectState.FAILED
     assert seen == [1, 2] and len(exhausted) == 1 and exhausted[0][0] == "ef-1"
+
+
+async def test_permanent_effect_error_fails_without_retrying(store: Store) -> None:
+    from stableagent.orchestration.errors import PermanentEffectError
+
+    def _enqueue(kind: EffectKind, key: str) -> Effect:
+        effect = Effect(id="ef-1", kind=kind, idempotency_key=key, payload={}, due_at=0)
+        with store.transaction():
+            store.enqueue_effect(effect)
+        return effect
+
+    effect = _enqueue(EffectKind.GITHUB_COMMENT, "k")
+    calls: list[str] = []
+    exhausted: list[tuple[str, str]] = []
+
+    async def handler(claimed: Effect) -> None:
+        calls.append(claimed.id)
+        raise PermanentEffectError("404 not found")
+
+    dispatcher = EffectDispatcher(
+        store,
+        {EffectKind.GITHUB_COMMENT: handler},
+        clock=FixedClock(),
+        max_attempts=3,
+        on_exhausted=lambda e, detail: exhausted.append((e.id, detail)),
+    )
+    assert await dispatcher.dispatch_due() == 0
+    settled = store._effect_by_key(EffectKind.GITHUB_COMMENT, "k")
+    assert settled is not None
+    assert settled.id == effect.id
+    assert settled.state is EffectState.FAILED and settled.attempts == 1
+    assert "404" in (settled.last_error or "")
+    assert calls == ["ef-1"]  # 判死，不进退避队列
+    assert exhausted == [("ef-1", settled.last_error)]
