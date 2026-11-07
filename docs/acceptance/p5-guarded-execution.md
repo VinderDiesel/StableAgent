@@ -2370,6 +2370,13 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
    产出 `Tool`；`tools()` 的返回值（可见集）不变。Task 4 的两条单测断言随之改为全量键：
    `test_adapter_only_exposes_the_intersection` 与 `test_adapter_empty_allowlist_exposes_nothing`。
    这条修正正是计划里写好的分支（"若 E3 暴露缺口，回到 Task 4/5 修并登记"）。
+4. **Task 7 与 Task 8 共用一次提交；建票直接落 `QUEUED`**（2026-11-07）。
+   查重命中分支与建票分支在同一个 `GitHubIntake.submit` 里，计划已授权"把 Task 8 的建票代码
+   一并写进 Task 7"，因此两 Task 的证据记在同一次提交（`test_intake_writes_five_things_in_one_transaction`
+   与 `test_intake_failure_rolls_back_everything` 属 Task 8 的 F2 证据）。
+   另：计划 Step 3 只写了 `insert_ticket(title=...)`，实现时显式构造
+   `TicketStatus.QUEUED` + `queued_at=now`——`Store.list_runnable_tickets` 只挑 `queued`，
+   留 `OPEN` 时 launch 后的第一个状态转换就是非法的；该终态与 P4 `queue_ticket` 一致。
 
 ---
 

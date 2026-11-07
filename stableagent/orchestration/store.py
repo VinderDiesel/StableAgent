@@ -498,6 +498,19 @@ class Store:
         row = self._conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
         return _row_to_ticket(row) if row else None
 
+    def get_ticket_by_mandate_scope(self, scope: str, *, origin_kind: str) -> Ticket | None:
+        """按 Mandate 的来源标识找 Ticket：P5 的稳定 ID 查重落点（P4 的 Mandate 没有该语义）。
+
+        读侧单条查询：调用方在 `transaction()` 内先查后写，`BEGIN IMMEDIATE` 保证同一
+        stable_id 的并发入口不会各自建票。
+        """
+        row = self._conn.execute(
+            "SELECT t.* FROM tickets t JOIN mandates m ON t.mandate_id = m.id"
+            " WHERE m.scope = ? AND m.origin_kind = ? ORDER BY t.created_at ASC, t.id ASC LIMIT 1",
+            (scope, origin_kind),
+        ).fetchone()
+        return _row_to_ticket(row) if row else None
+
     def list_tickets(
         self,
         *,
