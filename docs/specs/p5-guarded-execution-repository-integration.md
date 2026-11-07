@@ -258,15 +258,20 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 ### P5 退出清单
 
-- [ ] P4 的 Ticket / Assignment / Outbox 语义和恢复测试无回归。
-- [ ] Policy、Mandate、Approval 和 Audit 为持久化、版本化、结构化事实源。
-- [ ] 每个高风险 Action 在执行前可判定、可审计、可重新验证；默认拒绝 auto merge。
-- [ ] worktree 隔离、路径校验和受限 command runner 有离线测试。
-- [ ] Docker runner 默认无网络、最小挂载和资源限制；未配置 Docker 时不影响核心门禁。
-- [ ] MCP Client 只允许 Mandate 指定的 server/tool，并沿用 Tool/Evidence/ContextEngine 链路。
-- [ ] allowlist + 明确 GitHub 请求可以创建 Ticket、执行 Worker 并幂等地写 PR/评论。
-- [ ] 所有恢复路径不重复 PR、评论、push 或其他已确认副作用。
-- [ ] ADR-05、安全说明、示例、CHANGELOG、README 完整且不夸大本地限制模式的安全性。
+> 以下九项均有 2026-11-07 的本地离线证据（677 passed / 6 skipped / 0 failed，覆盖率 99.04%，
+> 25 个心脏文件 ≥90%，三套解释器等价）。**这不等于 P5 正式收口**：推送 `main` 与远端 CI
+> 3.10/3.12 双绿属验收账本步骤 4.7，待维护者授权后执行并回填 run ID。
+
+- [x] P4 的 Ticket / Assignment / Outbox 语义和恢复测试无回归。
+- [x] Policy、Mandate、Approval 和 Audit 为持久化、版本化、结构化事实源。
+- [x] 每个高风险 Action 在执行前可判定、可审计、可重新验证；默认拒绝 auto merge。
+- [x] worktree 隔离、路径校验和受限 command runner 有离线测试。
+- [x] Docker runner 默认无网络、最小挂载和资源限制；未配置 Docker 时不影响核心门禁
+      （参数契约由离线用例断言；真实 Docker 用例为显式 opt-in）。
+- [x] MCP Client 只允许 Mandate 指定的 server/tool，并沿用 Tool/Evidence/ContextEngine 链路。
+- [x] allowlist + 明确 GitHub 请求可以创建 Ticket、执行 Worker 并幂等地写 PR/评论。
+- [x] 所有恢复路径不重复 PR、评论、push 或其他已确认副作用（保证范围限于 claim 后、I/O 前）。
+- [x] ADR-05、安全说明、示例、CHANGELOG、README 完整且不夸大本地限制模式的安全性。
 
 ## 5. 阶段交接：P6 的输入
 

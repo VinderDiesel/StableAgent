@@ -5,18 +5,20 @@
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6/7 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口，M2 已于
 > 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾），
-> **M3 已于 2026-11-07 以 12/12 收口**（第 7 节，13 Task / 65 Step；3.12 出口执行完），当前
-> **DoD 28/46、里程碑步骤 32/40（M1 9/9、M2 11/12、M3 12/12）**。M1 分支 `feat/p5-m1-control-plane` 已快进
+> **M3 已于 2026-11-07 以 12/12 收口**（第 7 节，13 Task / 65 Step；3.12 出口执行完），
+> **M4 的 4.1~4.6 已于 2026-11-07 本地执行完**（第 8 节 Task 1~9；4.7 的推送/远端 CI 待维护者
+> 授权），当前 **DoD 32/46、里程碑步骤 38/40（M1 9/9、M2 11/12、M3 12/12、M4 6/7）**。
+> M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落并已执行（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution` 已于 2026-11-06 经维护者指示快进 `main` 并推送
 > （`5e94377..31eafa1`，ff-only，无合并提交），远端 CI run `42144235714` = `success`
 > （`quality (3.10)` 与 `quality (3.12)` 两个 job 全绿；矩阵里没有 3.11——3.11 是本地解释器，
 > 等价矩阵另见步骤 4.4）。M3 执行分支 `feat/p5-m3-mcp-github`（自 `main@f41ea35` 切出）含
 > 11 笔实现提交（Task 7/8 共用一笔），外加计划落盘与收口提交；12 个里程碑步骤与
-> E1~E4/F1~F6 全部有实测证据。**A4/L1~L8 仍不
-> 整条勾选**：`worktree` revalidate 时机在生产代码里没有调用点（见 §0 L5 与 A4 的 M3 出口行），
-> L1~L8 按 P4 口径等 M4 全量证明。这不等于 P5 收口：H2/H3 与文档状态翻转仍属 M4
-> （步骤 4.3/4.6/4.7）。合并（2026-11-07，维护者选择本地快进）：`git merge --ff-only
+> E1~E4/F1~F6 全部有实测证据。**A4/L1~L8 的实测回填与 H1/H2/H4 留在 4.7 出口（Task 10）**：
+> `worktree` revalidate 时机已在 Task 1 接到生产代码，L1~L8 的逐条证据在出口统一复跑后勾选。
+> 这不等于 P5 收口：H3 与 4.7 的推送/远端 CI 仍待维护者授权，文档状态只能写"本地收口、
+> 待远端 CI"。合并（2026-11-07，维护者选择本地快进）：`git merge --ff-only
 > feat/p5-m3-mcp-github`（`f41ea35..76b8d95`），**未推送**；`origin/main` 仍是 `f41ea35`，
 > 远端 CI 与推送属 M4 步骤 4.7。合并结果复跑门禁与分支出口一致：`668 passed, 3 failed,
 > 6 skipped`（三条仍是 macOS `LC_CTYPE` 已知环境差异）、覆盖 99.16%、`mypy` 60 files、
@@ -713,18 +715,38 @@
 
 ### M4：端到端与收口（规格 WP-5.6；ADR-05"测试与证据"）
 
-- [ ] **4.1** `examples/05_guarded_github_task.py`：本地 git fixture + fake GitHub 走通
+- [x] **4.1** `examples/05_guarded_github_task.py`：本地 git fixture + fake GitHub 走通
       请求→授权→worktree→修改→PR effect，全离线。验证：示例即测试（G1）。
-- [ ] **4.2** 拒绝示例五连：非 allowlist、无 mention、越权命令、无审批 PR 写入、auto merge
+      证据（2026-11-07，Task 4，提交 `4cfe893`）：`tests/integration/test_github_example.py::test_run_phase_guards_the_whole_chain`
+      1 passed；子进程末行 `RUN_RESULT status=completed ... pr_calls=1 push_calls=1`，远端存在
+      `sa-*` 分支且 `git log -1 --format=%s` = `fix off-by-one`；审计顺序为
+      `revalidate/worktree` → `authorize/write_repository` → `authorize/create_pull_request`。
+- [x] **4.2** 拒绝示例五连：非 allowlist、无 mention、越权命令、无审批 PR 写入、auto merge
       ——均结构化拒绝 + 审计 + 零外部副作用。验证：G2。
-- [ ] **4.3** CI FOCUS 扩容：`control/policy.py`、`control/approval.py`、
+      证据（2026-11-07，Task 5，提交 `4154bc6`）：`test_reject_phase_has_five_structured_refusals`
+      1 passed；五条 `reject_case` 按序为 `actor_not_allowlisted`、`mention_required`、
+      `command_not_allowed`、`approval_pending`、`auto_merge_not_grantable`，
+      `external_calls` 全 0、`audit` 全 ≥1、末行 `REJECT_RESULT cases=5 ok=True`；
+      场景四的 PR effect 落 FAILED + BLOCKED Report（`reason=approval_pending`），client/push 零调用。
+- [x] **4.3** CI FOCUS 扩容：`control/policy.py`、`control/approval.py`、
       `execution/worktree.py`、`execution/command.py`、`execution/sandbox.py`、
       `integrations/github.py`、`integrations/mcp.py` 进心脏闸门 + 契约测试同步。
       验证：本地同源复现 BAD/MISSING 均空。
-- [ ] **4.4** 本地 Python 3.10 / 3.11 / 3.12 等价矩阵（沿用 `.matrix/`）。
-- [ ] **4.5** ADR-05"测试与证据"实测回填 + 安全说明定稿（不夸大本地受限模式，G4）。
-- [ ] **4.6** README / CHANGELOG / Roadmap / docs 索引 / 规格退出清单同步（状态翻转时机沿用
+      证据（2026-11-07，Task 6，提交 `f1e3bdb`）：`test_focus_covers_the_twenty_five_cardiac_files`
+      1 passed；FOCUS 25 文件，本地把 CI 内联脚本原样落 `/tmp/p5-m4-focus.py` 执行，exit 0、
+      25 行逐文件 ≥90%（最低 `core/loop.py` 96.8%），`BAD=[]`、`MISSING=[]`。
+- [x] **4.4** 本地 Python 3.10 / 3.11 / 3.12 等价矩阵（沿用 `.matrix/`）。
+      证据（2026-11-07，Task 7）：CPython 3.10.20 / 3.11.16 / 3.12.14 三套环境各自
+      `677 passed, 6 skipped, 0 failed`、覆盖率 99.04%；三份 skip 清单排序后 `diff` 为空
+      （5 条 Docker + 1 条 Redis opt-in）。
+- [x] **4.5** ADR-05"测试与证据"实测回填 + 安全说明定稿（不夸大本地受限模式，G4）。
+      证据（2026-11-07，Task 8，提交 `9ccfce0`）：ADR-05 的占位改为"测试与证据（实测，
+      2026-11-07）"，25 文件逐个覆盖率、L1/L2/L3/L5 用例名与命令、G1/G2、解释器矩阵全部落文；
+      新增"安全声明（不夸大）"七条。
+- [x] **4.6** README / CHANGELOG / Roadmap / docs 索引 / 规格退出清单同步（状态翻转时机沿用
       P4：远端 CI 绿前不写"收口"）。
+      证据（2026-11-07，Task 9）：README、`docs/README.md`、`docs/Roadmap.md`、CHANGELOG、
+      P5 规格退出清单与本草稿 §1/§2 同步；统一写"本地收口、待远端 CI"，未写 P5 已完成。
 - [ ] **4.7** **M4 出口**：维护者授权 → 合并推送 `main` → 远端 CI 3.10/3.12 双绿 →
       run ID 回填账本（H3）。
 
@@ -1065,10 +1087,15 @@
 
 ### G 示例与文档（M4）
 
-- [ ] **G1** 端到端示例离线跑通"请求→授权→worktree→修改→PR effect"，示例即测试。
-- [ ] **G2** 五类拒绝示例：非 allowlist、无 mention、越权命令、无审批写、auto merge。
-- [ ] **G3** ADR-05"测试与证据"由占位改为实测；安全说明定稿。
-- [ ] **G4** README/CHANGELOG/Roadmap/docs 索引与规格退出清单同步，不夸大本地受限模式。
+- [x] **G1** 端到端示例离线跑通"请求→授权→worktree→修改→PR effect"，示例即测试。
+      证据（2026-11-07，Task 4，提交 `4cfe893`）：见 §1 4.1；`test_run_phase_guards_the_whole_chain`。
+- [x] **G2** 五类拒绝示例：非 allowlist、无 mention、越权命令、无审批写、auto merge。
+      证据（2026-11-07，Task 5，提交 `4154bc6`）：见 §1 4.2；五条结构化拒绝 + 零外部调用。
+- [x] **G3** ADR-05"测试与证据"由占位改为实测；安全说明定稿。
+      证据（2026-11-07，Task 8，提交 `9ccfce0`）：见 §1 4.5；含 25 文件读数与七条安全声明。
+- [x] **G4** README/CHANGELOG/Roadmap/docs 索引与规格退出清单同步，不夸大本地受限模式。
+      证据（2026-11-07，Task 9）：状态统一为"本地收口、待远端 CI"；安全边界口径与 ADR-05
+      的七条一致。
 
 ### H 质量与收口（M4 出口）
 
@@ -3668,8 +3695,9 @@ git diff main..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p5-m3-
 > **For agentic workers:** 用 `superpowers:executing-plans` 逐 Task 执行（本会话内联）。
 > Step 用 `- [ ]` 勾选跟踪。执行完成后按本文件既有口径回填实测证据。
 >
-> **状态：待执行。** 对应第 1 节 M4 的 7 个步骤（4.1~4.7），展开为 **10 个 Task / 48 个 Step**。
-> 前 9 个 Task 全部本地可完成；Task 10 的**推送与远端 CI 半步必须维护者显式授权**，未授权时
+> **状态：Task 1~9 已于 2026-11-07 本地执行完。** 对应第 1 节 M4 的 7 个步骤（4.1~4.7），
+> 展开为 **10 个 Task / 48 个 Step**；4.1~4.6 与 G1~G4 的证据已回填第 1/2 节。Task 10 的本地
+> 出口（H1/H2/H4、L1~L8、A4/B2）待执行；其**推送与远端 CI 半步必须维护者显式授权**，未授权时
 > 只做到"本地出口全绿 + H3 留空"，不得把 4.7 勾成完成。
 >
 > **Goal:** 用一条全离线示例证明"显式请求 → 授权 → worktree → 修改 → 审批 → PR effect"的
