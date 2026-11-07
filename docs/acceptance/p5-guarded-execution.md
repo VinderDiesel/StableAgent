@@ -2401,6 +2401,15 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
    `Uuid4Id()`，理由同偏差 5：BLOCKED/FAILED Report 的 id 与时间必须可注入。
    另：payload 缺字段不再交给退避重试——`_text` / `_reviewers` 直接抛
    `PermanentEffectError`，坏 payload 重放三次只会得到同样结果。
+8. **Task 12 三例一次即绿；崩溃窗口按"claim 后、I/O 前"落测**（2026-11-07）。
+   幂等键（Task 10/11）与 `reclaim_running_effects`（P4 既有）已就位，三条集成用例首跑
+   `3 passed`，按计划"若幂等已成立则一次即绿"如实记录，不改断言。装置是
+   "真 Store + 真裸远端 git 仓库 + `FakeGitHubClient` + 真 `git push` 计数"：
+   崩溃点用「effect 已 claim 成 running、handler 还没跑」表示。**保证范围限于这段窗口**——
+   请求已经发出之后崩溃，客户端侧没有任何痕迹可查（本协议三个 GitHub 写接口没有幂等键），
+   重放会再写一次；这条局限写进模块 docstring，不靠放宽断言掩盖。
+   退避重试用例故意不注入 `push_branch`：若 push 已发生、随后 PR 请求 500，重放会再推一次
+   （服务端幂等，但调用计数为 2），那不属于"写只发生一次"的断言范围。
 
 ---
 
