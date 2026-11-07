@@ -13,11 +13,16 @@ import pytest
 from stableagent.control.audit import AuditWriter
 from stableagent.control.model import Action, ExplicitRequest
 from stableagent.control.policy import P5_POLICY_VERSION, StaticPolicy, StaticPolicyConfig
-from stableagent.integrations.repository import RepositoryWorkerExecutor
+from stableagent.integrations.repository import (
+    RepositoryWorkerExecutor,
+    guarded_prepare_worktree_handler,
+)
 from stableagent.orchestration.errors import PermanentEffectError
 from stableagent.orchestration.model import (
     Assignment,
     AssignmentStatus,
+    Effect,
+    EffectKind,
     Mandate,
     ReportKind,
     Ticket,
@@ -180,3 +185,66 @@ async def test_cancel_delegates_without_revalidation(tmp_path: pathlib.Path) -> 
     await executor.cancel(assignment)
     assert inner.cancelled == [assignment.id]
     assert store.list_audit(ticket_id=ticket.id, kind="revalidate") == []
+
+
+class _PrepareManager:
+    """prepare 的计数替身：拒绝时必须一次都不调。"""
+
+    def __init__(self) -> None:
+        self.prepared: list[str] = []
+
+    def prepare(self, ticket: Ticket, *, repository: str, base_ref: str) -> object:
+        self.prepared.append(ticket.id)
+        return object()
+
+
+def _prepare_effect(ticket: Ticket, assignment: Assignment) -> Effect:
+    return Effect(
+        id="ef-prepare",
+        kind=EffectKind.PREPARE_WORKTREE,
+        idempotency_key=f"prepare:{assignment.id}",
+        payload={
+            "ticket_id": ticket.id,
+            "assignment_id": assignment.id,
+            "repository": "/tmp/clone",
+            "base_ref": "main",
+        },
+        due_at=0,
+    )
+
+
+async def test_prepare_revalidates_before_the_manager(tmp_path: pathlib.Path) -> None:
+    store, policy, audit, ticket, assignment = _rig(tmp_path)
+    manager = _PrepareManager()
+    handler = guarded_prepare_worktree_handler(
+        manager,
+        store,
+        policy=policy,
+        audit=audit,
+        clock=FixedClock(),
+        ids=SequenceIds(),
+    )
+    await handler(_prepare_effect(ticket, assignment))
+    assert manager.prepared == [ticket.id]
+    rows = store.list_audit(ticket_id=ticket.id, kind="revalidate")
+    assert rows[-1]["action"] == "worktree"
+    assert store.list_reports(ticket.id) == []
+
+
+async def test_expired_mandate_parks_before_prepare(tmp_path: pathlib.Path) -> None:
+    store, policy, audit, ticket, assignment = _rig(tmp_path, expires_at=1)
+    manager = _PrepareManager()
+    handler = guarded_prepare_worktree_handler(
+        manager,
+        store,
+        policy=policy,
+        audit=audit,
+        clock=FixedClock(),
+        ids=SequenceIds(),
+    )
+    with pytest.raises(PermanentEffectError):
+        await handler(_prepare_effect(ticket, assignment))
+    assert manager.prepared == []
+    report = store.list_reports(ticket.id)[-1]
+    assert report.kind is ReportKind.BLOCKED
+    assert report.details == {"when": "worktree", "policy_version": P5_POLICY_VERSION}
