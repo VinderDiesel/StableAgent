@@ -23,6 +23,7 @@ from stableagent.control.model import (
 from stableagent.control.policy import StaticPolicy
 from stableagent.orchestration.errors import UnknownTicketError
 from stableagent.orchestration.model import (
+    AssignmentAction,
     AssignmentStatus,
     Clock,
     Effect,
@@ -31,6 +32,7 @@ from stableagent.orchestration.model import (
     Mandate,
     Ticket,
     TicketAction,
+    next_assignment_status,
     next_ticket_status,
 )
 from stableagent.orchestration.store import Store
@@ -135,8 +137,30 @@ class ApprovalService:
             raise ApprovalDecidedError(approval_id, current.status.value)
         status = ApprovalStatus.APPROVED if approve else ApprovalStatus.DENIED
         now = self._clock.now_ms()
-        self._store.update_approval(approval_id, status=status.value, decided_by=by, decided_at=now)
+        with self._store.transaction():
+            self._store.update_approval(
+                approval_id, status=status.value, decided_by=by, decided_at=now
+            )
+            if not approve:
+                self._fail_running_assignment(current.assignment_id, now)
         return current.model_copy(update={"status": status, "decided_by": by, "decided_at": now})
+
+    def _fail_running_assignment(self, assignment_id: str | None, now: int) -> None:
+        """B2：拒绝意味着这条执行线不能再换动作继续；只碰 RUNNING，终态行原样保留。"""
+        if assignment_id is None:
+            return
+        assignment = self._store.get_assignment(assignment_id)
+        if assignment is None or assignment.status is not AssignmentStatus.RUNNING:
+            return
+        self._store.update_assignment(
+            assignment.model_copy(
+                update={
+                    "status": next_assignment_status(assignment.status, AssignmentAction.FAIL),
+                    "ended_at": now,
+                    "failure": "approval_denied",
+                }
+            )
+        )
 
     def revoke_pending(self, ticket_id: str) -> int:
         """撤销只碰 pending 行：`decided_by` 留空（撤销不是人工裁决），`decided_at` 记终态时刻。"""

@@ -10,6 +10,12 @@ from stableagent.control.approval import HIGH_RISK_ACTIONS, ApprovalGate, Approv
 from stableagent.control.audit import AuditWriter
 from stableagent.control.errors import ApprovalDecidedError, UnknownApprovalError
 from stableagent.control.model import Action, ApprovalStatus, Resource, resource_digest
+from stableagent.orchestration.model import (
+    Assignment,
+    AssignmentStatus,
+    Ticket,
+    TicketStatus,
+)
 from stableagent.orchestration.store import Store
 from tests.support import FixedClock, SequenceIds
 from tests.unit.test_authorization_audit import _policy, _request
@@ -269,3 +275,47 @@ def test_gate_passes_policy_denials_straight_through(store: Store, clock: FixedC
         ("enable_auto_merge", "not_granted", "deny"),
         ("push_branch", "mandate_expired", "deny"),
     ]
+
+
+def test_denial_fails_a_running_assignment(store: Store, clock: FixedClock) -> None:
+    """B2 的 Assignment 半边：人工拒绝后，仍在跑的 Assignment 必须 FAILED，不能换动作继续。"""
+    policy, approvals, _ = _env(store, clock)
+    mandate = _mandate(policy)
+    store.insert_mandate(mandate)
+    ticket = Ticket(
+        id="tk-00000001",
+        title="t",
+        task="t",
+        created_at=clock.now_ms(),
+        status=TicketStatus.RUNNING,
+        mandate_id=mandate.id,
+    )
+    store.insert_ticket(ticket)
+    assignment = Assignment(id="as-00000001", ticket_id=ticket.id, status=AssignmentStatus.RUNNING)
+    store.insert_assignment(assignment)
+    approval = approvals.submit(
+        ticket.id,
+        Action.PUSH_BRANCH,
+        _digest(BRANCH_A),
+        "high_risk",
+        assignment_id=assignment.id,
+    )
+
+    approvals.decide(approval.id, False, "octocat")
+
+    failed = store.get_assignment(assignment.id)
+    assert failed is not None
+    assert failed.status is AssignmentStatus.FAILED
+    assert failed.failure == "approval_denied"
+    assert failed.ended_at == clock.now_ms()
+    assert approvals.get(approval.id).status is ApprovalStatus.DENIED
+
+
+def test_denial_without_a_running_assignment_is_still_decidable(
+    store: Store, clock: FixedClock
+) -> None:
+    """审批单测试的既有形状：没有 assignment_id 时只翻审批行，不抛也不造 Assignment。"""
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.PUSH_BRANCH, _digest(BRANCH_A), "high_risk")
+    approvals.decide(approval.id, False, "octocat")
+    assert approvals.get(approval.id).status is ApprovalStatus.DENIED
