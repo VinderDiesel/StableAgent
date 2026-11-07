@@ -131,8 +131,9 @@ def test_child_env_does_not_invent_a_path_when_the_host_has_none(tmp_path: pathl
 
 
 #: macOS 的 libsystem 在 exec 时自己往环境里加 `__CF_USER_TEXT_ENCODING`（值形如 `0x1F5:0x0:0x0`），
-#: 与我们传的 `env` 无关，Linux CI 上不存在。"孩子没有第四个来源"这句话只能带着这份名单说。
-OS_INJECTED_KEYS = {"__CF_USER_TEXT_ENCODING"}
+#: 与本机 CPython 在 `LANG` 存在时加 `LC_CTYPE` 一样，都与我们传的 `env` 无关，Linux CI 上不存在。
+#: "孩子没有第四个来源"这句话只能带着这份名单说；名单是 OS 注入项，不是白名单放行。
+OS_INJECTED_KEYS = {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
 
 
 def test_child_process_sees_only_the_allowlist(tmp_path: pathlib.Path) -> None:
