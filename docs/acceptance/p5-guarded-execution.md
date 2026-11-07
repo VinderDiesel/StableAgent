@@ -2346,6 +2346,24 @@ git diff 234f620..HEAD --stat -- stableagent/core/        # 必须 0 行（L1）
 | 12 | 3.11 | F5 |
 | 13 | 3.12 | M3 出口、L6 类型检查 |
 
+### 执行期偏差登记（计划落盘后发现的，逐条记明理由）
+
+1. **`PolicyToolFilter` 去掉 `policy` / `audit` 两个参数**（Task 5，2026-11-07）。
+   最终签名是 `PolicyToolFilter(mandate, *, mcp_keys: Mapping[str, str])`。
+   理由：`select` 是 `mandate.allowed_mcp ∩ mcp_keys` 的纯函数，不做判定也不写审计；
+   判定与审计属于调用侧的 `guard_mcp_tool`。留着两个用不到的依赖就是死参数，
+   也会让人误以为"过滤即授权"。Task 5 / Task 6 的示例调用已同步改写。
+2. **静态门禁按 CI 的取值范围跑，不跑仓库根**（Task 5 发现，2026-11-07）。
+   `.github/workflows/ci.yml:22,24` 的命令是
+   `ruff check stableagent tests examples benchmarks` 与
+   `ruff format --check stableagent tests examples benchmarks`。
+   本机 ruff 0.17.4 的 `format` 会连 Markdown 里的 Python 代码块一起排，
+   `ruff format --check .` 因此报出 6 个**既有**文档文件（README.md、
+   docs/acceptance/p4-ticket-orchestration.md、docs/archive/2026-initial-project-brief.md、
+   docs/blog/01-checkpoint-deep-dive.md、docs/specs/p4-ticket-orchestration-kernel.md，
+   以及本账本自身的示例块）。这些不在 CI 门禁范围内，也不属于 M3 的改动面，
+   **不在 M3 里顺手重排**；后续所有门禁命令一律用 CI 的四个目录。
+
 ---
 
 ### Task 1: `integrations/` 包骨架、错误家族与方向锁（步骤 3.1 前半）
@@ -2825,8 +2843,7 @@ async def test_adapter_output_flows_through_evidence_and_context_budget():
 **Interfaces:**
 - Consumes: `StaticPolicy`、`AuditWriter`、`Mandate`、`Action`、`Resource`、`ToolSelector`、
   `Tool`/`ToolResult`。
-- Produces: `PolicyToolFilter(mandate, *, mcp_keys: Mapping[str, str], policy: StaticPolicy,
-  audit: AuditWriter, ticket_id: str | None = None)`，方法
+- Produces: `PolicyToolFilter(mandate, *, mcp_keys: Mapping[str, str])`，方法
   `select(specs: list[dict[str, Any]], state: AgentState) -> list[dict[str, Any]]`、
   `as_tool_selector() -> ToolSelector`；
   `guard_mcp_tool(tool: Tool, *, server: str, tool_name: str, mandate: Mandate,
@@ -2839,9 +2856,9 @@ async def test_adapter_output_flows_through_evidence_and_context_budget():
 def test_filter_hides_mcp_tools_outside_the_mandate(tmp_path):
     # 装置：真 Store + StaticPolicy.create_mandate(allowed_mcp=["fs:read_file"])
     mandate, policy, audit, store = _rig(tmp_path, allowed_mcp=["fs:read_file"])
-    tool_filter = PolicyToolFilter(mandate, mcp_keys={
-        "fs__read_file": "fs:read_file", "fs__drop_table": "fs:drop_table"},
-        policy=policy, audit=audit)
+    tool_filter = PolicyToolFilter(
+        mandate, mcp_keys={"fs__read_file": "fs:read_file", "fs__drop_table": "fs:drop_table"}
+    )
     specs = [{"name": "fs__read_file"}, {"name": "fs__drop_table"}, {"name": "local_tool"}]
     kept = tool_filter.select(specs, AgentState(run_id="r", agent_name="a"))
     assert [s["name"] for s in kept] == ["fs__read_file", "local_tool"]
@@ -2934,8 +2951,7 @@ async def test_discovery_is_not_authorization():
         tools = await adapter.tools()
         assert [t.name for t in tools] == ["echo__echo"]   # secret 发现了但不可见
         mandate, policy, audit, store = _rig(...)          # allowed_mcp=["echo:echo"]
-        tool_filter = PolicyToolFilter(mandate, mcp_keys=adapter.keys(),
-                                       policy=policy, audit=audit)
+        tool_filter = PolicyToolFilter(mandate, mcp_keys=adapter.keys())
         specs = [{"name": t.name} for t in tools] + [{"name": "echo__secret"}]
         assert [s["name"] for s in tool_filter.select(specs, AgentState(run_id="r", agent_name="a"))] == ["echo__echo"]
     finally:
