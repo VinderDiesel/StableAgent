@@ -2691,7 +2691,7 @@ def test_bot_review_comment_is_not_a_candidate(tmp_path: pathlib.Path) -> None:
 
 def test_review_comment_without_review_id_is_a_schema_error(tmp_path: pathlib.Path) -> None:
     source, _, _ = _source(tmp_path)
-    with pytest.raises(SourceSchemaError):
+    with pytest.raises(SourceSchemaError, match="review_id"):
         source.normalize(
             _read_item(
                 GitHubReadKind.REVIEW_COMMENT,

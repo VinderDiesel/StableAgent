@@ -154,6 +154,12 @@ class GitHubSource:
             return self._issue(item)
         if kind is TriggerKind.PULL_REQUEST:
             return self._pull_request(item)
+        if kind is TriggerKind.ISSUE_COMMENT:
+            return self._issue_comment(item)
+        if kind is TriggerKind.REVIEW_COMMENT:
+            return self._review_comment(item)
+        if kind is TriggerKind.REVIEW:
+            return self._review(item)
         raise SourceSchemaError(f"unsupported kind {item.kind.value}")
 
     def _issue(self, item: GitHubReadItem) -> SourceEvent | None:
@@ -216,6 +222,95 @@ class GitHubSource:
 
     def _is_self(self, actor: str) -> bool:
         return actor.casefold() == self._bot_login.casefold()
+
+    def _issue_comment(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        comment_id = _int_field(resource, "id")
+        number = _int_field(resource, "issue_number")
+        if bool(resource.get("is_pull_request")):
+            key = pull_request_thread_key(self._repository, number)
+            thread_kind = ThreadKind.PULL_REQUEST
+            channel_kind = ChannelKind.PULL_REQUEST_COMMENT
+        else:
+            key = issue_thread_key(self._repository, number)
+            thread_kind = ThreadKind.ISSUE
+            channel_kind = ChannelKind.ISSUE_COMMENT
+        external_ref = f"#{number}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.ISSUE_COMMENT, comment_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=thread_kind,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, channel_kind, external_ref),
+                thread_key=key,
+                kind=channel_kind,
+                external_ref=external_ref,
+            ),
+        )
+
+    def _review_comment(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        comment_id = _int_field(resource, "id")
+        pull_number = _int_field(resource, "pull_number")
+        review_id = _int_field(resource, "review_id")
+        key = review_thread_key(self._repository, pull_number, review_id)
+        external_ref = f"review:{review_id}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.REVIEW_COMMENT, comment_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REVIEW,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, ChannelKind.REVIEW_REPLY, external_ref),
+                thread_key=key,
+                kind=ChannelKind.REVIEW_REPLY,
+                external_ref=external_ref,
+            ),
+        )
+
+    def _review(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        review_id = _int_field(resource, "id")
+        pull_number = _int_field(resource, "pull_number")
+        key = review_thread_key(self._repository, pull_number, review_id)
+        external_ref = f"review:{review_id}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.REVIEW, review_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REVIEW,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource, closed_state="dismissed"),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, ChannelKind.REVIEW_REPLY, external_ref),
+                thread_key=key,
+                kind=ChannelKind.REVIEW_REPLY,
+                external_ref=external_ref,
+            ),
+        )
 
 
 def _int_field(resource: dict[str, Any], field: str) -> int:

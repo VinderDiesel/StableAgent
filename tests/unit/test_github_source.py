@@ -198,3 +198,117 @@ def test_malformed_issue_is_a_schema_error(
     source, _, _ = _source(tmp_path)
     with pytest.raises(SourceSchemaError):
         source.normalize(_read_item(GitHubReadKind.ISSUE, resource))
+
+
+def test_issue_comment_maps_to_issue_thread_and_channel(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {"id": 11, "issue_number": 7, "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "issue:owner/repo#7"
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.ISSUE_COMMENT
+    assert event.channel.external_ref == "#7"
+    assert event.channel.thread_key == event.thread.key
+    assert event.trigger.kind is TriggerKind.ISSUE_COMMENT
+    assert event.trigger.external_id == "github:owner/repo:issue_comment:11"
+
+
+def test_comment_on_pull_request_uses_the_pr_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {
+                "id": 12,
+                "issue_number": 9,
+                "is_pull_request": True,
+                "user": {"login": "alice"},
+            },
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "pr:owner/repo#9"
+    assert event.thread.kind is ThreadKind.PULL_REQUEST
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.PULL_REQUEST_COMMENT
+
+
+def test_review_comment_creates_review_thread_and_reply_channel(
+    tmp_path: pathlib.Path,
+) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW_COMMENT,
+            {"id": 13, "pull_number": 9, "review_id": 42, "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "review:owner/repo#9:42"
+    assert event.thread.kind is ThreadKind.REVIEW
+    assert event.thread.external_ref == "review:42"
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.REVIEW_REPLY
+    assert event.channel.external_ref == "review:42"
+    assert event.trigger.kind is TriggerKind.REVIEW_COMMENT
+    assert event.trigger.external_id == "github:owner/repo:review_comment:13"
+
+
+def test_review_submission_maps_to_an_open_review_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW,
+            {"id": 42, "pull_number": 9, "state": "submitted", "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.kind is ThreadKind.REVIEW
+    assert event.thread.status is ThreadStatus.OPEN
+    assert event.trigger.kind is TriggerKind.REVIEW
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.REVIEW_REPLY
+
+
+def test_dismissed_review_closes_the_review_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW,
+            {"id": 42, "pull_number": 9, "state": "dismissed", "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.status is ThreadStatus.CLOSED
+
+
+def test_bot_review_comment_is_not_a_candidate(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW_COMMENT,
+            {
+                "id": 13,
+                "pull_number": 9,
+                "review_id": 42,
+                "user": {"login": "sa-agent[bot]"},
+            },
+        )
+    )
+    assert event is None
+
+
+def test_review_comment_without_review_id_is_a_schema_error(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    with pytest.raises(SourceSchemaError, match="review_id"):
+        source.normalize(
+            _read_item(
+                GitHubReadKind.REVIEW_COMMENT,
+                {"id": 13, "pull_number": 9, "user": {"login": "alice"}},
+            )
+        )
