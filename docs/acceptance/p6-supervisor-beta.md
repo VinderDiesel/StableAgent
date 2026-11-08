@@ -3462,7 +3462,7 @@ import xml.etree.ElementTree as ET
 
 root = ET.parse("coverage.xml").getroot()
 for cls in root.iter("class"):
-    if cls.get("filename") == "stableagent/supervisor/source.py":
+    if cls.get("filename") == "supervisor/source.py":
         print("supervisor/source.py", cls.get("line-rate"))
 PY
 ```
@@ -3470,6 +3470,10 @@ PY
 Read: `/tmp/p6-m2-pytest.txt`、`/tmp/p6-m2-coverage.txt`
 
 Expected: `0 failed`；`supervisor/source.py` 行覆盖率 ≥ `0.9`（CI 闸门口径）。
+
+本机提示：若 shell 的 `NO_PROXY` 含 `[::1]`，macOS `getproxies()` 会让 httpx 把
+`no` 当代理 scheme（`Invalid port: ':1]'`）。跑全量前用
+`env -u NO_PROXY -u no_proxy` 包一层即可；该失败与仓库代码无关。
 
 - [ ] **Step 6: 提交**
 
