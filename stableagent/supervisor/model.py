@@ -32,6 +32,7 @@ class ThreadKind(str, Enum):
     ISSUE = "issue"
     PULL_REQUEST = "pull_request"
     REVIEW = "review"
+    REPOSITORY = "repository"
 
 
 class ThreadStatus(str, Enum):

@@ -160,6 +160,8 @@ class GitHubSource:
             return self._review_comment(item)
         if kind is TriggerKind.REVIEW:
             return self._review(item)
+        if kind is TriggerKind.CI_STATUS:
+            return self._ci_status(item)
         raise SourceSchemaError(f"unsupported kind {item.kind.value}")
 
     def _issue(self, item: GitHubReadItem) -> SourceEvent | None:
@@ -312,11 +314,60 @@ class GitHubSource:
             ),
         )
 
+    def _ci_status(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = resource.get("actor", "github")
+        if not isinstance(actor, str) or not actor:
+            raise SourceSchemaError("actor 必须是非空字符串")
+        if self._is_self(actor):
+            return None
+        status_id = _int_field(resource, "id")
+        _str_field(resource, "sha")
+        state = _str_field(resource, "state")
+        if state not in {"pending", "success", "failure", "error"}:
+            raise SourceSchemaError(f"未知 CI state：{state}")
+        pull_number = resource.get("pull_number")
+        if pull_number is not None and (
+            not isinstance(pull_number, int) or isinstance(pull_number, bool)
+        ):
+            raise SourceSchemaError("pull_number 必须是整数或 null")
+        if pull_number is not None:
+            key = pull_request_thread_key(self._repository, pull_number)
+            thread = Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref=f"#{pull_number}",
+                last_trigger_at=item.occurred_at,
+                status=ThreadStatus.OPEN,
+            )
+        else:
+            key = repository_thread_key(self._repository)
+            thread = Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REPOSITORY,
+                external_ref=self._repository,
+                last_trigger_at=item.occurred_at,
+                status=ThreadStatus.OPEN,
+            )
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.CI_STATUS, status_id, actor, key),
+            thread=thread,
+        )
+
 
 def _int_field(resource: dict[str, Any], field: str) -> int:
     value = resource.get(field)
     if not isinstance(value, int) or isinstance(value, bool):
         raise SourceSchemaError(f"{field} 必须是整数")
+    return value
+
+
+def _str_field(resource: dict[str, Any], field: str) -> str:
+    value = resource.get(field)
+    if not isinstance(value, str) or not value:
+        raise SourceSchemaError(f"{field} 必须是非空字符串")
     return value
 
 

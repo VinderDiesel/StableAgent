@@ -312,3 +312,50 @@ def test_review_comment_without_review_id_is_a_schema_error(tmp_path: pathlib.Pa
                 {"id": 13, "pull_number": 9, "user": {"login": "alice"}},
             )
         )
+
+
+def test_ci_status_with_pull_request_attaches_to_the_pr_thread(
+    tmp_path: pathlib.Path,
+) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.CI_STATUS,
+            {"id": 501, "sha": "abc123", "state": "success", "pull_number": 9},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "pr:owner/repo#9"
+    assert event.thread.kind is ThreadKind.PULL_REQUEST
+    assert event.trigger.kind is TriggerKind.CI_STATUS
+    assert event.trigger.external_id == "github:owner/repo:ci_status:501"
+    assert event.trigger.actor == "github"
+    assert event.channel is None
+
+
+def test_ci_status_without_pull_request_uses_the_repository_thread(
+    tmp_path: pathlib.Path,
+) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.CI_STATUS,
+            {"id": 502, "sha": "abc123", "state": "failure"},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "repo:owner/repo"
+    assert event.thread.kind is ThreadKind.REPOSITORY
+    assert event.thread.external_ref == "owner/repo"
+    assert event.channel is None
+
+
+def test_unknown_ci_state_is_a_schema_error(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    with pytest.raises(SourceSchemaError, match="CI state"):
+        source.normalize(
+            _read_item(
+                GitHubReadKind.CI_STATUS,
+                {"id": 503, "sha": "abc123", "state": "exploded"},
+            )
+        )

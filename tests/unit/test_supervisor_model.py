@@ -116,3 +116,12 @@ def test_records_have_safe_defaults() -> None:
     assert decision.reason_codes == [] and decision.mandate_id is None and decision.attempt == 1
     cursor = SourceCursor(source="github")
     assert cursor.health is SourceHealth.OK and cursor.consecutive_failures == 0
+
+
+def test_thread_kinds_are_pinned() -> None:
+    assert {k.value for k in ThreadKind} == {
+        "issue",
+        "pull_request",
+        "review",
+        "repository",
+    }
