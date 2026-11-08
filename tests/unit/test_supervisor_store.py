@@ -13,6 +13,11 @@ from stableagent.supervisor import SUPERVISOR_SCHEMA_VERSION
 from stableagent.supervisor.model import (
     Channel,
     ChannelKind,
+    Decision,
+    DecisionOutcome,
+    DecisionStrength,
+    SourceCursor,
+    SourceHealth,
     Subscription,
     SubscriptionMode,
     Thread,
@@ -190,3 +195,65 @@ def test_subscription_list_filters_by_thread_and_mode(store: SupervisorStore) ->
         SubscriptionMode.OWN,
         SubscriptionMode.CONTEXT,
     ]
+
+
+def _decision(*, attempt: int = 1, trigger_id: str = "tg-0001") -> Decision:
+    return Decision(
+        id=f"dc-{attempt}",
+        trigger_ids=[trigger_id],
+        outcome=DecisionOutcome.OBSERVE,
+        strength=DecisionStrength.INFERRED,
+        reason_codes=["would_accept"],
+        policy_version="p6-v1",
+        request_digest="digest-1",
+        attempt=attempt,
+        created_at=10 * attempt,
+    )
+
+
+def test_decision_round_trip_keeps_trigger_links(store: SupervisorStore) -> None:
+    store.insert_trigger(_trigger())
+    store.insert_decision(_decision())
+    loaded = store.get_decision("dc-1")
+    assert loaded is not None
+    assert loaded.trigger_ids == ["tg-0001"]
+    assert store.list_decisions(trigger_id="tg-0001")[0].id == "dc-1"
+    assert store.list_decisions(trigger_id="tg-404") == []
+
+
+def test_decision_request_digest_is_idempotent_per_attempt(store: SupervisorStore) -> None:
+    store.insert_trigger(_trigger())
+    store.insert_decision(_decision())
+    duplicate = _decision().model_copy(update={"id": "dc-dup"})
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_decision(duplicate)
+    store.insert_decision(_decision(attempt=2).model_copy(update={"id": "dc-2"}))
+    assert [d.attempt for d in store.list_decisions()] == [1, 2]
+
+
+def test_decision_filters_by_mandate(store: SupervisorStore) -> None:
+    store.insert_trigger(_trigger())
+    bound = _decision().model_copy(update={"id": "dc-bound", "mandate_id": "md-1"})
+    store.insert_decision(bound)
+    assert [d.id for d in store.list_decisions(mandate_id="md-1")] == ["dc-bound"]
+
+
+def test_source_cursor_upsert_keeps_one_row(store: SupervisorStore) -> None:
+    store.put_source_cursor(SourceCursor(source="github", cursor="1"))
+    store.put_source_cursor(
+        SourceCursor(
+            source="github",
+            cursor="2",
+            last_success_at=20,
+            consecutive_failures=3,
+            health=SourceHealth.DEGRADED,
+        )
+    )
+    loaded = store.get_source_cursor("github")
+    assert loaded is not None
+    assert (loaded.cursor, loaded.consecutive_failures, loaded.health) == (
+        "2",
+        3,
+        SourceHealth.DEGRADED,
+    )
+    assert [c.source for c in store.list_source_cursors()] == ["github"]

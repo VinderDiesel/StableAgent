@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from stableagent.orchestration.model import Clock
 from stableagent.orchestration.store import Store
@@ -16,6 +17,11 @@ from stableagent.supervisor import SUPERVISOR_SCHEMA_VERSION
 from stableagent.supervisor.model import (
     Channel,
     ChannelKind,
+    Decision,
+    DecisionOutcome,
+    DecisionStrength,
+    SourceCursor,
+    SourceHealth,
     Subscription,
     SubscriptionMode,
     Thread,
@@ -53,6 +59,24 @@ _SUPERVISOR_SCHEMA: dict[str, str] = {
         " id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, thread_key TEXT NOT NULL,"
         " mode TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER)"
     ),
+    "decisions": (
+        "CREATE TABLE IF NOT EXISTS decisions ("
+        " id TEXT PRIMARY KEY, outcome TEXT NOT NULL, strength TEXT NOT NULL,"
+        " reason_codes TEXT NOT NULL DEFAULT '[]', policy_version TEXT NOT NULL,"
+        " mandate_id TEXT, request_digest TEXT NOT NULL, attempt INTEGER NOT NULL,"
+        " created_at INTEGER NOT NULL, UNIQUE (request_digest, attempt))"
+    ),
+    "decision_triggers": (
+        "CREATE TABLE IF NOT EXISTS decision_triggers ("
+        " decision_id TEXT NOT NULL, trigger_id TEXT NOT NULL,"
+        " PRIMARY KEY (decision_id, trigger_id))"
+    ),
+    "source_cursors": (
+        "CREATE TABLE IF NOT EXISTS source_cursors ("
+        " source TEXT PRIMARY KEY, cursor TEXT, last_success_at INTEGER,"
+        " consecutive_failures INTEGER NOT NULL DEFAULT 0,"
+        " health TEXT NOT NULL DEFAULT 'ok')"
+    ),
 }
 
 _SUPERVISOR_INDEXES: tuple[str, ...] = (
@@ -61,6 +85,9 @@ _SUPERVISOR_INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS subscriptions_thread ON subscriptions (thread_key, ended_at)",
     "CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_live"
     " ON subscriptions (ticket_id, thread_key, mode) WHERE ended_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS decisions_created ON decisions (created_at, id)",
+    "CREATE INDEX IF NOT EXISTS decisions_mandate ON decisions (mandate_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS decision_triggers_trigger ON decision_triggers (trigger_id)",
 )
 
 
@@ -108,6 +135,16 @@ def _row_to_subscription(row: sqlite3.Row) -> Subscription:
         mode=SubscriptionMode(row["mode"]),
         created_at=row["created_at"],
         ended_at=row["ended_at"],
+    )
+
+
+def _row_to_source_cursor(row: sqlite3.Row) -> SourceCursor:
+    return SourceCursor(
+        source=row["source"],
+        cursor=row["cursor"],
+        last_success_at=row["last_success_at"],
+        consecutive_failures=row["consecutive_failures"],
+        health=SourceHealth(row["health"]),
     )
 
 
@@ -262,3 +299,120 @@ class SupervisorStore(Store):
             f"SELECT * FROM subscriptions {where} ORDER BY created_at ASC, id ASC", params
         ).fetchall()
         return [_row_to_subscription(row) for row in rows]
+
+    def insert_decision(self, decision: Decision) -> None:
+        self._conn.execute(
+            "INSERT INTO decisions"
+            " (id, outcome, strength, reason_codes, policy_version, mandate_id,"
+            " request_digest, attempt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                decision.id,
+                decision.outcome.value,
+                decision.strength.value,
+                json.dumps(decision.reason_codes, sort_keys=True, ensure_ascii=False),
+                decision.policy_version,
+                decision.mandate_id,
+                decision.request_digest,
+                decision.attempt,
+                decision.created_at,
+            ),
+        )
+        self._conn.executemany(
+            "INSERT INTO decision_triggers (decision_id, trigger_id) VALUES (?, ?)",
+            [(decision.id, trigger_id) for trigger_id in decision.trigger_ids],
+        )
+
+    def _row_to_decision(self, row: sqlite3.Row) -> Decision:
+        trigger_ids = [
+            str(r[0])
+            for r in self._conn.execute(
+                "SELECT trigger_id FROM decision_triggers WHERE decision_id = ?"
+                " ORDER BY trigger_id ASC",
+                (row["id"],),
+            ).fetchall()
+        ]
+        return Decision(
+            id=row["id"],
+            trigger_ids=trigger_ids,
+            outcome=DecisionOutcome(row["outcome"]),
+            strength=DecisionStrength(row["strength"]),
+            reason_codes=json.loads(row["reason_codes"]),
+            policy_version=row["policy_version"],
+            mandate_id=row["mandate_id"],
+            request_digest=row["request_digest"],
+            attempt=row["attempt"],
+            created_at=row["created_at"],
+        )
+
+    def get_decision(self, decision_id: str) -> Decision | None:
+        row = self._conn.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+        return self._row_to_decision(row) if row else None
+
+    def list_decisions(
+        self,
+        *,
+        trigger_id: str | None = None,
+        mandate_id: str | None = None,
+        limit: int = 100,
+    ) -> list[Decision]:
+        clauses, params = [], []
+        joins = ""
+        if trigger_id is not None:
+            joins = " JOIN decision_triggers dt ON dt.decision_id = d.id"
+            clauses.append("dt.trigger_id = ?")
+            params.append(trigger_id)
+        if mandate_id is not None:
+            clauses.append("d.mandate_id = ?")
+            params.append(mandate_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT DISTINCT d.* FROM decisions d{joins} {where}"
+            " ORDER BY d.created_at ASC, d.id ASC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [self._row_to_decision(row) for row in rows]
+
+    def get_source_cursor(self, source: str) -> SourceCursor | None:
+        row = self._conn.execute(
+            "SELECT * FROM source_cursors WHERE source = ?", (source,)
+        ).fetchone()
+        return _row_to_source_cursor(row) if row else None
+
+    def put_source_cursor(self, cursor: SourceCursor) -> None:
+        self._conn.execute(
+            "INSERT INTO source_cursors"
+            " (source, cursor, last_success_at, consecutive_failures, health)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor,"
+            " last_success_at = excluded.last_success_at,"
+            " consecutive_failures = excluded.consecutive_failures,"
+            " health = excluded.health",
+            (
+                cursor.source,
+                cursor.cursor,
+                cursor.last_success_at,
+                cursor.consecutive_failures,
+                cursor.health.value,
+            ),
+        )
+
+    def list_source_cursors(self) -> list[SourceCursor]:
+        rows = self._conn.execute("SELECT * FROM source_cursors ORDER BY source ASC").fetchall()
+        return [_row_to_source_cursor(row) for row in rows]
+
+    def list_pending_approvals(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM approval_requests WHERE status = 'pending'"
+            " ORDER BY requested_at ASC, id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_failed_effects(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT e.id AS effect_id, e.kind AS kind, e.last_error AS last_error,"
+            " e.due_at AS due_at, a.ticket_id AS ticket_id"
+            " FROM effects e"
+            " JOIN assignments a ON json_extract(e.payload, '$.assignment_id') = a.id"
+            " WHERE e.state = 'failed' ORDER BY e.due_at ASC, e.id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]

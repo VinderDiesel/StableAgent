@@ -1238,9 +1238,7 @@ Expected: FAIL，`AttributeError: 'SupervisorStore' object has no attribute 'ins
         )
 
     def get_decision(self, decision_id: str) -> Decision | None:
-        row = self._conn.execute(
-            "SELECT * FROM decisions WHERE id = ?", (decision_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
         return self._row_to_decision(row) if row else None
 
     def list_decisions(
@@ -1292,9 +1290,7 @@ Expected: FAIL，`AttributeError: 'SupervisorStore' object has no attribute 'ins
         )
 
     def list_source_cursors(self) -> list[SourceCursor]:
-        rows = self._conn.execute(
-            "SELECT * FROM source_cursors ORDER BY source ASC"
-        ).fetchall()
+        rows = self._conn.execute("SELECT * FROM source_cursors ORDER BY source ASC").fetchall()
         return [_row_to_source_cursor(row) for row in rows]
 
     def list_pending_approvals(self) -> list[dict[str, Any]]:
