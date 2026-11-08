@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from enum import Enum
+from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from stableagent.control.audit import AuditWriter
 from stableagent.control.model import Action, Admission, ExplicitRequest
@@ -171,3 +173,59 @@ class GitHubIntake:
             )
         )
         return ticket
+
+
+class GitHubReadKind(str, Enum):
+    """只读侧事件分类；与 supervisor 的 TriggerKind 一一对应，方向锁禁止反向 import。"""
+
+    ISSUE = "issue"
+    PULL_REQUEST = "pull_request"
+    ISSUE_COMMENT = "issue_comment"
+    REVIEW_COMMENT = "review_comment"
+    REVIEW = "review"
+    CI_STATUS = "ci_status"
+
+
+class GitHubReadItem(BaseModel):
+    """一条只读事件：`resource` 保持 GitHub 形状，`occurred_at` 已归一到毫秒。"""
+
+    kind: GitHubReadKind
+    occurred_at: int
+    resource: dict[str, Any]
+    deleted: bool = False
+
+
+class GitHubReadPage(BaseModel):
+    items: list[GitHubReadItem] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
+@runtime_checkable
+class GitHubReadClient(Protocol):
+    async def list_events(
+        self, *, repository: str, cursor: str | None, limit: int
+    ) -> GitHubReadPage: ...
+
+
+class FakeGitHubReadClient:
+    """确定性只读 fake：`offset:<n>` 游标分页，按调用顺序记录，失败一次即清空。"""
+
+    def __init__(self, items: Iterable[GitHubReadItem], *, page_size: int | None = None) -> None:
+        self.items = list(items)
+        self.page_size = page_size
+        self.calls: list[dict[str, Any]] = []
+        self.fail_next: Exception | None = None
+
+    async def list_events(
+        self, *, repository: str, cursor: str | None, limit: int
+    ) -> GitHubReadPage:
+        self.calls.append({"repository": repository, "cursor": cursor, "limit": limit})
+        failure, self.fail_next = self.fail_next, None
+        if failure is not None:
+            raise failure
+        offset = int(cursor.split(":")[1]) if cursor else 0
+        size = min(limit, self.page_size) if self.page_size is not None else limit
+        chunk = self.items[offset : offset + size]
+        consumed = offset + len(chunk)
+        next_cursor = f"offset:{consumed}" if consumed < len(self.items) else None
+        return GitHubReadPage(items=chunk, next_cursor=next_cursor)
