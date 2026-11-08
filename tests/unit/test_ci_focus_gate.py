@@ -31,12 +31,15 @@ FOCUS_FILES = [
     "execution/sandbox.py",
     "integrations/github.py",
     "integrations/mcp.py",
+    "supervisor/model.py",
+    "supervisor/store.py",
+    "supervisor/views.py",
 ]
 
 
-def test_focus_covers_the_twenty_five_cardiac_files() -> None:
+def test_focus_covers_the_twenty_eight_cardiac_files() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert all(f'"{name}"' in text for name in FOCUS_FILES)
-    assert len(FOCUS_FILES) == 25
-    assert "25 文件" in text  # 步骤名与注释同步
+    assert len(FOCUS_FILES) == 28
+    assert "28 文件" in text  # 步骤名与注释同步
     assert text.count('".py"') == 0  # 不许用通配兜底
