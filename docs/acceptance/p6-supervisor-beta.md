@@ -47,16 +47,36 @@ supervisor。
 
 ### M1：Supervisor 基础层（规格 WP-6.1；ADR-06 决策 1/2/3/4/5/6/7/10）
 
-- [ ] **M1-1** ADR-06 落盘并 Accepted，账本与本计划建立。
-- [ ] **M1-2** `supervisor/` 包骨架与 `model.py`：六个记录、枚举、canonical digest。
-- [ ] **M1-3** `SupervisorStore`：七张表、索引、`p6-supervisor-v1` marker、P5 库无损迁移、
-      Trigger/Thread CRUD。
-- [ ] **M1-4** Channel 与 Subscription CRUD：目的地唯一、live 订阅部分唯一、结束可重订。
-- [ ] **M1-5** Decision（含 trigger 联结与 attempt 重评估）与 SourceCursor CRUD。
-- [ ] **M1-6** `views.py`：`needs_attention`、`open_tickets`、`failed_effects`、
+> **状态：M1 收口（Task 1~8 全部完成，2026-11-08）。** 证据提交：`1281566`（文档）、
+> `e7de113`（模型）、`ef03c60`（Trigger/Thread）、`43f15d0`（Channel/Subscription）、
+> `cf6af4a`（Decision/SourceCursor）、`c3f9801`（视图）、`2e04a1f`（CI FOCUS）、本收口提交。
+
+- [x] **M1-1** ADR-06 落盘并 Accepted，账本与本计划建立。
+      `docs/design-decisions/06-super-agent-router.md` 共 10 项决策、5 个被否决方案；
+      `docs/guides/supervisor-migration.md` 写明备份、marker 校验与降级步骤；提交 `1281566`。
+- [x] **M1-2** `supervisor/` 包骨架与 `model.py`：六个记录、枚举、canonical digest。
+      `tests/unit/test_supervisor_model.py` 5 passed；提交 `e7de113`。
+- [x] **M1-3** `SupervisorStore`：七张表、索引、`p6-supervisor-v1` marker、P5 库无损迁移、
+      Trigger/Thread CRUD。`tests/unit/test_supervisor_store.py` 首段 8 passed（含
+      "supervisor 与 Ticket 同事务回滚"）；提交 `ef03c60`。
+- [x] **M1-4** Channel 与 Subscription CRUD：目的地唯一、live 订阅部分唯一、结束可重订。
+      累计 11 passed；提交 `43f15d0`。
+- [x] **M1-5** Decision（含 trigger 联结与 attempt 重评估）与 SourceCursor CRUD。
+      累计 15 passed；提交 `cf6af4a`。
+- [x] **M1-6** `views.py`：`needs_attention`、`open_tickets`、`failed_effects`、
       `source_health`、`thread_timeline`、`ticket_timeline`。
-- [ ] **M1-7** CI FOCUS 由 25 扩到 28（新增 supervisor model/store/views），契约测试同步。
-- [ ] **M1-8** M1 出口：全量门禁、三解释器、L1/约束 1 复核、账本与状态面回填。
+      `tests/unit/test_supervisor_views.py` 6 passed；提交 `c3f9801`。
+- [x] **M1-7** CI FOCUS 由 25 扩到 28（新增 supervisor model/store/views），契约测试同步。
+      `tests/unit/test_ci_focus_gate.py` 1 passed；coverage.xml 实测三文件
+      `98.25% / 98.23% / 98.59%`（均 ≥90%）；提交 `2e04a1f`。
+- [x] **M1-8** M1 出口：全量门禁、三解释器、L1/约束 1 复核、账本与状态面回填。
+      本地读数（落盘 `/tmp/p6-m1-*.txt` 后读回）：`715 passed, 6 skipped, 0 failed`
+      （19.10s，覆盖 98.99%）；`ruff check` `All checks passed!`；`ruff format --check`
+      `143 files already formatted`；`mypy` `Success: no issues found in 64 source files`；
+      3.11.16 与 3.12.14 同为 `715 passed, 6 skipped`；
+      `git diff 234f620..HEAD --stat -- stableagent/core/` 与
+      `... -- stableagent/orchestration/service.py` 均为 0 行；`git diff --check` 无输出。
+      本提交完成账本与状态面回填。
 
 ### M2：GitHubSource 与 Trigger 接入（规格 WP-6.2；待 M1 收口后展开）
 

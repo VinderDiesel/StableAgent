@@ -4,6 +4,32 @@
 
 ## [Unreleased]
 
+### 实现（P6 M1 基础层，2026-11-08）
+- `stableagent/supervisor/`：`model.py` 的 `Trigger`/`Thread`/`Channel`/`Subscription`/`Decision`/
+  `SourceCursor` 六个不可变记录、canonical JSON 与 payload digest；`store.py` 的
+  `SupervisorStore(Store)` 复用 P4 连接与 `BEGIN IMMEDIATE`，追加 triggers/threads/channels/
+  subscriptions/decisions/decision_triggers/source_cursors 七张表与 `p6-supervisor-v1` marker；
+  `views.py` 六个只读视图（`needs_attention` 按审批→失败 effect→waiting→ready 排序，
+  timeline 不返回 payload）
+- Trigger 以 `UNIQUE(source, external_id)` 去重；live Subscription 用部分唯一索引；
+  Decision 以 `UNIQUE(request_digest, attempt)` 允许 `unavailable` 重评估
+- CI 心脏覆盖率闸门由 25 扩到 28 文件（新增 `supervisor/model.py`、`store.py`、`views.py`）
+- 测试：`715 passed, 6 skipped, 0 failed`、覆盖率 98.99%；三个 supervisor 文件
+  98.25% / 98.23% / 98.59%；Python 3.10.20 / 3.11.16 / 3.12.14 一致；
+  `stableagent/core/` 与 `orchestration/service.py` 对 `234f620` 均 0 行 diff
+- 状态口径：P6 M1 完成 8/8（里程碑 1/6），P6 仍为 Active，**不宣布阶段交付**
+
+### 规划与决策（P6 启动，2026-11-08）
+- 新增 [ADR-06](docs/design-decisions/06-super-agent-router.md)（Accepted）：`supervisor` 单向依赖、
+  `SupervisorStore` 子类同事务、Trigger 不可变与数据库去重、Thread/Channel 稳定映射且 Channel
+  不授予权限、Subscription 的 context 不扩大 Mandate、Decision 六 outcome / 三 strength 与
+  observe 默认、单次 `receive()` 原子边界、Source 只产 Trigger、注意力预算、无损迁移与降级
+- 新建 [P6 验收账本](docs/acceptance/p6-supervisor-beta.md)：出口不变量 I1~I6、M1~M6 里程碑与
+  M1 的 8 Task / 47 Step TDD 计划
+- 新增 [supervisor 迁移指南](docs/guides/supervisor-migration.md)：P5→P6 备份、marker 校验与
+  P6→P5 降级步骤
+- `README.md`、`docs/README.md`、`docs/acceptance/README.md`、`docs/Roadmap.md` 的阶段状态同步
+
 ### 实现（P5 受控执行与仓库集成，2026-11-08 远端 CI 双绿收口）
 - `stableagent/control/`：`StaticPolicy` 四道受理门与 Mandate 构造、审批服务/审批门/守卫式取消、
   `AuditWriter` 四类审计行；`stableagent/execution/`：worktree 创建/复用/清理、命名收口、
