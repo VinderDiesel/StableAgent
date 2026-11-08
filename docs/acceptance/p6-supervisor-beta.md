@@ -78,7 +78,19 @@ supervisor。
       `... -- stableagent/orchestration/service.py` 均为 0 行；`git diff --check` 无输出。
       本提交完成账本与状态面回填。
 
-### M2：GitHubSource 与 Trigger 接入（规格 WP-6.2；待 M1 收口后展开）
+### M2：GitHubSource 与 Trigger 接入（规格 WP-6.2）
+
+> **状态：Task 1~7 执行中（2026-11-08 展开）。** 主路径确定为 polling；读客户端沿用 P5 的
+> "协议 + 确定性 fake" 形态，读权限与写权限分离。任务级计划见 §7。
+
+- [ ] **M2-1** `Source` / `ChannelWriter` 协议、Source 错误四分类与 `SourceEvent`/`PollBatch` 记录。
+- [ ] **M2-2** Issue / PR 标准化：稳定 Thread key、`#number` external_ref、bot 身份过滤。
+- [ ] **M2-3** comment / review 映射：issue comment、PR comment、review 会话与 reply Channel。
+- [ ] **M2-4** CI status：有 PR 挂 PR Thread，无 PR 用 repository Thread。
+- [ ] **M2-5** `poll`：cursor 分页、乱序排序、批内去重、删除事件、临时/403/404/schema 错误。
+- [ ] **M2-6** 部署文档：polling 路径、只读权限、cursor 契约与 webhook 后续接法。
+- [ ] **M2-7** CI FOCUS 由 28 扩到 29（新增 `supervisor/source.py`），契约测试同步。
+- [ ] **M2-8** M2 出口：全量门禁、三解释器、L1/约束 1 复核、账本与状态面回填。
 
 ### M3：Router Intake、Subscription 与 Decision（规格 WP-6.3；待 M2 收口后展开）
 
@@ -1929,3 +1941,1663 @@ git commit -m "docs: close p6 m1 with the local gate evidence"
 - 类型一致性：`Trigger.payload`/`digest`、`SupervisorStore` 方法名、视图类名在 Task
   2~6 的 Interfaces 与代码块中一致。
 - 无占位符：所有 Step 都给出可执行命令或完整代码。
+
+## 7. M2 任务级实施计划（writing-plans 产出，2026-11-08）
+
+M2 展开为 **7 个 Task / 43 个 Step**，覆盖 M2-1~M2-8。主路径为 **polling**：读客户端只做
+只读列举，写入只发生在 `poll` 的单个事务里；读权限与写权限分离，Channel 只是目的地。
+
+### Task 1：只读客户端接缝与 Source 契约（M2-1）
+
+**Files:**
+- Modify: `stableagent/integrations/github.py`
+- Create: `stableagent/supervisor/source.py`
+- Test: `tests/unit/test_github_source.py`
+
+**Interfaces:**
+- Consumes: `stableagent.supervisor.model.{Channel, ChannelKind, Thread, Trigger}`。
+- Produces:
+  - `GitHubReadKind`（6 值 str 枚举，与 `TriggerKind` 一一对应；方向锁禁止 integrations
+    import supervisor，所以两边各有一个枚举，由 `TriggerKind(item.kind.value)` 对齐）
+  - `GitHubReadItem(kind, occurred_at, resource, deleted=False)`、
+    `GitHubReadPage(items, next_cursor)`
+  - `GitHubReadClient.list_events(*, repository, cursor, limit) -> GitHubReadPage`、
+    `FakeGitHubReadClient(items, *, page_size=None)`（`calls` / `fail_next`）
+  - `SourceError` 四子类：`source.transient` / `source.auth` / `source.gone` / `source.schema`
+  - `SourceEvent(trigger, thread, channel=None)`、`PollBatch(events, next_cursor, duplicates)`
+  - `Source.poll`、`ChannelWriter.write`、`FakeChannelWriter`
+  - `stable_trigger_id`、`stable_channel_id`、`issue_thread_key`、`pull_request_thread_key`、
+    `review_thread_key(repository, pull_number, review_id)`、`repository_thread_key`
+
+- [ ] **Step 1: 写失败测试**
+
+```python
+"""WP-6.2：只读轮询到 Trigger/Thread/Channel 的确定性映射。"""
+
+from __future__ import annotations
+
+import pytest
+
+from stableagent.integrations.github import (
+    FakeGitHubReadClient,
+    GitHubReadClient,
+    GitHubReadItem,
+    GitHubReadKind,
+    GitHubReadPage,
+)
+from stableagent.supervisor.model import Channel, ChannelKind
+from stableagent.supervisor.source import (
+    FakeChannelWriter,
+    SourceAuthError,
+    SourceGoneError,
+    SourceSchemaError,
+    SourceTransientError,
+    issue_thread_key,
+    pull_request_thread_key,
+    repository_thread_key,
+    review_thread_key,
+    stable_channel_id,
+    stable_trigger_id,
+)
+
+
+def _item(number: int = 1, *, occurred_at: int = 1) -> GitHubReadItem:
+    return GitHubReadItem(
+        kind=GitHubReadKind.ISSUE, occurred_at=occurred_at, resource={"number": number}
+    )
+
+
+async def test_read_fake_pages_with_offset_cursors_and_records_calls() -> None:
+    client = FakeGitHubReadClient([_item(1), _item(2), _item(3)], page_size=2)
+    assert isinstance(client, GitHubReadClient)
+
+    first = await client.list_events(repository="owner/repo", cursor=None, limit=10)
+    second = await client.list_events(repository="owner/repo", cursor=first.next_cursor, limit=10)
+
+    assert [item.resource["number"] for item in first.items] == [1, 2]
+    assert first.next_cursor == "offset:2"
+    assert [item.resource["number"] for item in second.items] == [3]
+    assert second.next_cursor is None
+    assert client.calls == [
+        {"repository": "owner/repo", "cursor": None, "limit": 10},
+        {"repository": "owner/repo", "cursor": "offset:2", "limit": 10},
+    ]
+
+
+async def test_read_fake_fail_next_raises_once_then_clears() -> None:
+    client = FakeGitHubReadClient([])
+    client.fail_next = SourceTransientError("503")
+    with pytest.raises(SourceTransientError):
+        await client.list_events(repository="owner/repo", cursor=None, limit=1)
+    empty = await client.list_events(repository="owner/repo", cursor=None, limit=1)
+    assert empty == GitHubReadPage()
+    assert client.fail_next is None
+
+
+def test_source_errors_carry_stable_codes() -> None:
+    assert SourceTransientError("503").code == "source.transient"
+    assert SourceAuthError("403").code == "source.auth"
+    assert SourceGoneError("404").code == "source.gone"
+    assert SourceSchemaError("bad").code == "source.schema"
+
+
+async def test_channel_writer_fake_records_and_fails_once() -> None:
+    writer = FakeChannelWriter()
+    channel = Channel(
+        id="ch-1",
+        thread_key="issue:owner/repo#1",
+        kind=ChannelKind.ISSUE_COMMENT,
+        external_ref="#1",
+    )
+    assert await writer.write(channel=channel, body="hi") == {"id": "fake-1"}
+    writer.fail_next = SourceTransientError("boom")
+    with pytest.raises(SourceTransientError):
+        await writer.write(channel=channel, body="again")
+    assert [body for _, body in writer.calls] == ["hi", "again"]
+    assert writer.fail_next is None
+
+
+def test_thread_keys_and_ids_are_stable() -> None:
+    assert issue_thread_key("owner/repo", 7) == "issue:owner/repo#7"
+    assert pull_request_thread_key("owner/repo", 7) == "pr:owner/repo#7"
+    assert review_thread_key("owner/repo", 7, 42) == "review:owner/repo#7:42"
+    assert repository_thread_key("owner/repo") == "repo:owner/repo"
+    assert stable_trigger_id("github:owner/repo:issue:7") == stable_trigger_id(
+        "github:owner/repo:issue:7"
+    )
+    assert stable_trigger_id("a") != stable_trigger_id("b")
+    assert stable_trigger_id("a").startswith("tg-")
+    first = stable_channel_id("issue:owner/repo#7", ChannelKind.ISSUE_COMMENT, "#7")
+    second = stable_channel_id("issue:owner/repo#7", ChannelKind.ISSUE_COMMENT, "#7")
+    assert first == second and first.startswith("ch-")
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py`
+
+Expected: FAIL —— `ModuleNotFoundError: No module named 'stableagent.supervisor.source'`
+（`GitHubReadClient` 也尚未存在）。
+
+- [ ] **Step 3: 在 `integrations/github.py` 追加只读接缝**
+
+导入行改为：
+
+```python
+from collections.abc import Iterable
+from enum import Enum
+from typing import Any, Protocol, runtime_checkable
+
+from pydantic import BaseModel, Field
+```
+
+文件末尾追加：
+
+```python
+class GitHubReadKind(str, Enum):
+    """只读侧事件分类；与 supervisor 的 TriggerKind 一一对应，方向锁禁止反向 import。"""
+
+    ISSUE = "issue"
+    PULL_REQUEST = "pull_request"
+    ISSUE_COMMENT = "issue_comment"
+    REVIEW_COMMENT = "review_comment"
+    REVIEW = "review"
+    CI_STATUS = "ci_status"
+
+
+class GitHubReadItem(BaseModel):
+    """一条只读事件：`resource` 保持 GitHub 形状，`occurred_at` 已归一到毫秒。"""
+
+    kind: GitHubReadKind
+    occurred_at: int
+    resource: dict[str, Any]
+    deleted: bool = False
+
+
+class GitHubReadPage(BaseModel):
+    items: list[GitHubReadItem] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
+@runtime_checkable
+class GitHubReadClient(Protocol):
+    async def list_events(
+        self, *, repository: str, cursor: str | None, limit: int
+    ) -> GitHubReadPage: ...
+
+
+class FakeGitHubReadClient:
+    """确定性只读 fake：`offset:<n>` 游标分页，按调用顺序记录，失败一次即清空。"""
+
+    def __init__(self, items: Iterable[GitHubReadItem], *, page_size: int | None = None) -> None:
+        self.items = list(items)
+        self.page_size = page_size
+        self.calls: list[dict[str, Any]] = []
+        self.fail_next: Exception | None = None
+
+    async def list_events(
+        self, *, repository: str, cursor: str | None, limit: int
+    ) -> GitHubReadPage:
+        self.calls.append({"repository": repository, "cursor": cursor, "limit": limit})
+        failure, self.fail_next = self.fail_next, None
+        if failure is not None:
+            raise failure
+        offset = int(cursor.split(":")[1]) if cursor else 0
+        size = min(limit, self.page_size) if self.page_size is not None else limit
+        chunk = self.items[offset : offset + size]
+        consumed = offset + len(chunk)
+        next_cursor = f"offset:{consumed}" if consumed < len(self.items) else None
+        return GitHubReadPage(items=chunk, next_cursor=next_cursor)
+```
+
+- [ ] **Step 4: 新建 `supervisor/source.py` 契约层**
+
+```python
+"""GitHub Source 契约：把只读轮询结果标准化为 Trigger / Thread / Channel（规格 WP-6.2）。
+
+方向锁：本模块只 import `integrations` 与 `supervisor.model`；读取只产生候选事件，
+Channel 只是回写目的地（ADR-06 决策 8），不携带授权。
+"""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from stableagent.supervisor.model import Channel, ChannelKind, Thread, Trigger
+
+
+class SourceError(Exception):
+    """Source 层稳定错误：四分类决定 cursor health 与是否可重试。"""
+
+    code = "source.error"
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"[{code}] {message}")
+        self.detail = message
+        self.code = code
+
+
+class SourceTransientError(SourceError):
+    """网络抖动、限流、5xx：cursor 记 degraded，下一轮可重试。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("source.transient", message)
+
+
+class SourceAuthError(SourceError):
+    """403：读权限不足或 token 失效，需要人工处理。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("source.auth", message)
+
+
+class SourceGoneError(SourceError):
+    """404：仓库不可见或事件已不存在，继续轮询不会恢复。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("source.gone", message)
+
+
+class SourceSchemaError(SourceError):
+    """载荷形状不合约：整批不落库，避免写进半个事实。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("source.schema", message)
+
+
+class SourceEvent(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trigger: Trigger
+    thread: Thread
+    channel: Channel | None = None
+
+
+class PollBatch(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    events: list[SourceEvent] = Field(default_factory=list)
+    next_cursor: str | None = None
+    duplicates: int = Field(default=0, ge=0)
+
+
+@runtime_checkable
+class Source(Protocol):
+    async def poll(self, *, limit: int = 100) -> PollBatch: ...
+
+
+@runtime_checkable
+class ChannelWriter(Protocol):
+    async def write(self, *, channel: Channel, body: str) -> dict[str, Any]: ...
+
+
+class FakeChannelWriter:
+    """记录 `(channel, body)`；`fail_next` 抛一次后清空。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Channel, str]] = []
+        self.fail_next: Exception | None = None
+
+    async def write(self, *, channel: Channel, body: str) -> dict[str, Any]:
+        self.calls.append((channel, body))
+        failure, self.fail_next = self.fail_next, None
+        if failure is not None:
+            raise failure
+        return {"id": f"fake-{len(self.calls)}"}
+
+
+def stable_trigger_id(external_id: str) -> str:
+    return "tg-" + hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:12]
+
+
+def stable_channel_id(thread_key: str, kind: ChannelKind, external_ref: str) -> str:
+    seed = f"{thread_key}|{kind.value}|{external_ref}"
+    return "ch-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+
+
+def issue_thread_key(repository: str, number: int) -> str:
+    return f"issue:{repository}#{number}"
+
+
+def pull_request_thread_key(repository: str, number: int) -> str:
+    return f"pr:{repository}#{number}"
+
+
+def review_thread_key(repository: str, pull_number: int, review_id: int) -> str:
+    return f"review:{repository}#{pull_number}:{review_id}"
+
+
+def repository_thread_key(repository: str) -> str:
+    return f"repo:{repository}"
+```
+
+- [ ] **Step 5: 跑测试确认通过并做静态检查**
+
+Run:
+`.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py`
+`.venv/bin/ruff check stableagent/integrations/github.py stableagent/supervisor/source.py tests/unit/test_github_source.py`
+`.venv/bin/ruff format --check stableagent/integrations/github.py stableagent/supervisor/source.py tests/unit/test_github_source.py`
+`.venv/bin/mypy`
+
+Expected: 5 passed；`All checks passed!`；格式已排列；mypy 无新增错误。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/integrations/github.py stableagent/supervisor/source.py \
+  tests/unit/test_github_source.py
+git commit -m "feat: add github read client seam and source contracts"
+```
+
+### Task 2：Issue / PR 标准化与 bot 过滤（M2-2）
+
+**Files:**
+- Modify: `stableagent/supervisor/source.py`
+- Test: `tests/unit/test_github_source.py`
+
+**Interfaces:**
+- Consumes: Task 1 的 `GitHubReadItem` / `stable_trigger_id` / thread key 函数；
+  `SupervisorStore`、`Clock`（`stableagent.orchestration.model`）。
+- Produces:
+  - `GitHubSource(store, client, *, repository, bot_login, clock)`
+  - `GitHubSource.normalize(item) -> SourceEvent | None`（`None` 表示自身 bot 事件，被过滤）
+  - Trigger `external_id = github:{repository}:{kind}:{subject}`，`id = tg-<sha256 前 12>`
+
+- [ ] **Step 1: 追加失败测试**
+
+测试文件导入补充：
+
+```python
+import pathlib
+
+from stableagent.supervisor.model import ThreadKind, ThreadStatus, TriggerKind
+from stableagent.supervisor.source import GitHubSource
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock
+```
+
+```python
+def _source(tmp_path: pathlib.Path):
+    clock = FixedClock()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    client = FakeGitHubReadClient([])
+    source = GitHubSource(
+        store, client, repository="owner/repo", bot_login="sa-agent[bot]", clock=clock
+    )
+    return source, store, clock
+
+
+def _read_item(
+    kind: GitHubReadKind,
+    resource: dict[str, object],
+    *,
+    occurred_at: int = 10,
+    deleted: bool = False,
+) -> GitHubReadItem:
+    return GitHubReadItem(
+        kind=kind, occurred_at=occurred_at, resource=resource, deleted=deleted
+    )
+
+
+def test_issue_normalizes_to_trigger_thread_and_digest(tmp_path: pathlib.Path) -> None:
+    source, _, clock = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 7, "state": "open", "user": {"login": "octocat"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "issue:owner/repo#7"
+    assert event.thread.external_ref == "#7"
+    assert event.thread.kind is ThreadKind.ISSUE
+    assert event.thread.status is ThreadStatus.OPEN
+    assert event.channel is None
+    assert event.trigger.kind is TriggerKind.ISSUE
+    assert event.trigger.external_id == "github:owner/repo:issue:7"
+    assert event.trigger.id.startswith("tg-")
+    assert event.trigger.thread_keys == ["issue:owner/repo#7"]
+    assert event.trigger.actor == "octocat"
+    assert event.trigger.occurred_at == 10
+    assert event.trigger.received_at == clock.now_ms()
+    assert event.trigger.payload == {
+        "resource": {"number": 7, "state": "open", "user": {"login": "octocat"}},
+        "deleted": False,
+    }
+    assert event.trigger.digest
+
+
+def test_closed_pull_request_maps_to_a_closed_pr_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.PULL_REQUEST,
+            {"number": 9, "state": "closed", "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "pr:owner/repo#9"
+    assert event.thread.kind is ThreadKind.PULL_REQUEST
+    assert event.thread.status is ThreadStatus.CLOSED
+    assert event.trigger.kind is TriggerKind.PULL_REQUEST
+    assert event.trigger.external_id == "github:owner/repo:pull_request:9"
+
+
+def test_bot_identity_is_filtered_case_insensitively(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 7, "state": "open", "user": {"login": "SA-Agent[BOT]"}},
+        )
+    )
+    assert event is None
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        {"state": "open", "user": {"login": "alice"}},
+        {"number": "7", "state": "open", "user": {"login": "alice"}},
+        {"number": 7, "state": "open"},
+    ],
+)
+def test_malformed_issue_is_a_schema_error(
+    tmp_path: pathlib.Path, resource: dict[str, object]
+) -> None:
+    source, _, _ = _source(tmp_path)
+    with pytest.raises(SourceSchemaError):
+        source.normalize(_read_item(GitHubReadKind.ISSUE, resource))
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py -k "issue or pull_request or bot"`
+
+Expected: FAIL —— `ImportError: cannot import name 'GitHubSource'`。
+
+- [ ] **Step 3: 扩展导入**
+
+```python
+from stableagent.integrations.github import GitHubReadClient, GitHubReadItem
+from stableagent.orchestration.model import Clock
+from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.store import SupervisorStore
+```
+
+- [ ] **Step 4: 追加 `GitHubSource` 与字段校验辅助函数**
+
+```python
+class GitHubSource:
+    """单仓库只读 Source：`normalize` 无副作用；写库只发生在 `poll`。"""
+
+    def __init__(
+        self,
+        store: SupervisorStore,
+        client: GitHubReadClient,
+        *,
+        repository: str,
+        bot_login: str,
+        clock: Clock,
+    ) -> None:
+        self._store = store
+        self._client = client
+        self._repository = repository
+        self._bot_login = bot_login
+        self._clock = clock
+
+    def normalize(self, item: GitHubReadItem) -> SourceEvent | None:
+        kind = TriggerKind(item.kind.value)
+        if kind is TriggerKind.ISSUE:
+            return self._issue(item)
+        if kind is TriggerKind.PULL_REQUEST:
+            return self._pull_request(item)
+        raise SourceSchemaError(f"unsupported kind {item.kind.value}")
+
+    def _issue(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        number = _int_field(resource, "number")
+        key = issue_thread_key(self._repository, number)
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.ISSUE, number, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.ISSUE,
+                external_ref=f"#{number}",
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+        )
+
+    def _pull_request(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        number = _int_field(resource, "number")
+        key = pull_request_thread_key(self._repository, number)
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.PULL_REQUEST, number, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref=f"#{number}",
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+        )
+
+    def _trigger(
+        self,
+        item: GitHubReadItem,
+        kind: TriggerKind,
+        subject: int,
+        actor: str,
+        thread_key: str,
+    ) -> Trigger:
+        external_id = f"github:{self._repository}:{kind.value}:{subject}"
+        return Trigger(
+            id=stable_trigger_id(external_id),
+            external_id=external_id,
+            kind=kind,
+            actor=actor,
+            thread_keys=[thread_key],
+            occurred_at=item.occurred_at,
+            received_at=self._clock.now_ms(),
+            payload={"resource": item.resource, "deleted": item.deleted},
+        )
+
+    def _is_self(self, actor: str) -> bool:
+        return actor.casefold() == self._bot_login.casefold()
+
+
+def _int_field(resource: dict[str, Any], field: str) -> int:
+    value = resource.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SourceSchemaError(f"{field} 必须是整数")
+    return value
+
+
+def _actor(resource: dict[str, Any]) -> str:
+    user = resource.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    if isinstance(login, str) and login:
+        return login
+    actor = resource.get("actor")
+    if isinstance(actor, str) and actor:
+        return actor
+    raise SourceSchemaError("缺少 actor / user.login")
+
+
+def _thread_status(
+    item: GitHubReadItem, resource: dict[str, Any], *, closed_state: str = "closed"
+) -> ThreadStatus:
+    if item.deleted or resource.get("state") == closed_state:
+        return ThreadStatus.CLOSED
+    return ThreadStatus.OPEN
+```
+
+- [ ] **Step 5: 跑测试与静态检查**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py`
+`.venv/bin/ruff check stableagent/supervisor/source.py tests/unit/test_github_source.py`
+`.venv/bin/mypy`
+
+Expected: 11 passed；ruff/mypy 无新增问题（Task 2 新增 6 个用例：3 个主路径 + 3 个参数化非法载荷）。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/source.py tests/unit/test_github_source.py
+git commit -m "feat: normalize github issues and pull requests into supervisor threads"
+```
+
+### Task 3：Comment / Review 映射与 Channel（M2-3）
+
+**Files:**
+- Modify: `stableagent/supervisor/source.py`
+- Test: `tests/unit/test_github_source.py`
+
+**Interfaces:**
+- Consumes: Task 2 的 `_actor` / `_int_field` / `_thread_status` / `_trigger`。
+- Produces:
+  - issue comment → issue 或 PR thread；`ChannelKind.ISSUE_COMMENT` / `PULL_REQUEST_COMMENT`，
+    `external_ref = "#{number}"`
+  - review comment / review → review thread `review:{repo}#{pull}#{review_id}`；
+    `ChannelKind.REVIEW_REPLY`，`external_ref = "review:{review_id}"`
+  - review `state == "dismissed"` 或删除事件把 review thread 置 `closed`
+
+- [ ] **Step 1: 追加失败测试**
+
+```python
+def test_issue_comment_maps_to_issue_thread_and_channel(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {"id": 11, "issue_number": 7, "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "issue:owner/repo#7"
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.ISSUE_COMMENT
+    assert event.channel.external_ref == "#7"
+    assert event.channel.thread_key == event.thread.key
+    assert event.trigger.kind is TriggerKind.ISSUE_COMMENT
+    assert event.trigger.external_id == "github:owner/repo:issue_comment:11"
+
+
+def test_comment_on_pull_request_uses_the_pr_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {
+                "id": 12,
+                "issue_number": 9,
+                "is_pull_request": True,
+                "user": {"login": "alice"},
+            },
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "pr:owner/repo#9"
+    assert event.thread.kind is ThreadKind.PULL_REQUEST
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.PULL_REQUEST_COMMENT
+
+
+def test_review_comment_creates_review_thread_and_reply_channel(
+    tmp_path: pathlib.Path,
+) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW_COMMENT,
+            {"id": 13, "pull_number": 9, "review_id": 42, "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "review:owner/repo#9:42"
+    assert event.thread.kind is ThreadKind.REVIEW
+    assert event.thread.external_ref == "review:42"
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.REVIEW_REPLY
+    assert event.channel.external_ref == "review:42"
+    assert event.trigger.kind is TriggerKind.REVIEW_COMMENT
+    assert event.trigger.external_id == "github:owner/repo:review_comment:13"
+
+
+def test_review_submission_maps_to_an_open_review_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW,
+            {"id": 42, "pull_number": 9, "state": "submitted", "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.kind is ThreadKind.REVIEW
+    assert event.thread.status is ThreadStatus.OPEN
+    assert event.trigger.kind is TriggerKind.REVIEW
+    assert event.channel is not None
+    assert event.channel.kind is ChannelKind.REVIEW_REPLY
+
+
+def test_dismissed_review_closes_the_review_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW,
+            {"id": 42, "pull_number": 9, "state": "dismissed", "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.status is ThreadStatus.CLOSED
+
+
+def test_bot_review_comment_is_not_a_candidate(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.REVIEW_COMMENT,
+            {
+                "id": 13,
+                "pull_number": 9,
+                "review_id": 42,
+                "user": {"login": "sa-agent[bot]"},
+            },
+        )
+    )
+    assert event is None
+
+
+def test_review_comment_without_review_id_is_a_schema_error(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    with pytest.raises(SourceSchemaError):
+        source.normalize(
+            _read_item(
+                GitHubReadKind.REVIEW_COMMENT,
+                {"id": 13, "pull_number": 9, "user": {"login": "alice"}},
+            )
+        )
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py -k "comment or review"`
+
+Expected: FAIL —— `SourceSchemaError: unsupported kind issue_comment`（其余 kind 也会失败）。
+
+- [ ] **Step 3: 加入分发分支**
+
+```python
+        if kind is TriggerKind.ISSUE_COMMENT:
+            return self._issue_comment(item)
+        if kind is TriggerKind.REVIEW_COMMENT:
+            return self._review_comment(item)
+        if kind is TriggerKind.REVIEW:
+            return self._review(item)
+```
+
+- [ ] **Step 4: 追加三个映射方法**
+
+```python
+    def _issue_comment(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        comment_id = _int_field(resource, "id")
+        number = _int_field(resource, "issue_number")
+        if bool(resource.get("is_pull_request")):
+            key = pull_request_thread_key(self._repository, number)
+            thread_kind = ThreadKind.PULL_REQUEST
+            channel_kind = ChannelKind.PULL_REQUEST_COMMENT
+        else:
+            key = issue_thread_key(self._repository, number)
+            thread_kind = ThreadKind.ISSUE
+            channel_kind = ChannelKind.ISSUE_COMMENT
+        external_ref = f"#{number}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.ISSUE_COMMENT, comment_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=thread_kind,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, channel_kind, external_ref),
+                thread_key=key,
+                kind=channel_kind,
+                external_ref=external_ref,
+            ),
+        )
+
+    def _review_comment(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        comment_id = _int_field(resource, "id")
+        pull_number = _int_field(resource, "pull_number")
+        review_id = _int_field(resource, "review_id")
+        key = review_thread_key(self._repository, pull_number, review_id)
+        external_ref = f"review:{review_id}"
+        return SourceEvent(
+            trigger=self._trigger(
+                item, TriggerKind.REVIEW_COMMENT, comment_id, actor, key
+            ),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REVIEW,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, ChannelKind.REVIEW_REPLY, external_ref),
+                thread_key=key,
+                kind=ChannelKind.REVIEW_REPLY,
+                external_ref=external_ref,
+            ),
+        )
+
+    def _review(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        review_id = _int_field(resource, "id")
+        pull_number = _int_field(resource, "pull_number")
+        key = review_thread_key(self._repository, pull_number, review_id)
+        external_ref = f"review:{review_id}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.REVIEW, review_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REVIEW,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource, closed_state="dismissed"),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, ChannelKind.REVIEW_REPLY, external_ref),
+                thread_key=key,
+                kind=ChannelKind.REVIEW_REPLY,
+                external_ref=external_ref,
+            ),
+        )
+```
+
+- [ ] **Step 5: 跑测试与静态检查**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py`
+`.venv/bin/ruff check stableagent/supervisor/source.py tests/unit/test_github_source.py`
+`.venv/bin/mypy`
+
+Expected: 18 passed；ruff/mypy 无新增问题（Task 3 新增 7 个用例）。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/source.py tests/unit/test_github_source.py
+git commit -m "feat: map github comments and reviews to threads and reply channels"
+```
+
+### Task 4：CI status 与 repository Thread（M2-4）
+
+**Files:**
+- Modify: `stableagent/supervisor/model.py`
+- Modify: `stableagent/supervisor/source.py`
+- Test: `tests/unit/test_supervisor_model.py`、`tests/unit/test_github_source.py`
+
+**Interfaces:**
+- Consumes: 现有 `ThreadKind`、`repository_thread_key`。
+- Produces: `ThreadKind.REPOSITORY = "repository"`；CI 有 `pull_number` 时挂
+  `pr:{repo}#{n}`，否则挂 `repo:{repo}`；CI 的 `actor` 取 `resource["actor"]`，缺省 `"github"`。
+  CI 事件不创建 Channel（没有回写目的地）。
+
+- [ ] **Step 1: 追加失败测试**
+
+`tests/unit/test_supervisor_model.py` 追加：
+
+```python
+def test_thread_kinds_are_pinned() -> None:
+    assert {k.value for k in ThreadKind} == {
+        "issue",
+        "pull_request",
+        "review",
+        "repository",
+    }
+```
+
+`tests/unit/test_github_source.py` 追加：
+
+```python
+def test_ci_status_with_pull_request_attaches_to_the_pr_thread(
+    tmp_path: pathlib.Path,
+) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.CI_STATUS,
+            {"id": 501, "sha": "abc123", "state": "success", "pull_number": 9},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "pr:owner/repo#9"
+    assert event.thread.kind is ThreadKind.PULL_REQUEST
+    assert event.trigger.kind is TriggerKind.CI_STATUS
+    assert event.trigger.external_id == "github:owner/repo:ci_status:501"
+    assert event.trigger.actor == "github"
+    assert event.channel is None
+
+
+def test_ci_status_without_pull_request_uses_the_repository_thread(
+    tmp_path: pathlib.Path,
+) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.CI_STATUS,
+            {"id": 502, "sha": "abc123", "state": "failure"},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "repo:owner/repo"
+    assert event.thread.kind is ThreadKind.REPOSITORY
+    assert event.thread.external_ref == "owner/repo"
+    assert event.channel is None
+
+
+def test_unknown_ci_state_is_a_schema_error(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    with pytest.raises(SourceSchemaError):
+        source.normalize(
+            _read_item(
+                GitHubReadKind.CI_STATUS,
+                {"id": 503, "sha": "abc123", "state": "exploded"},
+            )
+        )
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_model.py tests/unit/test_github_source.py -k "thread_kinds or ci_status"`
+
+Expected: FAIL —— `ThreadKind.REPOSITORY` 不存在；`ci_status` 报 `unsupported kind`。
+
+- [ ] **Step 3: 扩展枚举**
+
+```python
+class ThreadKind(str, Enum):
+    ISSUE = "issue"
+    PULL_REQUEST = "pull_request"
+    REVIEW = "review"
+    REPOSITORY = "repository"
+```
+
+- [ ] **Step 4: 加入 CI 分发与映射**
+
+分发分支：
+
+```python
+        if kind is TriggerKind.CI_STATUS:
+            return self._ci_status(item)
+```
+
+```python
+    def _ci_status(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = resource.get("actor", "github")
+        if not isinstance(actor, str) or not actor:
+            raise SourceSchemaError("actor 必须是非空字符串")
+        if self._is_self(actor):
+            return None
+        status_id = _int_field(resource, "id")
+        _str_field(resource, "sha")
+        state = _str_field(resource, "state")
+        if state not in {"pending", "success", "failure", "error"}:
+            raise SourceSchemaError(f"未知 CI state：{state}")
+        pull_number = resource.get("pull_number")
+        if pull_number is not None and (
+            not isinstance(pull_number, int) or isinstance(pull_number, bool)
+        ):
+            raise SourceSchemaError("pull_number 必须是整数或 null")
+        if pull_number is not None:
+            key = pull_request_thread_key(self._repository, pull_number)
+            thread = Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref=f"#{pull_number}",
+                last_trigger_at=item.occurred_at,
+                status=ThreadStatus.OPEN,
+            )
+        else:
+            key = repository_thread_key(self._repository)
+            thread = Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REPOSITORY,
+                external_ref=self._repository,
+                last_trigger_at=item.occurred_at,
+                status=ThreadStatus.OPEN,
+            )
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.CI_STATUS, status_id, actor, key),
+            thread=thread,
+        )
+```
+
+新增辅助函数：
+
+```python
+def _str_field(resource: dict[str, Any], field: str) -> str:
+    value = resource.get(field)
+    if not isinstance(value, str) or not value:
+        raise SourceSchemaError(f"{field} 必须是非空字符串")
+    return value
+```
+
+- [ ] **Step 5: 跑测试与静态检查**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_model.py tests/unit/test_github_source.py`
+`.venv/bin/ruff check stableagent/supervisor tests/unit/test_github_source.py`
+`.venv/bin/mypy`
+
+Expected: model 6 passed、source 21 passed；ruff/mypy 无新增问题。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/model.py stableagent/supervisor/source.py \
+  tests/unit/test_supervisor_model.py tests/unit/test_github_source.py
+git commit -m "feat: map ci status to pr or repository threads"
+```
+
+### Task 5：poll 分页、排序、去重、删除与错误健康（M2-5）
+
+**Files:**
+- Modify: `stableagent/supervisor/source.py`
+- Test: `tests/unit/test_github_source.py`
+
+**Interfaces:**
+- Consumes: `SupervisorStore.{get_source_cursor, insert_trigger, upsert_thread, insert_channel,
+  put_source_cursor}`、`SourceCursor` / `SourceHealth`。
+- Produces: `GitHubSource.poll(*, limit=100, max_pages=10) -> PollBatch`，满足 `Source`：
+  - 每轮最多 `max_pages` 页；未读完时把 `next_cursor` 持久化，下一轮从该 cursor 继续
+  - 批内按 `external_id` 去重，输出按 `(occurred_at, external_id)` 升序
+  - 与库内 `UNIQUE(source, external_id)` 重复的事件不返回，计入 `duplicates`
+  - Trigger / Thread / Channel / cursor 在**同一个事务**内写
+  - `SourceTransientError` → cursor `degraded`；其余 `SourceError` → `failed`；都先落健康再抛出
+
+- [ ] **Step 1: 追加失败测试**
+
+导入补充：
+
+```python
+import contextlib
+
+from stableagent.supervisor.model import SourceHealth
+from stableagent.supervisor.source import Source
+```
+
+```python
+def _poll_source(
+    tmp_path: pathlib.Path,
+    items: list[GitHubReadItem],
+    *,
+    page_size: int | None = None,
+):
+    clock = FixedClock()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    client = FakeGitHubReadClient(items, page_size=page_size)
+    source = GitHubSource(
+        store, client, repository="owner/repo", bot_login="sa-agent[bot]", clock=clock
+    )
+    return source, store, client
+
+
+async def test_poll_pages_sorts_dedupes_and_writes_in_one_transaction(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 2, "state": "open", "user": {"login": "alice"}},
+            occurred_at=200,
+        ),
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+            occurred_at=100,
+        ),
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 2, "state": "open", "user": {"login": "alice"}},
+            occurred_at=200,
+        ),
+    ]
+    source, store, client = _poll_source(tmp_path, items, page_size=2)
+    assert isinstance(source, Source)
+
+    batch = await source.poll(limit=10)
+
+    assert [event.thread.external_ref for event in batch.events] == ["#1", "#2"]
+    assert batch.duplicates == 1
+    assert batch.next_cursor is None
+    assert [call["cursor"] for call in client.calls] == [None, "offset:2"]
+    assert store.get_trigger_by_external("github", "github:owner/repo:issue:1") is not None
+    cursor = store.get_source_cursor("github")
+    assert cursor is not None
+    assert cursor.cursor is None
+    assert cursor.health is SourceHealth.OK
+    assert cursor.consecutive_failures == 0
+
+
+async def test_second_poll_skips_triggers_already_in_the_store(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+        )
+    ]
+    source, _, _ = _poll_source(tmp_path, items)
+    assert len((await source.poll(limit=10)).events) == 1
+
+    again = await source.poll(limit=10)
+
+    assert again.events == []
+    assert again.duplicates == 1
+
+
+async def test_poll_stops_at_max_pages_and_resumes_from_cursor(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": number, "state": "open", "user": {"login": "alice"}},
+            occurred_at=number,
+        )
+        for number in (1, 2, 3)
+    ]
+    source, store, _ = _poll_source(tmp_path, items, page_size=1)
+
+    first = await source.poll(limit=10, max_pages=1)
+    assert [event.thread.external_ref for event in first.events] == ["#1"]
+    assert first.next_cursor == "offset:1"
+    stored = store.get_source_cursor("github")
+    assert stored is not None and stored.cursor == "offset:1"
+
+    second = await source.poll(limit=10, max_pages=2)
+    assert [event.thread.external_ref for event in second.events] == ["#2", "#3"]
+    assert second.next_cursor is None
+    stored = store.get_source_cursor("github")
+    assert stored is not None and stored.cursor is None
+
+
+@pytest.mark.parametrize(
+    ("error", "health"),
+    [
+        (SourceTransientError("503"), SourceHealth.DEGRADED),
+        (SourceAuthError("403"), SourceHealth.FAILED),
+        (SourceGoneError("404"), SourceHealth.FAILED),
+        (SourceSchemaError("bad payload"), SourceHealth.FAILED),
+    ],
+)
+async def test_poll_records_cursor_health_before_reraising(
+    tmp_path: pathlib.Path, error: Exception, health: SourceHealth
+) -> None:
+    source, store, client = _poll_source(tmp_path, [])
+    client.fail_next = error
+
+    with pytest.raises(type(error)):
+        await source.poll(limit=10)
+
+    cursor = store.get_source_cursor("github")
+    assert cursor is not None
+    assert cursor.health is health
+    assert cursor.consecutive_failures == 1
+
+
+async def test_malformed_item_fails_the_whole_batch_without_writing(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+        ),
+        _read_item(GitHubReadKind.ISSUE, {"state": "open", "user": {"login": "alice"}}),
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+
+    with pytest.raises(SourceSchemaError):
+        await source.poll(limit=10)
+
+    assert store.list_triggers() == []
+    assert store.list_threads() == []
+    cursor = store.get_source_cursor("github")
+    assert cursor is not None and cursor.health is SourceHealth.FAILED
+
+
+async def test_deleted_event_closes_the_thread_and_still_records_the_trigger(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+            deleted=True,
+        )
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+
+    batch = await source.poll(limit=10)
+
+    assert len(batch.events) == 1
+    assert batch.events[0].thread.status is ThreadStatus.CLOSED
+    thread = store.get_thread("issue:owner/repo#1")
+    assert thread is not None and thread.status is ThreadStatus.CLOSED
+
+
+async def test_poll_drops_our_own_bot_events_but_still_advances(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {"id": 1, "issue_number": 7, "user": {"login": "sa-agent[bot]"}},
+        )
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+
+    batch = await source.poll(limit=10)
+
+    assert batch.events == []
+    assert batch.duplicates == 0
+    assert store.get_source_cursor("github") is not None
+
+
+async def test_poll_writes_state_in_a_single_transaction(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {"id": 1, "issue_number": 7, "user": {"login": "alice"}},
+        )
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+    seen: list[bool] = []
+    original = store.transaction
+
+    @contextlib.contextmanager
+    def watched():
+        with original():
+            seen.append(store.in_transaction)
+            yield
+
+    monkeypatch.setattr(store, "transaction", watched)
+
+    await source.poll(limit=10)
+
+    assert seen == [True]
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py -k poll`
+
+Expected: FAIL —— `AttributeError: 'GitHubSource' object has no attribute 'poll'`。
+
+- [ ] **Step 3: 导入 cursor 记录**
+
+```python
+from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    SourceCursor,
+    SourceHealth,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+```
+
+- [ ] **Step 4: 在 `GitHubSource` 内追加 `poll` / `_dedupe` / `_record_failure`**
+
+```python
+    async def poll(self, *, limit: int = 100, max_pages: int = 10) -> PollBatch:
+        stored = self._store.get_source_cursor("github")
+        cursor = stored.cursor if stored else None
+        next_cursor = cursor
+        items: list[GitHubReadItem] = []
+        try:
+            for _ in range(max_pages):
+                page = await self._client.list_events(
+                    repository=self._repository, cursor=next_cursor, limit=limit
+                )
+                items.extend(page.items)
+                if page.next_cursor is not None and page.next_cursor == next_cursor:
+                    raise SourceSchemaError("cursor 未推进")
+                next_cursor = page.next_cursor
+                if next_cursor is None:
+                    break
+            events = self._dedupe(items)
+        except SourceError as error:
+            self._record_failure(stored, error)
+            raise
+
+        with self._store.transaction():
+            fresh: list[SourceEvent] = []
+            duplicates = 0
+            for event in events:
+                if not self._store.insert_trigger(event.trigger):
+                    duplicates += 1
+                    continue
+                self._store.upsert_thread(event.thread)
+                if event.channel is not None:
+                    self._store.insert_channel(event.channel)
+                fresh.append(event)
+            self._store.put_source_cursor(
+                SourceCursor(
+                    source="github",
+                    cursor=next_cursor,
+                    last_success_at=self._clock.now_ms(),
+                    consecutive_failures=0,
+                    health=SourceHealth.OK,
+                )
+            )
+        return PollBatch(events=fresh, next_cursor=next_cursor, duplicates=duplicates)
+
+    def _dedupe(self, items: list[GitHubReadItem]) -> list[SourceEvent]:
+        by_external: dict[str, SourceEvent] = {}
+        for item in items:
+            event = self.normalize(item)
+            if event is None:
+                continue
+            by_external.setdefault(event.trigger.external_id, event)
+        return sorted(
+            by_external.values(),
+            key=lambda event: (event.trigger.occurred_at, event.trigger.external_id),
+        )
+
+    def _record_failure(self, stored: SourceCursor | None, error: SourceError) -> None:
+        health = (
+            SourceHealth.DEGRADED
+            if isinstance(error, SourceTransientError)
+            else SourceHealth.FAILED
+        )
+        previous = stored.consecutive_failures if stored else 0
+        with self._store.transaction():
+            self._store.put_source_cursor(
+                SourceCursor(
+                    source="github",
+                    cursor=stored.cursor if stored else None,
+                    last_success_at=stored.last_success_at if stored else None,
+                    consecutive_failures=previous + 1,
+                    health=health,
+                )
+            )
+```
+
+- [ ] **Step 5: 跑测试与静态检查**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py`
+`.venv/bin/ruff check stableagent/supervisor/source.py tests/unit/test_github_source.py`
+`.venv/bin/ruff format --check stableagent/supervisor/source.py tests/unit/test_github_source.py`
+`.venv/bin/mypy`
+
+Expected: 32 passed；ruff/mypy 无新增问题。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/source.py tests/unit/test_github_source.py
+git commit -m "feat: poll github with cursors dedupe and source health"
+```
+
+### Task 6：CI FOCUS 28 → 29（M2-7）
+
+**Files:**
+- Modify: `tests/unit/test_ci_focus_gate.py`
+- Modify: `.github/workflows/ci.yml`
+
+**Interfaces:**
+- Consumes: `supervisor/source.py`（Task 1~5 完成）。
+- Produces: 心脏闸门 29 文件；契约测试同时钉住数量、步骤名与"禁止通配兜底"。
+
+- [ ] **Step 1: 先改契约测试（红）**
+
+`FOCUS_FILES` 末尾追加 `"supervisor/source.py",`；测试函数与断言改为：
+
+```python
+def test_focus_covers_the_twenty_nine_cardiac_files() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert all(f'"{name}"' in text for name in FOCUS_FILES)
+    assert len(FOCUS_FILES) == 29
+    assert "29 文件" in text  # 步骤名与注释同步
+    assert text.count('".py"') == 0  # 不许用通配兜底
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py > /tmp/p6-m2-focus-red.txt 2>&1`
+
+Read: `/tmp/p6-m2-focus-red.txt`
+
+Expected: FAIL —— `"supervisor/source.py"` 不在工作流中（第 2 行断言）。
+
+- [ ] **Step 3: 同步工作流**
+
+步骤名改为：
+
+```yaml
+      - name: 心脏模块覆盖率闸门（29 文件：loop/checkpoint/errors/context/evidence/orchestration/control/execution/integrations/supervisor 各 ≥90%）
+```
+
+`FOCUS` 元组在 `"supervisor/views.py",` 之后追加：
+
+```python
+              "supervisor/source.py",
+```
+
+- [ ] **Step 4: 跑契约测试确认通过**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py > /tmp/p6-m2-focus-green.txt 2>&1`
+
+Read: `/tmp/p6-m2-focus-green.txt`
+
+Expected: `1 passed`。
+
+- [ ] **Step 5: 全量测试并实测 `source.py` 覆盖率**
+
+```bash
+.venv/bin/pytest -q --cov=stableagent --cov-report=xml > /tmp/p6-m2-pytest.txt 2>&1
+.venv/bin/python - <<'PY' > /tmp/p6-m2-coverage.txt
+import xml.etree.ElementTree as ET
+
+root = ET.parse("coverage.xml").getroot()
+for cls in root.iter("class"):
+    if cls.get("filename") == "stableagent/supervisor/source.py":
+        print("supervisor/source.py", cls.get("line-rate"))
+PY
+```
+
+Read: `/tmp/p6-m2-pytest.txt`、`/tmp/p6-m2-coverage.txt`
+
+Expected: `0 failed`；`supervisor/source.py` 行覆盖率 ≥ `0.9`（CI 闸门口径）。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add tests/unit/test_ci_focus_gate.py .github/workflows/ci.yml
+git commit -m "ci: include supervisor source in the cardiac coverage gate"
+```
+
+### Task 7：Source 部署文档与 M2 出口（M2-6 + M2-8）
+
+**Files:**
+- Create: `docs/guides/supervisor-github-source.md`
+- Modify: `docs/acceptance/p6-supervisor-beta.md`、`README.md`、`docs/README.md`、
+  `docs/acceptance/README.md`、`docs/Roadmap.md`、`CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: Task 1~6 的全部产物。
+- Produces: 可操作的 polling 部署说明；M2 出口证据；状态面同步。
+
+- [ ] **Step 1: 写部署与 cursor 契约文档**
+
+`docs/guides/supervisor-github-source.md` 全文：
+
+```markdown
+# GitHub Source 部署与 cursor 契约（P6 M2）
+
+本指南说明 P6 Beta 的 GitHub 事件接入：只有 polling 一条主路径，只读、单仓库、
+`observe` 模式。接入只产生 Trigger/Thread/Channel 候选，**不产生任何授权**；建票与
+执行仍由 P5 Policy/Mandate 决定。
+
+## 1. 只读权限
+
+读 token 与 P5 的写 token 分离：
+
+| 权限 | 级别 | 用途 |
+|---|---|---|
+| Metadata | Read | 仓库可见性 |
+| Issues | Read | Issue 与 issue comment |
+| Pull requests | Read | PR、review、review comment |
+| Actions / Checks | Read | CI status |
+
+读 token **不得**包含 Issues/Pull requests 写权限，也不得授予 `contents: write`。
+凭据只存在于真实客户端内部（L7）：不进 prompt、日志、Report、Ticket、AgentState、
+worktree 元数据或 effect payload。
+
+## 2. polling 主路径
+
+每一轮调用 `GitHubSource.poll(limit=100, max_pages=10)`：
+
+1. 从 `source_cursors` 读出 `source='github'` 的 cursor；首次为空。
+2. 最多读 `max_pages` 页；未读完时把 `next_cursor` 持久化，下一轮从该 cursor 继续。
+3. 整批标准化后按 `(occurred_at, external_id)` 升序输出。
+4. Trigger、Thread、Channel 与 cursor 在**同一个 `BEGIN IMMEDIATE` 事务**内写；
+   任一步失败整批回滚，不留下半个事实。
+
+cursor 对调用方是不透明字符串。真实客户端必须在内部编码每种资源的分页位置并保证
+前进；`FakeGitHubReadClient` 用 `offset:<n>` 模拟。若客户端返回与输入相同的 cursor，
+Source 以 `source.schema` 失败，避免死循环。
+
+## 3. 事件映射
+
+| kind | external_id | Thread key | Channel |
+|---|---|---|---|
+| issue | `github:{repo}:issue:{n}` | `issue:{repo}#{n}` | 无 |
+| pull_request | `github:{repo}:pull_request:{n}` | `pr:{repo}#{n}` | 无 |
+| issue_comment | `github:{repo}:issue_comment:{id}` | Issue 或 PR thread | `#n`（ISSUE_COMMENT / PULL_REQUEST_COMMENT） |
+| review_comment | `github:{repo}:review_comment:{id}` | `review:{repo}#{pull}#{review_id}` | `review:{review_id}`（REVIEW_REPLY） |
+| review | `github:{repo}:review:{id}` | `review:{repo}#{pull}#{review_id}` | `review:{review_id}`（REVIEW_REPLY） |
+| ci_status | `github:{repo}:ci_status:{id}` | 有 PR 用 `pr:{repo}#{n}`，否则 `repo:{repo}` | 无 |
+
+Thread 状态：Issue/PR `state == "closed"`、review `state == "dismissed"` 或删除事件
+一律落 `closed`；`upsert_thread` 只允许状态单调前进（`open → closed → stopped`）。
+
+## 4. 去重
+
+- 数据库：`triggers` 以 `UNIQUE(source, external_id)` 兜底；重复插入返回 false。
+- 记录：Trigger id 由 `sha256(external_id)` 派生，重启后仍是同一个 id。
+- 批内：同一 `external_id` 只保留首次出现，重复计入 `PollBatch.duplicates`。
+- 自身事件：`actor` 与配置的 `bot_login` 大小写无关地比较，命中即丢弃，不进入候选。
+
+## 5. 错误与健康
+
+| 错误 | code | cursor health | 处理 |
+|---|---|---|---|
+| 网络 / 限流 / 5xx | `source.transient` | `degraded` | 下一轮重试，`consecutive_failures` 递增 |
+| 403 | `source.auth` | `failed` | 人工检查 token 与可见性 |
+| 404 | `source.gone` | `failed` | 仓库不可见或事件已删除，停止重试 |
+| 载荷不合约 | `source.schema` | `failed` | 修复映射或 fixture 后再启动 |
+
+失败时整批不落库；健康记录在抛错前写入，监管视图的 `source_health` 因此能看到原因。
+
+## 6. webhook 的后续接法
+
+P6 Beta 不启用 webhook。后续若接入：
+
+- webhook 只负责把同一份 GitHub 资源转换成 `GitHubReadItem`，走同一个 `normalize`。
+- 去重仍只在 Trigger 层做（`UNIQUE(source, external_id)`），不新增第二条写路径。
+- 在 M6 之前不改变 `observe` 锁定，不因 webhook 到达而自动建票。
+
+## 7. 安全边界
+
+- 外部文本（Issue/PR 正文、评论、CI 日志）只进 Trigger payload 与 digest，永不参与准入（L4）。
+- Channel 只是回写目的地，不携带授权（ADR-06 决策 4）。
+- 读权限不扩大 Mandate；Subscription 的 `context` 模式同样不扩大（I3）。
+```
+
+- [ ] **Step 2: 全量门禁（读数落盘后读回）**
+
+```bash
+.venv/bin/pytest -q > /tmp/p6-m2-full.txt 2>&1
+.venv/bin/ruff check stableagent tests examples benchmarks > /tmp/p6-m2-ruff.txt 2>&1
+.venv/bin/ruff format --check stableagent tests examples benchmarks > /tmp/p6-m2-format.txt 2>&1
+.venv/bin/mypy > /tmp/p6-m2-mypy.txt 2>&1
+```
+
+Read: 四个 `/tmp/p6-m2-*.txt`
+
+Expected: `0 failed`；`All checks passed!`；`... files already formatted`；
+`Success: no issues found`。
+
+- [ ] **Step 3: 三解释器等价**
+
+```bash
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p6-m2-py310.txt 2>&1
+env -u NO_PROXY -u no_proxy .matrix/py311/bin/pytest -q > /tmp/p6-m2-py311.txt 2>&1
+env -u NO_PROXY -u no_proxy .matrix/py312/bin/pytest -q > /tmp/p6-m2-py312.txt 2>&1
+```
+
+Read: 三份 `/tmp/p6-m2-py31*.txt`
+
+Expected: 三份末行均为 `0 failed`，passed 数一致（跳过数可不同）。
+
+- [ ] **Step 4: 边界复核**
+
+```bash
+git diff 234f620..HEAD --stat -- stableagent/core/ > /tmp/p6-m2-l1.txt
+git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p6-m2-c1.txt
+grep -rn "supervisor" stableagent/core stableagent/orchestration stableagent/control \
+  stableagent/execution stableagent/integrations > /tmp/p6-m2-imports.txt
+git diff --check > /tmp/p6-m2-check.txt 2>&1
+```
+
+Read: 四份 `/tmp/p6-m2-*.txt`
+
+Expected: 前两份 0 行；`grep` 无命中；`git diff --check` 无输出。
+
+- [ ] **Step 5: 回填账本**
+
+1. 第 1 节 M2-1~M2-8 改为 `[x]`，每条追加：提交号、测试文件与用例数、覆盖率读数、
+   三解释器结论。
+2. 第 4 节补一句："M2 展开为 **7 个 Task / 43 个 Step**（见 §7）。"
+3. 第 1 节 M2 状态行改为："**状态：M2 收口（Task 1~7 全部完成）。** 证据提交：…"
+
+- [ ] **Step 6: 同步状态面**
+
+- `README.md` P6 行：`🟡 active — M2 done (8/8); milestones 2/6`。
+- `docs/README.md`：当前主线改为 P6 M2 完成；阶段表 P6 行改为
+  `进行中（M2 完成，8/8；里程碑 2/6）`；链接本账本与
+  `docs/guides/supervisor-github-source.md`。
+- `docs/acceptance/README.md`：P6 行 `Active（M2 完成 8/8；里程碑 2/6）`。
+- `docs/Roadmap.md`：P6 段写明 M2 完成与下一步 M3（Router Intake）。
+- `CHANGELOG.md`：新增 P6 M2 条目（只读 polling、事件映射、去重、cursor 健康、
+  FOCUS 29）。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add docs/guides/supervisor-github-source.md docs/acceptance/p6-supervisor-beta.md \
+  README.md docs/README.md docs/acceptance/README.md docs/Roadmap.md CHANGELOG.md
+git commit -m "docs: close p6 m2 with the github source evidence"
+```
+
+## 8. M2 自检记录（writing-plans）
+
+- 规格覆盖：WP-6.2 第 1 条 → Task 1（`Source` / `ChannelWriter`）；第 2 条 →
+  Task 2~4（六种 kind 的 fixture 与映射）；第 3 条 → Task 5 + Task 7 文档（polling 主路径、
+  权限、webhook 后续接法）；第 4 条 → Task 5（cursor/分页/错误/删除/乱序/重复）；
+  第 5 条 → Task 2~3 与 Task 5 的 bot 过滤用例。
+- 类型一致性：`GitHubReadItem` / `GitHubReadPage` / `PollBatch` / `SourceEvent` 在 Task 1
+  定义，Task 2~5 只使用不重定义；`review_thread_key` 从 Task 1 起就是三参数
+  `(repository, pull_number, review_id)`；`GitHubSource.poll` 的 `max_pages` 只在 Task 5 出现。
+- 无占位符：所有实现步骤给出完整代码；出口读数在 Task 7 执行时落盘后回填，不预填数字。
+- 边界：integrations 侧只新增 `GitHubReadKind`，不 import supervisor（L2）；事务体内无
+  `await`（L3）；Trigger payload 只进 digest 与持久化，不参与判定（L4）。
