@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-### 实现（P5 受控执行与仓库集成，2026-11-08 远端 CI 双绿；账本 2.6 已补齐）
+### 实现（P5 受控执行与仓库集成，2026-11-08 远端 CI 双绿收口）
 - `stableagent/control/`：`StaticPolicy` 四道受理门与 Mandate 构造、审批服务/审批门/守卫式取消、
   `AuditWriter` 四类审计行；`stableagent/execution/`：worktree 创建/复用/清理、命名收口、
   命令边界（argv allowlist、cwd 收口、shell 语法拒绝、输出预算）与 Docker 档参数契约；
@@ -26,8 +26,8 @@
   `689 passed, 6 skipped`
 - 状态口径：2026-11-08 维护者授权后已推送 `main`（`f41ea35..d700ffb`），远端 CI run
   `42427823663` 的 `quality (3.10)` / `quality (3.12)` 双 job `success`，H3/4.7 关闭；
-  2.6 补齐后 DoD 46/46、里程碑 40/40。按账本第 3 节，正式宣布 P5 完成还需本笔提交的远端
-  CI 读数
+  2.6 补齐后 DoD 46/46、里程碑 40/40。收口提交 `380e440` 的远端 CI run `42433929377`
+  在 3.10/3.12 双 job 全绿，**P5 正式收口**
 
 ### 规划与决策（P5 启动，2026-11-03）
 - 新增 [ADR-05](docs/design-decisions/05-guarded-execution.md)（Accepted）：P5 的 10 项决策——

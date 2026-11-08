@@ -1,6 +1,6 @@
 # P5 验收账本：受控执行与仓库集成
 
-> **状态：Active（2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
+> **状态：已完成（2026-11-08 远端 CI 复现后收口；2026-11-03 计划经维护者确认，ADR-05 Accepted）。** 本文件把
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6/7 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口，M2 已于
@@ -13,8 +13,9 @@
 > `quality (3.10)` 与 `quality (3.12)` 两个 job 均 `success`，H3/4.7 已回填。**2026-11-08
 > 补 2.6**：`RUN_COMMAND` effect handler 把 `CommandResult` 写进 Assignment Report（见该条），
 > 当前 **DoD 46/46、里程碑步骤 40/40**（M1 9/9、M2 12/12、M3 12/12、M4 7/7）；本地门禁
-> `689 passed, 6 skipped`、覆盖 99.05%。按第 3 节，P5 正式收口还需本笔提交的远端 CI 复现；
-> 推送前状态保持 Active（本地收口完成、待远端门），不写"已完成"。
+> `689 passed, 6 skipped`、覆盖 99.05%。**2026-11-08 推送收口提交 `380e440`**：远端 CI run
+> `42433929377` 的 `quality (3.10)` job `128588589679` 与 `quality (3.12)` job `128588589919`
+> 均 `success`（含 25 文件心脏覆盖率闸门），第 3 节命令已在 CI 复现——**P5 正式收口**。
 > M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落并已执行（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution` 已于 2026-11-06 经维护者指示快进 `main` 并推送
@@ -28,8 +29,9 @@
 > 99.04%、`mypy` 60 files、`ruff check` 通过、`ruff format --check` 135 files、25 个心脏文件
 > 逐个 ≥96.8%、L1 与约束 1 均 0 行。
 > 远端门禁已关闭（2026-11-08，run `42427823663` 双绿）。2.6 的"命令结果写入 Assignment
-> Report"已由同日 `RUN_COMMAND` handler 补齐，第 3 节的"全部勾选"成立；正式收口等本笔提交
-> 的 CI 读数。合并（2026-11-07，维护者选择本地快进）：`git merge --ff-only
+> Report"已由同日 `RUN_COMMAND` handler 补齐，第 3 节的"全部勾选"成立；其收口提交
+> `380e440` 的远端 CI run `42433929377` 双 job `success`，P5 据此收口。合并（2026-11-07，
+> 维护者选择本地快进）：`git merge --ff-only
 > feat/p5-m3-mcp-github`（`f41ea35..76b8d95`），当时未推送；该段提交已于 2026-11-08 随 M4
 > 出口一起快进到 `origin/main@d700ffb`（见 4.7）。合并结果复跑门禁与分支出口一致的历史读数：
 > `668 passed, 3 failed, 6 skipped`（三条是 macOS `LC_CTYPE` 已知环境差异，已由 M4 Task 3
@@ -826,8 +828,8 @@
       远端半步（2026-11-08，维护者授权"推送"）：`origin/main` 由 `f41ea35` 快进到 `d700ffb`；
       run `42427823663` 的 3.10/3.12 双 job `success`，run ID 见 H3。本条按"授权 + 推送 +
       双绿 + 回填"四件齐勾选；M4 因此 7/7。**注意**：M4 勾满不等于 P5 整体收口——
-      2.6 已于 2026-11-08 由 `RUN_COMMAND` handler 补齐（见 2.6 条）；正式收口待本笔提交的
-      远端 CI 读数，见头部说明。
+      2.6 已于 2026-11-08 由 `RUN_COMMAND` handler 补齐（见 2.6 条）；收口提交 `380e440`
+      的远端 CI run `42433929377` 双 job `success`，见头部说明。
 
 ### 1.4 里程碑与 DoD 归属
 
@@ -1228,6 +1230,11 @@
 .venv/bin/pytest -q
 git diff 234f620..HEAD --stat -- stableagent/core/   # 必须 0 行（L1）
 ```
+
+**收口复现（2026-11-08）**：上述命令由 CI 工作流在收口提交 `380e440` 上复跑——
+run [`42433929377`](https://github.com/VinderDiesel/StableAgent/actions/runs/42433929377)，
+`quality (3.10)` job `128588589679` 与 `quality (3.12)` job `128588589919` 均
+`completed / success`，含第 9 步的 25 文件心脏覆盖率闸门（各 ≥90%）。
 
 Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行（L8）。Docker 这一半的形状
 （2026-11-05，M2 Task 11）是三条同时给：
@@ -3809,8 +3816,9 @@ git diff main..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p5-m3-
 > M4 的 7 个步骤（4.1~4.7），展开为 **10 个 Task / 48 个 Step**；4.1~4.6 与 G1~G4 的证据已回填
 > 第 1/2 节，Task 10 的本地出口（H1/H2/H4、L1~L8、A4/B2）已复跑并回填。维护者授权后
 > `origin/main` 已从 `f41ea35` 快进到 `d700ffb`，run `42427823663` 的 3.10/3.12 双 job 全绿，
-> H3/4.7 关闭；2.6 已补齐，当前 DoD 46/46、里程碑 40/40。**P5 保持 Active 直到本笔提交的
-> 远端 CI 复现**（第 3 节）；本地门禁读数见第 1 节 2.6。
+> H3/4.7 关闭；2.6 已补齐，DoD 46/46、里程碑 40/40。收口提交 `380e440` 的远端 CI run
+> `42433929377` 在 3.10/3.12 双 job 全绿，**P5 已正式收口**（第 3 节）；本地门禁读数见
+> 第 1 节 2.6。
 >
 > **Goal:** 用一条全离线示例证明"显式请求 → 授权 → worktree → 修改 → 审批 → PR effect"的
 > 完整闭环，用五类拒绝证明失败路径没有外部副作用，并把心脏覆盖闸门、Python 等价矩阵、

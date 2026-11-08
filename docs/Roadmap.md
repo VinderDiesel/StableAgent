@@ -247,9 +247,9 @@ Assignment
 **实施入口**：执行顺序（M1 结构化授权 → M2 隔离执行 → M3 MCP 与 GitHub 闭环 → M4 收口）、
 心脏边界 L1~L8 与逐项验收写在 [P5 验收账本](acceptance/p5-guarded-execution.md)；设计取舍与
 否决方案写在 [ADR-05](design-decisions/05-guarded-execution.md)。2026-11-03 计划经维护者确认
-（ADR-05 Accepted），状态 Active：M1~M4 已完成（40/40），2026-11-08 推送后远端 CI run
-`42427823663` 在 3.10 / 3.12 双绿；同日补 2.6 的 `RUN_COMMAND`→Assignment Report 接线后
-DoD 46/46、里程碑 40/40，本地门禁 `689 passed, 6 skipped`；正式收口待本笔提交的远端 CI 读数。
+（ADR-05 Accepted），**2026-11-08 正式收口**：M1~M4 共 40/40、DoD 46/46，2.6 的
+`RUN_COMMAND`→Assignment Report 接线落地后本地门禁 `689 passed, 6 skipped`，收口提交
+`380e440` 的远端 CI run `42433929377` 在 3.10 / 3.12 双 job 全绿。
 
 **目标**：让 Worker 在明确授权和隔离边界内操作真实代码仓库，为长期运行的协作 Agent 建立安全基础。
 
