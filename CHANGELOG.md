@@ -4,22 +4,24 @@
 
 ## [Unreleased]
 
-### 实现（P5 受控执行与仓库集成，2026-11-07 本地收口、待远端 CI）
+### 实现（P5 受控执行与仓库集成，2026-11-08 远端 CI 双绿；账本 2.6 未勾）
 - `stableagent/control/`：`StaticPolicy` 四道受理门与 Mandate 构造、审批服务/审批门/守卫式取消、
   `AuditWriter` 四类审计行；`stableagent/execution/`：worktree 创建/复用/清理、命名收口、
   命令边界（argv allowlist、cwd 收口、shell 语法拒绝、输出预算）与 Docker 档参数契约；
   `stableagent/integrations/`：GitHub 显式请求入口（五件同事务原子写）、`RepositoryWorkerExecutor`
   六时机复检、三个 GitHub 写 effect handler、GitHub 错误三分类、MCP stdio transport/session/
   tool adapter 与 `mcp_call` 调用守卫
-- M3 分支已本地快进 `main`（`f41ea35..76b8d95`，未推送）；M4 的 4.1~4.6 与 Task 10 本地出口于
-  2026-11-07 本地收口（DoD 45/46、里程碑 38/40）：`examples/05_guarded_github_task.py` 的
+- M3 分支已本地快进 `main`（`f41ea35..76b8d95`，其后随 M4 出口一并推送）：M4 的 4.1~4.6 与
+  Task 10 本地出口于 2026-11-07 本地收口：`examples/05_guarded_github_task.py` 的
   run/reject 双 phase、五类结构化拒绝、CI 心脏闸门 18→25 文件、Python 3.10/3.11/3.12 等价矩阵、
   ADR-05 实测证据与七条安全声明、README/Roadmap/文档索引与规格退出清单同步；L1~L8、A4 与 B2
   的出口复跑一并回填
 - 测试：全仓 `677 passed, 6 skipped, 0 failed`，覆盖率 99.04%；25 个心脏文件逐个 ≥90%
   （最低 `core/loop.py` 96.8%）；三套解释器（3.10.20 / 3.11.16 / 3.12.14）用例总数与 skip 集一致
-- 状态口径：**未推送**，`origin/main` 仍为 `f41ea35`；H3 与 4.7 的远端 CI 3.10/3.12 双绿待
-  维护者授权后执行并回填 run ID。P5 能力在远端 CI 绿前不宣布正式交付
+- 状态口径：2026-11-08 维护者授权后已推送 `main`（`f41ea35..d700ffb`），远端 CI run
+  `42427823663` 的 `quality (3.10)` / `quality (3.12)` 双 job `success`，H3/4.7 关闭
+  （DoD 46/46、里程碑 39/40）。**P5 不写"完成"**：账本 2.6 的"命令结果写入 Assignment
+  Report"半边在 `stableagent/` 仍无生产调用点（spec WP-5.2 第 3 条要求），需单独补齐后再收口
 
 ### 规划与决策（P5 启动，2026-11-03）
 - 新增 [ADR-05](docs/design-decisions/05-guarded-execution.md)（Accepted）：P5 的 10 项决策——
