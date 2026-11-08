@@ -1485,12 +1485,8 @@ def test_failed_effects_carry_ticket_identity(store: SupervisorStore) -> None:
 
 
 def test_source_health_lists_persisted_cursors(store: SupervisorStore) -> None:
-    store.put_source_cursor(
-        SourceCursor(source="github", cursor="9", health=SourceHealth.DEGRADED)
-    )
-    assert [c.health for c in SupervisorViews(store).source_health()] == [
-        SourceHealth.DEGRADED
-    ]
+    store.put_source_cursor(SourceCursor(source="github", cursor="9", health=SourceHealth.DEGRADED))
+    assert [c.health for c in SupervisorViews(store).source_health()] == [SourceHealth.DEGRADED]
 
 
 def test_thread_timeline_includes_triggers_and_decisions_without_payload(
