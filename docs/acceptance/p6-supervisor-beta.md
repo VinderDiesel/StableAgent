@@ -654,13 +654,12 @@ def test_thread_external_ref_is_unique_per_source_and_repository(store: Supervis
 
 def test_supervisor_and_ticket_writes_share_one_transaction(store: SupervisorStore) -> None:
     """ADR-06 决策 7：Trigger 去重与 Ticket 创建必须同生共死。"""
-    with pytest.raises(RuntimeError):
-        with store.transaction():
-            store.insert_trigger(_trigger())
-            store.insert_ticket(
-                Ticket(id="tk-tx", title="t", task="t", created_at=1, mandate_id="md-none")
-            )
-            raise RuntimeError("rollback")
+    with pytest.raises(RuntimeError), store.transaction():
+        store.insert_trigger(_trigger())
+        store.insert_ticket(
+            Ticket(id="tk-tx", title="t", task="t", created_at=1, mandate_id="md-none")
+        )
+        raise RuntimeError("rollback")
     assert store.get_trigger("tg-0001") is None
     assert store.get_ticket("tk-tx") is None
 ```
@@ -798,9 +797,7 @@ class SupervisorStore(Store):
         ).fetchone()
         return _row_to_trigger(row) if row else None
 
-    def list_triggers(
-        self, *, thread_key: str | None = None, limit: int = 100
-    ) -> list[Trigger]:
+    def list_triggers(self, *, thread_key: str | None = None, limit: int = 100) -> list[Trigger]:
         if thread_key is None:
             rows = self._conn.execute(
                 "SELECT * FROM triggers ORDER BY received_at ASC, id ASC LIMIT ?", (limit,)
