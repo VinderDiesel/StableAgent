@@ -511,12 +511,13 @@ def test_merge_is_structurally_absent() -> None:
     )
 
 
-def test_effect_kind_has_exactly_seven_members_and_no_merge() -> None:
+def test_effect_kind_has_exactly_eight_members_and_no_merge() -> None:
     assert {k.value for k in EffectKind} == {
         "launch_assignment",
         "deliver_input",
         "cancel_assignment",
         "prepare_worktree",
+        "run_command",
         "github_comment",
         "github_pull_request",
         "github_request_review",

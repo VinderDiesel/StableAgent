@@ -86,12 +86,14 @@ integrations → execution → control → orchestration → core
 - 六个 revalidate 时机固定并逐个有审计行：Assignment launch、recover、retry、
   prepare_worktree 前、push/create PR/comment 前、`call_mcp_tool` 前。
 
-### 5. EffectKind 扩展：加四类，外部写全部走 outbox
+### 5. EffectKind 扩展：外部写与命令全部走 outbox
 
 - P4 的 `EffectKind` 从 3 类扩为 7 类：`PREPARE_WORKTREE`、`GITHUB_COMMENT`、
-  `GITHUB_PULL_REQUEST`、`GITHUB_REQUEST_REVIEW`。`effects.kind` 是无 CHECK 约束的
-  TEXT（store.py:81），加枚举成员是非破坏性扩展；幂等键沿用 `UNIQUE(kind,
-  idempotency_key)`，GitHub 写的 key 取"外部稳定 id + action/resource digest"。
+  `GITHUB_PULL_REQUEST`、`GITHUB_REQUEST_REVIEW`。2026-11-08 补账本 2.6 时新增第八个成员
+  `RUN_COMMAND`（命令也经 outbox 执行，结果写 Assignment Report）；merge/auto-merge 的
+  结构性缺席不变。`effects.kind` 是无 CHECK 约束的 TEXT（store.py:81），加枚举成员是非破坏性
+  扩展；幂等键沿用 `UNIQUE(kind, idempotency_key)`，GitHub 写的 key 取"外部稳定 id +
+  action/resource digest"。
 - **merge 与 enable_auto_merge 不进入 EffectKind**：枚举里存在即可能被历史脏行驱动，
   默认拒绝在 Policy 层表达（Decision 4 的 action 集合里没有它们，admit 时拒绝并审计）。
 - `prepare_worktree` 作为 effect 驱动（规格 2.3）：崩溃恢复后重复 prepare 必须命中

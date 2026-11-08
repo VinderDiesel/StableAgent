@@ -260,9 +260,10 @@ Docker/真实 GitHub 用例只能在显式 marker 与环境变量存在时运行
 
 > 以下九项均有 2026-11-07 的本地离线证据（677 passed / 6 skipped / 0 failed，覆盖率 99.04%，
 > 25 个心脏文件 ≥90%，三套解释器等价）。**2026-11-08 维护者授权推送**：`main` 快进到
-> `d700ffb`，远端 CI run `42427823663` 的 3.10/3.12 双 job `success`。**本清单勾满不等于
-> P5 已整体收口**：验收账本的里程碑步骤 2.6（命令结果写入 Assignment Report）仍无生产调用点，
-> 在处理完该项前不得对外宣布 P5 完成。
+> `d700ffb`，远端 CI run `42427823663` 的 3.10/3.12 双 job `success`。**2026-11-08 补 2.6**：
+> `RUN_COMMAND` effect handler 把命令结果写进 Assignment Report（本地 `689 passed / 6 skipped`，
+> 覆盖 99.05%）；本清单与验收账本均已勾满。按账本第 3 节，正式宣布 P5 完成还需本笔提交的
+> 远端 CI 读数。
 
 - [x] P4 的 Ticket / Assignment / Outbox 语义和恢复测试无回归。
 - [x] Policy、Mandate、Approval 和 Audit 为持久化、版本化、结构化事实源。

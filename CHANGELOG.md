@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-### 实现（P5 受控执行与仓库集成，2026-11-08 远端 CI 双绿；账本 2.6 未勾）
+### 实现（P5 受控执行与仓库集成，2026-11-08 远端 CI 双绿；账本 2.6 已补齐）
 - `stableagent/control/`：`StaticPolicy` 四道受理门与 Mandate 构造、审批服务/审批门/守卫式取消、
   `AuditWriter` 四类审计行；`stableagent/execution/`：worktree 创建/复用/清理、命名收口、
   命令边界（argv allowlist、cwd 收口、shell 语法拒绝、输出预算）与 Docker 档参数契约；
@@ -16,12 +16,18 @@
   run/reject 双 phase、五类结构化拒绝、CI 心脏闸门 18→25 文件、Python 3.10/3.11/3.12 等价矩阵、
   ADR-05 实测证据与七条安全声明、README/Roadmap/文档索引与规格退出清单同步；L1~L8、A4 与 B2
   的出口复跑一并回填
-- 测试：全仓 `677 passed, 6 skipped, 0 failed`，覆盖率 99.04%；25 个心脏文件逐个 ≥90%
-  （最低 `core/loop.py` 96.8%）；三套解释器（3.10.20 / 3.11.16 / 3.12.14）用例总数与 skip 集一致
+- 补账本 2.6：`EffectKind` 加 `RUN_COMMAND`，`execution/effects.py` 的 `run_command_handler`
+  经 outbox 执行受限命令并把 `CommandResult.summary()` 与结构化字段写进 Assignment Report
+  （拒绝 BLOCKED、其余 PROGRESS；stdout/stderr 与凭据不进 Report）；示例 05 的 run phase 三条
+  git 命令改走 effect
+- 测试：M4 出口读数 `677 passed, 6 skipped, 0 failed`、覆盖率 99.04%；补 2.6 后全仓
+  `689 passed, 6 skipped, 0 failed`、覆盖率 99.05%；25 个心脏文件逐个 ≥90%
+  （最低 `core/loop.py` 96.8%）；三套解释器（3.10.20 / 3.11.16 / 3.12.14）同为
+  `689 passed, 6 skipped`
 - 状态口径：2026-11-08 维护者授权后已推送 `main`（`f41ea35..d700ffb`），远端 CI run
-  `42427823663` 的 `quality (3.10)` / `quality (3.12)` 双 job `success`，H3/4.7 关闭
-  （DoD 46/46、里程碑 39/40）。**P5 不写"完成"**：账本 2.6 的"命令结果写入 Assignment
-  Report"半边在 `stableagent/` 仍无生产调用点（spec WP-5.2 第 3 条要求），需单独补齐后再收口
+  `42427823663` 的 `quality (3.10)` / `quality (3.12)` 双 job `success`，H3/4.7 关闭；
+  2.6 补齐后 DoD 46/46、里程碑 40/40。按账本第 3 节，正式宣布 P5 完成还需本笔提交的远端
+  CI 读数
 
 ### 规划与决策（P5 启动，2026-11-03）
 - 新增 [ADR-05](docs/design-decisions/05-guarded-execution.md)（Accepted）：P5 的 10 项决策——

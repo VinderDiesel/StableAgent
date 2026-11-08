@@ -27,7 +27,9 @@ from stableagent.control.errors import AdmissionRejectedError
 from stableagent.control.model import Action, Resource, resource_digest
 from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
 from stableagent.execution.command import CommandContext, CommandRequest, CommandRunner
+from stableagent.execution.effects import command_idempotency_key, run_command_handler
 from stableagent.execution.git import SubprocessGit
+from stableagent.execution.sandbox import LocalRestrictedRunner
 from stableagent.execution.worktree import GitWorktreeManager
 from stableagent.integrations.github import ExplicitGitHubRequest, GitHubIntake
 from stableagent.integrations.github_client import FakeGitHubClient
@@ -216,6 +218,9 @@ async def _run_phase(root: Path) -> int:
             pushed.append(head)
             _emit("push", head=head)
 
+        runner = LocalRestrictedRunner(
+            CommandRunner(frozenset({"git"}), worktree_root=root / "worktrees", clock=clock)
+        )
         handlers = {
             EffectKind.PREPARE_WORKTREE: guarded_prepare_worktree_handler(
                 manager,
@@ -225,6 +230,7 @@ async def _run_phase(root: Path) -> int:
                 clock=clock,
                 ids=ids,
             ),
+            EffectKind.RUN_COMMAND: run_command_handler(runner, store, clock=clock, ids=ids),
             EffectKind.GITHUB_PULL_REQUEST: github_pull_request_handler(
                 store=store,
                 policy=policy,
@@ -276,15 +282,10 @@ async def _run_phase(root: Path) -> int:
         )
         _emit("write", path="src/app.py", action=Action.WRITE_REPOSITORY.value)
 
-        runner = CommandRunner(frozenset({"git"}), worktree_root=root / "worktrees", clock=clock)
-        context = CommandContext(
-            ticket_id=ticket.id,
-            assignment_id=assignment.id,
-            repository=REPOSITORY,
-            base_ref="main",
-        )
+        command_sequence = 0
 
-        def run_command(*argv: str) -> None:
+        async def run_command(*argv: str) -> None:
+            nonlocal command_sequence
             _authorize(
                 policy,
                 audit,
@@ -294,14 +295,36 @@ async def _run_phase(root: Path) -> int:
                 ticket_id=ticket.id,
                 assignment_id=assignment.id,
             )
-            result = runner.run(CommandRequest(argv=argv, cwd=handle.path, context=context))
-            if result.exit_code != 0:
-                raise SystemExit(f"command failed: {argv!r} {result.stderr}")
-            _emit("command", argv=list(argv), exit=result.exit_code)
+            command_sequence += 1
+            effect = Effect(
+                id=ids.new_id("ef"),
+                kind=EffectKind.RUN_COMMAND,
+                idempotency_key=command_idempotency_key(assignment.id, command_sequence),
+                payload={
+                    "ticket_id": ticket.id,
+                    "assignment_id": assignment.id,
+                    "argv": list(argv),
+                    "cwd": str(handle.path),
+                },
+                due_at=clock.now_ms(),
+            )
+            with store.transaction():
+                store.enqueue_effect(effect)
+            await dispatcher.dispatch_due()
+            settled = store.get_effect(effect.id)
+            report = store.list_reports(ticket.id)[-1]
+            if (
+                settled is None
+                or settled.state is not EffectState.SUCCEEDED
+                or report.details["denied_reason"] is not None
+                or report.details["exit_code"] != 0
+            ):
+                raise SystemExit(f"command failed: {argv!r} {report.summary}")
+            _emit("command", argv=list(argv), exit=report.details["exit_code"], report=report.id)
 
-        run_command("git", "status", "--short")
-        run_command("git", "add", "src/app.py")
-        run_command(
+        await run_command("git", "status", "--short")
+        await run_command("git", "add", "src/app.py")
+        await run_command(
             "git",
             "-c",
             "user.name=Demo",

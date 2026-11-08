@@ -4,15 +4,17 @@
 > [P5 实施规格](../specs/p5-guarded-execution-repository-integration.md) 的 6 个工作包与
 > [ADR-05](../design-decisions/05-guarded-execution.md) 的 10 项决策展开为可勾选的验收账本。
 > 执行从任务级计划（第 5/6/7 节，各里程碑开工前追加）开始；**M1 已于 2026-11-04 收口，M2 已于
-> 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾），
+> 2026-11-05 以 11/12 收口**（2.12 出口执行完，2.6 因"入 Report"的接线半边属 M3 而不勾；
+> **2026-11-08 补勾 2.6 后为 12/12**），
 > **M3 已于 2026-11-07 以 12/12 收口**（第 7 节，13 Task / 65 Step；3.12 出口执行完），
 > **M4 的 4.1~4.6 已于 2026-11-07 本地执行完**（第 8 节 Task 1~9），**Task 10 的本地出口已于
 > 同日跑完**（H1/H2/H4、L1~L8、A4/B2 全部回填）。**2026-11-08 维护者授权推送**：
 > `f41ea35..d700ffb` 已快进 `origin/main`，远端 CI run `42427823663` 的
-> `quality (3.10)` 与 `quality (3.12)` 两个 job 均 `success`，H3/4.7 已回填。当前
-> **DoD 46/46、里程碑步骤 39/40**（M1 9/9、M2 11/12、M3 12/12、M4 7/7）；唯一未勾的
-> 里程碑步骤是 **2.6** 的"命令结果写入 Assignment Report"半边（见该条），因此 P5 保持
-> Active，不写"已完成"。
+> `quality (3.10)` 与 `quality (3.12)` 两个 job 均 `success`，H3/4.7 已回填。**2026-11-08
+> 补 2.6**：`RUN_COMMAND` effect handler 把 `CommandResult` 写进 Assignment Report（见该条），
+> 当前 **DoD 46/46、里程碑步骤 40/40**（M1 9/9、M2 12/12、M3 12/12、M4 7/7）；本地门禁
+> `689 passed, 6 skipped`、覆盖 99.05%。按第 3 节，P5 正式收口还需本笔提交的远端 CI 复现；
+> 推送前状态保持 Active（本地收口完成、待远端门），不写"已完成"。
 > M1 分支 `feat/p5-m1-control-plane` 已快进
 > `main`（`5e94377`）；M2 计划已落并已执行（第 6 节，12 Task / 60 Step），执行分支
 > `feat/p5-m2-isolated-execution` 已于 2026-11-06 经维护者指示快进 `main` 并推送
@@ -25,9 +27,9 @@
 > （2026-11-07，`env -u NO_PROXY -u no_proxy`）：`677 passed, 6 skipped, 0 failed`、全库覆盖
 > 99.04%、`mypy` 60 files、`ruff check` 通过、`ruff format --check` 135 files、25 个心脏文件
 > 逐个 ≥96.8%、L1 与约束 1 均 0 行。
-> 远端门禁已关闭（2026-11-08，run `42427823663` 双绿），但 P5 仍不能写"完成"：里程碑步骤
-> 2.6 的"命令结果写入 Assignment Report"在 `stableagent/` 没有生产调用点，账本第 3 节的
-> "全部勾选后才收口"因此不成立。合并（2026-11-07，维护者选择本地快进）：`git merge --ff-only
+> 远端门禁已关闭（2026-11-08，run `42427823663` 双绿）。2.6 的"命令结果写入 Assignment
+> Report"已由同日 `RUN_COMMAND` handler 补齐，第 3 节的"全部勾选"成立；正式收口等本笔提交
+> 的 CI 读数。合并（2026-11-07，维护者选择本地快进）：`git merge --ff-only
 > feat/p5-m3-mcp-github`（`f41ea35..76b8d95`），当时未推送；该段提交已于 2026-11-08 随 M4
 > 出口一起快进到 `origin/main@d700ffb`（见 4.7）。合并结果复跑门禁与分支出口一致的历史读数：
 > `668 passed, 3 failed, 6 skipped`（三条是 macOS `LC_CTYPE` 已知环境差异，已由 M4 Task 3
@@ -501,7 +503,7 @@
       `execution/worktree.py` 与 `execution/errors.py` 均 100%；`mypy` Success（48 source files，
       本轮零新文件）、`ruff check` All checks passed、`ruff format --check` 109 files already formatted；
       L1 `git diff 234f620..HEAD -- stableagent/core/` = 0 行，约束 1 与整个 `orchestration/` 本轮 0 行。
-- [ ] **2.6** `CommandRunner`：命令名精确 allowlist、cwd 锁 worktree、超时、输出上限、
+- [x] **2.6** `CommandRunner`：命令名精确 allowlist、cwd 锁 worktree、超时、输出上限、
       截断与脱敏入 Report。验证：C7 全断言。
       进度（2026-11-05，M2 Task 7）：**前四项 + 脱敏**五项齐（C7 已勾，见第 2 节）——
       `execution/command.py`（89 语句、覆盖 100%）的 `CommandRunner.run(request)` 按
@@ -526,6 +528,26 @@
       **没有生产改动**（`service.py` 一字不动是 M2 的约束 1，Report 写入点也不在 M2 的面上），
       所以这半句仍缺、2.6 仍不勾。M2 因此按 11/12 收口；接线归 M3（步骤 3.6/3.7 那批事务与
       handler 落地时，`CommandResult.summary()` 才有生产调用方）。
+      证据（2026-11-08，补 2.6 接线，本笔提交）：`orchestration/model.py` 的 `EffectKind`
+      新增第八个成员 `RUN_COMMAND`（两处精确集合断言同步扩容：
+      `test_m2_effect_kinds_close_the_whitelist` 与
+      `test_effect_kind_has_exactly_eight_members_and_no_merge`；merge/auto-merge 的缺席断言不动）。
+      `execution/effects.py` 的 `run_command_handler` 是生产调用点：payload
+      `{ticket_id, assignment_id, argv, cwd, timeout_s?}`，子进程身份（repository/base_ref）只从
+      Ticket 的 Mandate 取，缺一项即 `PermanentEffectError`；`cwd` 交给 runner 的 `confine`，
+      越界是 `cwd_escape` 结果而不是异常；`await SandboxRunner.run(...)` 同时接住本地档
+      `LocalRestrictedRunner` 与容器档 `DockerRunner`。结果写 `Report(summary=result.summary(),
+      details={mode, exit_code, denied_reason, timed_out, truncated, duration_ms})`——拒绝写
+      BLOCKED，其余写 PROGRESS；stdout/stderr 一个字符都不进（脱敏后的正文只活在结果对象里）。
+      测试 `tests/unit/test_command_effects.py` 12 例：放行结果入 Report（summary 与 details
+      逐字段断言、正文缺席）、`command_not_allowed` 与 `cwd_escape` 写 BLOCKED 且无副作用、
+      截断+脱敏后 Report 无 `SEKRET`/正文、七种坏 payload 永久失败不 spawn、Mandate 缺
+      repository/base_ref 永久失败。示例 05 的 run phase 三条 git 命令改经 `RUN_COMMAND`
+      effect（每条输出 `"report": "rp-xxxx"`），run/reject 双 phase 实跑通过。
+      门禁（2026-11-08，`env -u NO_PROXY -u no_proxy`）：`689 passed, 6 skipped, 0 failed`、
+      全库覆盖 99.05%、`execution/effects.py` 100%、`mypy` 60 files、`ruff check` 通过、
+      `ruff format --check` 136 files、25 个心脏文件逐个 ≥96.8%、L1 与约束 1 均 0 行、
+      3.10.20 / 3.11.16 / 3.12.14 三套解释器同为 `689 passed, 6 skipped`。
 - [x] **2.7** `environment.py` 变量白名单（TICKET_ID/ASSIGNMENT_ID/WORKTREE/仓库信息），
       宿主其余环境不注入。验证：子进程可见环境断言（C8、L7）。
       证据（2026-11-05，M2 Task 6）：`execution/environment.py`（8 语句、覆盖 100%）的
@@ -804,7 +826,8 @@
       远端半步（2026-11-08，维护者授权"推送"）：`origin/main` 由 `f41ea35` 快进到 `d700ffb`；
       run `42427823663` 的 3.10/3.12 双 job `success`，run ID 见 H3。本条按"授权 + 推送 +
       双绿 + 回填"四件齐勾选；M4 因此 7/7。**注意**：M4 勾满不等于 P5 整体收口——
-      2.6 的命令→Report 接线仍未落，见头部说明。
+      2.6 已于 2026-11-08 由 `RUN_COMMAND` handler 补齐（见 2.6 条）；正式收口待本笔提交的
+      远端 CI 读数，见头部说明。
 
 ### 1.4 里程碑与 DoD 归属
 
@@ -991,6 +1014,8 @@
       （`print('US$5')` 被拒；实现前它 `exit_code=0` 真跑起来了，那条红见 §6 Task 9 Step 2）。
       审计的**落点**（写进 Report/审计表）不在本条：本轮只保证"每次拒绝都过一遍可注入回调"，
       默认实现是 no-op，接线属 Task 12 / M3。
+      2026-11-08 补 2.6 后：命令结果（含 `denied_reason` 稳定码）已由 `run_command_handler`
+      写入 Assignment Report；默认 `audit` 回调仍是 no-op，审计表落点仍未接线（另一条线）。
 - [x] **C7** 命令 allowlist、cwd 锁 worktree、超时、输出上限、脱敏五项全部有测试。
       证据（2026-11-05，M2 Task 7）：`tests/unit/test_command_runner.py` 的 C7 段 14 例，五项逐项对上——
       ① **allowlist**：`test_denied_command_has_no_side_effect`
@@ -3784,8 +3809,8 @@ git diff main..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p5-m3-
 > M4 的 7 个步骤（4.1~4.7），展开为 **10 个 Task / 48 个 Step**；4.1~4.6 与 G1~G4 的证据已回填
 > 第 1/2 节，Task 10 的本地出口（H1/H2/H4、L1~L8、A4/B2）已复跑并回填。维护者授权后
 > `origin/main` 已从 `f41ea35` 快进到 `d700ffb`，run `42427823663` 的 3.10/3.12 双 job 全绿，
-> H3/4.7 关闭；当前 DoD 46/46、里程碑 39/40。**P5 仍保持 Active**：2.6 的"命令结果写入
-> Assignment Report"半边未落，详见第 1 节 2.6。
+> H3/4.7 关闭；2.6 已补齐，当前 DoD 46/46、里程碑 40/40。**P5 保持 Active 直到本笔提交的
+> 远端 CI 复现**（第 3 节）；本地门禁读数见第 1 节 2.6。
 >
 > **Goal:** 用一条全离线示例证明"显式请求 → 授权 → worktree → 修改 → 审批 → PR effect"的
 > 完整闭环，用五类拒绝证明失败路径没有外部副作用，并把心脏覆盖闸门、Python 等价矩阵、
