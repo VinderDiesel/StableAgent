@@ -11,6 +11,10 @@ from stableagent.orchestration.model import Mandate, Ticket
 from stableagent.orchestration.store import Store
 from stableagent.supervisor import SUPERVISOR_SCHEMA_VERSION
 from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    Subscription,
+    SubscriptionMode,
     Thread,
     ThreadKind,
     ThreadStatus,
@@ -136,3 +140,53 @@ def test_supervisor_and_ticket_writes_share_one_transaction(store: SupervisorSto
         raise RuntimeError("rollback")
     assert store.get_trigger("tg-0001") is None
     assert store.get_ticket("tk-tx") is None
+
+
+def test_channel_is_unique_per_destination(store: SupervisorStore) -> None:
+    channel = Channel(
+        id="ch-1",
+        thread_key="issue:acme/widgets#1",
+        kind=ChannelKind.ISSUE_COMMENT,
+        external_ref="#1",
+    )
+    assert store.insert_channel(channel) is True
+    duplicate = channel.model_copy(update={"id": "ch-2"})
+    assert store.insert_channel(duplicate) is False
+    assert [c.id for c in store.list_channels(channel.thread_key)] == ["ch-1"]
+
+
+def test_live_subscription_is_idempotent_and_can_be_resubscribed(
+    store: SupervisorStore,
+) -> None:
+    live = Subscription(
+        id="sb-1",
+        ticket_id="tk-1",
+        thread_key="issue:acme/widgets#1",
+        mode=SubscriptionMode.OWN,
+        created_at=10,
+    )
+    assert store.insert_subscription(live) is True
+    assert store.insert_subscription(live.model_copy(update={"id": "sb-2"})) is False
+    assert store.end_subscription("sb-1", ended_at=20) == 1
+    assert store.end_subscription("sb-1", ended_at=21) == 0
+    assert store.insert_subscription(live.model_copy(update={"id": "sb-3"})) is True
+    live_rows = store.list_subscriptions(ticket_id="tk-1", live_only=True)
+    assert [s.id for s in live_rows] == ["sb-3"]
+
+
+def test_subscription_list_filters_by_thread_and_mode(store: SupervisorStore) -> None:
+    for index, mode in enumerate((SubscriptionMode.OWN, SubscriptionMode.CONTEXT), start=1):
+        store.insert_subscription(
+            Subscription(
+                id=f"sb-{index}",
+                ticket_id="tk-1",
+                thread_key="issue:acme/widgets#1",
+                mode=mode,
+                created_at=index,
+            )
+        )
+    assert len(store.list_subscriptions(thread_key="issue:acme/widgets#1")) == 2
+    assert [s.mode for s in store.list_subscriptions(ticket_id="tk-1")] == [
+        SubscriptionMode.OWN,
+        SubscriptionMode.CONTEXT,
+    ]

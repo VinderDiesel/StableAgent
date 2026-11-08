@@ -14,6 +14,10 @@ from stableagent.orchestration.model import Clock
 from stableagent.orchestration.store import Store
 from stableagent.supervisor import SUPERVISOR_SCHEMA_VERSION
 from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    Subscription,
+    SubscriptionMode,
     Thread,
     ThreadKind,
     ThreadStatus,
@@ -38,11 +42,25 @@ _SUPERVISOR_SCHEMA: dict[str, str] = {
         " last_trigger_at INTEGER NOT NULL, status TEXT NOT NULL,"
         " UNIQUE (source, repository, kind, external_ref))"
     ),
+    "channels": (
+        "CREATE TABLE IF NOT EXISTS channels ("
+        " id TEXT PRIMARY KEY, thread_key TEXT NOT NULL, kind TEXT NOT NULL,"
+        " external_ref TEXT NOT NULL,"
+        " UNIQUE (thread_key, kind, external_ref))"
+    ),
+    "subscriptions": (
+        "CREATE TABLE IF NOT EXISTS subscriptions ("
+        " id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, thread_key TEXT NOT NULL,"
+        " mode TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER)"
+    ),
 }
 
 _SUPERVISOR_INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS triggers_received ON triggers (received_at, id)",
     "CREATE INDEX IF NOT EXISTS threads_last_trigger ON threads (last_trigger_at, key)",
+    "CREATE INDEX IF NOT EXISTS subscriptions_thread ON subscriptions (thread_key, ended_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_live"
+    " ON subscriptions (ticket_id, thread_key, mode) WHERE ended_at IS NULL",
 )
 
 
@@ -70,6 +88,26 @@ def _row_to_thread(row: sqlite3.Row) -> Thread:
         external_ref=row["external_ref"],
         last_trigger_at=row["last_trigger_at"],
         status=ThreadStatus(row["status"]),
+    )
+
+
+def _row_to_channel(row: sqlite3.Row) -> Channel:
+    return Channel(
+        id=row["id"],
+        thread_key=row["thread_key"],
+        kind=ChannelKind(row["kind"]),
+        external_ref=row["external_ref"],
+    )
+
+
+def _row_to_subscription(row: sqlite3.Row) -> Subscription:
+    return Subscription(
+        id=row["id"],
+        ticket_id=row["ticket_id"],
+        thread_key=row["thread_key"],
+        mode=SubscriptionMode(row["mode"]),
+        created_at=row["created_at"],
+        ended_at=row["ended_at"],
     )
 
 
@@ -165,3 +203,62 @@ class SupervisorStore(Store):
             "SELECT * FROM threads ORDER BY last_trigger_at DESC, key ASC LIMIT ?", (limit,)
         ).fetchall()
         return [_row_to_thread(row) for row in rows]
+
+    def insert_channel(self, channel: Channel) -> bool:
+        cursor = self._conn.execute(
+            "INSERT OR IGNORE INTO channels (id, thread_key, kind, external_ref)"
+            " VALUES (?, ?, ?, ?)",
+            (channel.id, channel.thread_key, channel.kind.value, channel.external_ref),
+        )
+        return int(cursor.rowcount) == 1
+
+    def list_channels(self, thread_key: str) -> list[Channel]:
+        rows = self._conn.execute(
+            "SELECT * FROM channels WHERE thread_key = ? ORDER BY id ASC", (thread_key,)
+        ).fetchall()
+        return [_row_to_channel(row) for row in rows]
+
+    def insert_subscription(self, subscription: Subscription) -> bool:
+        cursor = self._conn.execute(
+            "INSERT OR IGNORE INTO subscriptions"
+            " (id, ticket_id, thread_key, mode, created_at, ended_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                subscription.id,
+                subscription.ticket_id,
+                subscription.thread_key,
+                subscription.mode.value,
+                subscription.created_at,
+                subscription.ended_at,
+            ),
+        )
+        return int(cursor.rowcount) == 1
+
+    def end_subscription(self, subscription_id: str, *, ended_at: int) -> int:
+        cursor = self._conn.execute(
+            "UPDATE subscriptions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+            (ended_at, subscription_id),
+        )
+        return int(cursor.rowcount)
+
+    def list_subscriptions(
+        self,
+        *,
+        ticket_id: str | None = None,
+        thread_key: str | None = None,
+        live_only: bool = False,
+    ) -> list[Subscription]:
+        clauses, params = [], []
+        if ticket_id is not None:
+            clauses.append("ticket_id = ?")
+            params.append(ticket_id)
+        if thread_key is not None:
+            clauses.append("thread_key = ?")
+            params.append(thread_key)
+        if live_only:
+            clauses.append("ended_at IS NULL")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM subscriptions {where} ORDER BY created_at ASC, id ASC", params
+        ).fetchall()
+        return [_row_to_subscription(row) for row in rows]
