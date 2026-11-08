@@ -108,7 +108,27 @@ supervisor。
       下层包真实 import `stableagent.supervisor` 的 grep 命中 0 行；`git diff --check` 无输出。
       本提交完成账本与状态面回填。
 
-### M3：Router Intake、Subscription 与 Decision（规格 WP-6.3；待 M2 收口后展开）
+### M3：Router Intake、Subscription 与 Decision（规格 WP-6.3）
+
+> **状态：计划已展开（7 个 Task / 38 个 Step），待维护者确认后开工。** `receive(trigger)`
+> 是外部事件进入领域的唯一命令；`observe` 锁定、Channel 不授予权限、context 订阅不扩大
+> Mandate。任务级计划见 §9。
+
+- [ ] **M3-1** `AutonomyMode`（`off`/`observe`/`auto`，`auto` 构造期拒绝）与
+      `CandidateAssessor` 窄协议；`ObserveOnlyAssessor` 的确定性规则。
+      `tests/unit/test_supervisor_assessor.py`。
+- [ ] **M3-2** GitHubSource 为带正文事件补 `payload["request"]`（`text`/`mentioned`/`url`）；
+      `SupervisorStore` 增加 `next_decision_attempt` 与 `find_accepted_decision`。
+- [ ] **M3-3** `receive()`：Trigger 去重、Thread 解析、live Subscription 扇出（每 Ticket
+      每事件一条 Input + deliver effect）、`off` 忽略与 `observe` 只记录。
+- [ ] **M3-4** explicit 准入：未准入 IGNORE；准入后 Mandate/Ticket/Input/Assignment/
+      launch effect/own Subscription 与 Decision 同事务；malformed 与 repository 不匹配稳定拒绝。
+- [ ] **M3-5** 归属语义：own Thread 后续消息 ATTACH、重复 `request_digest` ATTACH、
+      已 stop 的 STOP、已结束的 OBSERVE 且保留 Input、多个 owner 的 `ambiguous_owner`。
+- [ ] **M3-6** `unavailable` 与 `reevaluate`：评估器异常只记 `unavailable`；重评估不重复扇出。
+- [ ] **M3-7** 命令层：attach/subscribe/unsubscribe/stop（Task 5）与 handback/resume/
+      `record_pull_request`（Task 6）；全部检查 operator、Ticket 状态与 Mandate 复检。
+- [ ] **M3-8** CI FOCUS 29→32、`docs/guides/supervisor-router.md`、全量门禁与账本回填。
 
 ### M4：常驻调度、恢复与运行控制（规格 WP-6.4；待 M3 收口后展开）
 
@@ -143,9 +163,9 @@ git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py   # 必须
 
 ## 4. 任务级实施计划说明
 
-M1 展开为 **8 个 Task / 47 个 Step**，M2 展开为 **7 个 Task / 43 个 Step**。每个 Task
-独立可验收、独立提交；Task 之间的接口在各自 `Interfaces` 块写清。任务级 Step 不计入
-里程碑步骤。
+M1 展开为 **8 个 Task / 47 个 Step**，M2 展开为 **7 个 Task / 43 个 Step**，M3 展开为
+**7 个 Task / 38 个 Step**。每个 Task 独立可验收、独立提交；Task 之间的接口在各自
+`Interfaces` 块写清。任务级 Step 不计入里程碑步骤。
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-08）
 
@@ -3676,3 +3696,2940 @@ git commit -m "docs: close p6 m2 with the github source evidence"
 - 无占位符：所有实现步骤给出完整代码；出口读数在 Task 7 执行时落盘后回填，不预填数字。
 - 边界：integrations 侧只新增 `GitHubReadKind`，不 import supervisor（L2）；事务体内无
   `await`（L3）；Trigger payload 只进 digest 与持久化，不参与判定（L4）。
+
+## 9. M3 任务级实施计划（writing-plans 产出，2026-11-09）
+
+**Goal：** 让 `RouterService.receive(trigger)` 成为 Trigger → Subscription 扇出 →
+Decision/Ticket 的唯一入口，并在 `observe` 锁定下完成六种 outcome 与七条命令。
+
+**Architecture：** `supervisor/assessor.py` 只做确定性候选判断；`supervisor/router.py`
+在一个 `BEGIN IMMEDIATE` 内完成去重、扇出与决策；`supervisor/service.py` 承载 operator
+命令。Ticket/Assignment/Effect 的写入沿用 P5 `GitHubIntake` 的"五件事实"口径，不调用
+`OrchestrationService`（其命令自带事务，嵌套会触发 `ReentrantTransactionError`）。
+
+**Spec：** [P6 实施规格](../specs/p6-single-repository-super-agent-beta.md) §2.1–2.3 与
+WP-6.3；决策来源 [ADR-06](../design-decisions/06-super-agent-router.md) 决策 3–9。
+
+**Global Constraints（每个 Task 都隐含遵守）：**
+
+- L1：`stableagent/core/` 对 `234f620` 零 diff；约束 1：`orchestration/service.py` 零字符改动。
+- L2：方向锁 `supervisor → integrations → execution → control → orchestration → core`；
+  旧包与 P5 包不得 import `stableagent.supervisor`。
+- L3：`Store.transaction()` 体内不得出现 `await`；`receive` / `reevaluate` / 命令各只开
+  一个事务。
+- L4：外部正文只进 digest、TicketInput 与 Decision reason，不决定 action 集合；action
+  集合只来自 `RouterConfig` 与 `StaticPolicyConfig`。
+- L5：`resume` 的 Mandate 复检用 `when="launch"` 并写审计行。
+- L6：不新增 `merge` / `enable_auto_merge` 路径；`EffectKind` 不加成员。
+- L8：全部用例离线；定向测试必须加 `--no-cov`（全局 `fail_under = 70`）。
+
+---
+
+### Task 1：AutonomyMode 与 observe 评估器（M3-1）
+
+**Files:**
+- Modify: `stableagent/supervisor/model.py`
+- Create: `stableagent/supervisor/assessor.py`
+- Test: `tests/unit/test_supervisor_assessor.py`
+
+**Interfaces:**
+- Consumes: `supervisor.model` 的 `Trigger` / `Thread` / `ThreadStatus` / `TriggerKind`。
+- Produces: `AutonomyMode`（`off` / `observe` / `auto`）；`AssessmentContext`、
+  `CandidateAssessment`、`CandidateAssessor`（`assess(context) -> CandidateAssessment`）、
+  `ObserveOnlyAssessor`。Task 2~6 只使用这些名字，不重定义。
+
+- [ ] **Step 1: 写失败测试**
+
+```python
+"""WP-6.3：observe 唯一评估器的确定性规则。"""
+
+from __future__ import annotations
+
+from stableagent.supervisor.assessor import (
+    AssessmentContext,
+    CandidateAssessor,
+    ObserveOnlyAssessor,
+)
+from stableagent.supervisor.model import (
+    AutonomyMode,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+
+
+def _trigger(kind: TriggerKind = TriggerKind.ISSUE) -> Trigger:
+    return Trigger(
+        id="tg-1",
+        external_id="github:o/r:issue:1",
+        kind=kind,
+        actor="alice",
+        thread_keys=["issue:o/r#1"],
+        occurred_at=1,
+        received_at=1,
+        payload={"resource": {"number": 1}, "deleted": False},
+    )
+
+
+def _thread(status: ThreadStatus = ThreadStatus.OPEN) -> Thread:
+    return Thread(
+        key="issue:o/r#1",
+        repository="o/r",
+        kind=ThreadKind.ISSUE,
+        external_ref="#1",
+        last_trigger_at=1,
+        status=status,
+    )
+
+
+def _context(**overrides: object) -> AssessmentContext:
+    values: dict[str, object] = {
+        "trigger": _trigger(),
+        "thread": _thread(),
+        "policy_version": "p5-v1",
+    }
+    values.update(overrides)
+    return AssessmentContext(**values)
+
+
+def test_autonomy_mode_has_three_values() -> None:
+    assert [mode.value for mode in AutonomyMode] == ["off", "observe", "auto"]
+
+
+def test_observe_only_assessor_marks_a_fresh_human_candidate() -> None:
+    assessment = ObserveOnlyAssessor().assess(_context())
+    assert assessment.would_accept is True
+    assert assessment.reason_codes == ["inferred_candidate"]
+
+
+def test_observe_only_assessor_rejects_ci_as_context_only() -> None:
+    assessment = ObserveOnlyAssessor().assess(_context(trigger=_trigger(TriggerKind.CI_STATUS)))
+    assert assessment.would_accept is False
+    assert assessment.reason_codes == ["ci_context_only"]
+
+
+def test_observe_only_assessor_rejects_non_open_threads() -> None:
+    assessment = ObserveOnlyAssessor().assess(_context(thread=_thread(ThreadStatus.CLOSED)))
+    assert assessment.would_accept is False
+    assert assessment.reason_codes == ["thread_not_open"]
+
+
+def test_observe_only_assessor_rejects_existing_tickets_and_subscriptions() -> None:
+    existing = ObserveOnlyAssessor().assess(_context(existing_ticket_id="tk-1"))
+    owned = ObserveOnlyAssessor().assess(_context(has_live_own_subscription=True))
+    context = ObserveOnlyAssessor().assess(_context(has_live_context_subscription=True))
+    assert existing.reason_codes == ["existing_ticket_context"]
+    assert owned.reason_codes == ["already_owned"]
+    assert context.reason_codes == ["context_only"]
+    assert not existing.would_accept and not owned.would_accept and not context.would_accept
+
+
+def test_structural_fake_satisfies_the_candidate_assessor_protocol() -> None:
+    class Stub:
+        def assess(self, context: AssessmentContext):
+            return ObserveOnlyAssessor().assess(context)
+
+    assert isinstance(Stub(), CandidateAssessor)
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_assessor.py
+```
+
+Expected: collection error `ModuleNotFoundError: stableagent.supervisor.assessor`。
+
+- [ ] **Step 3: 最小实现**
+
+`stableagent/supervisor/model.py` 在 `SourceHealth` 之后追加：
+
+```python
+class AutonomyMode(str, Enum):
+    """分级自治：Beta 只允许 off/observe；auto 仅保留接口（规格 2.3）。"""
+
+    OFF = "off"
+    OBSERVE = "observe"
+    AUTO = "auto"
+```
+
+`stableagent/supervisor/assessor.py` 全文：
+
+```python
+"""推断候选评估：窄协议 + observe 下的确定性规则（规格 2.3、WP-6.3 第 3 条）。
+
+评估器只回答"若开启 auto 是否接受"，不写库、不创建 Ticket；失败由 Router 记 unavailable。
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from stableagent.supervisor.model import Thread, ThreadStatus, Trigger, TriggerKind
+
+
+class AssessmentContext(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trigger: Trigger
+    thread: Thread | None = None
+    has_live_own_subscription: bool = False
+    has_live_context_subscription: bool = False
+    existing_ticket_id: str | None = None
+    policy_version: str
+
+
+class CandidateAssessment(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    would_accept: bool
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+@runtime_checkable
+class CandidateAssessor(Protocol):
+    def assess(self, context: AssessmentContext) -> CandidateAssessment: ...
+
+
+class ObserveOnlyAssessor:
+    """Beta 的确定性评估器；规则顺序即 reason code 的优先级。"""
+
+    def assess(self, context: AssessmentContext) -> CandidateAssessment:
+        if context.trigger.kind is TriggerKind.CI_STATUS:
+            return CandidateAssessment(would_accept=False, reason_codes=["ci_context_only"])
+        if context.thread is not None and context.thread.status is not ThreadStatus.OPEN:
+            return CandidateAssessment(would_accept=False, reason_codes=["thread_not_open"])
+        if context.existing_ticket_id is not None:
+            return CandidateAssessment(
+                would_accept=False, reason_codes=["existing_ticket_context"]
+            )
+        if context.has_live_own_subscription:
+            return CandidateAssessment(would_accept=False, reason_codes=["already_owned"])
+        if context.has_live_context_subscription:
+            return CandidateAssessment(would_accept=False, reason_codes=["context_only"])
+        return CandidateAssessment(would_accept=True, reason_codes=["inferred_candidate"])
+```
+
+- [ ] **Step 4: 跑绿并做静态检查**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_assessor.py
+.venv/bin/ruff check stableagent/supervisor/assessor.py stableagent/supervisor/model.py
+.venv/bin/ruff format --check stableagent/supervisor/assessor.py
+.venv/bin/mypy
+```
+
+Expected: `7 passed`；ruff `All checks passed!`；mypy `Success`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/model.py stableagent/supervisor/assessor.py \
+  tests/unit/test_supervisor_assessor.py
+git commit -m "feat: add supervisor autonomy mode and observe-only assessor"
+```
+
+---
+
+### Task 2：Source request 信号与决策 attempt 仓储（M3-2）
+
+**Files:**
+- Modify: `stableagent/supervisor/source.py`
+- Modify: `stableagent/supervisor/store.py`
+- Test: `tests/unit/test_github_source.py`、`tests/unit/test_supervisor_store.py`
+
+**Interfaces:**
+- Consumes: `GitHubSource._trigger` 已有的 `bot_login`；`DecisionOutcome`。
+- Produces: Trigger payload 的 `request = {"text": str, "mentioned": bool, "url": str | None}`；
+  `SupervisorStore.next_decision_attempt(digest) -> int`；
+  `SupervisorStore.find_accepted_decision(digest) -> Decision | None`。
+- 兼容：M2 的 `payload == {...}` 断言使用无正文 fixture，payload 不变。
+
+- [ ] **Step 1: 写失败测试**
+
+在 `tests/unit/test_github_source.py` 末尾追加：
+
+```python
+def test_comment_body_carries_a_normalized_request_signal(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {
+                "id": 21,
+                "issue_number": 7,
+                "user": {"login": "alice"},
+                "body": "please @SA-Agent take a look",
+                "html_url": "https://github.com/owner/repo/issues/7#issuecomment-21",
+            },
+        )
+    )
+    assert event is not None
+    assert event.trigger.payload["request"] == {
+        "text": "please @SA-Agent take a look",
+        "mentioned": True,
+        "url": "https://github.com/owner/repo/issues/7#issuecomment-21",
+    }
+
+
+def test_plain_body_and_ci_status_have_no_false_mention(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    comment = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {
+                "id": 22,
+                "issue_number": 7,
+                "user": {"login": "alice"},
+                "body": "unrelated note",
+            },
+        )
+    )
+    ci = source.normalize(
+        _read_item(
+            GitHubReadKind.CI_STATUS,
+            {"id": 501, "sha": "abc123", "state": "success", "pull_number": 9},
+        )
+    )
+    assert comment is not None and ci is not None
+    assert comment.trigger.payload["request"]["mentioned"] is False
+    assert comment.trigger.payload["request"]["url"] is None
+    assert "request" not in ci.trigger.payload
+```
+
+在 `tests/unit/test_supervisor_store.py` 末尾追加：
+
+```python
+def test_next_decision_attempt_counts_per_digest(store: SupervisorStore) -> None:
+    assert store.next_decision_attempt("digest-a") == 1
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=[],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=["x"],
+            policy_version="p5-v1",
+            request_digest="digest-a",
+            attempt=1,
+            created_at=1,
+        )
+    )
+    assert store.next_decision_attempt("digest-a") == 2
+    assert store.next_decision_attempt("digest-b") == 1
+
+
+def test_find_accepted_decision_skips_observe_rows(store: SupervisorStore) -> None:
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=[],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=["x"],
+            policy_version="p5-v1",
+            request_digest="digest-a",
+            attempt=1,
+            created_at=1,
+        )
+    )
+    store.insert_decision(
+        Decision(
+            id="dc-2",
+            trigger_ids=[],
+            outcome=DecisionOutcome.ACCEPT,
+            strength=DecisionStrength.EXPLICIT,
+            reason_codes=["admitted"],
+            policy_version="p5-v1",
+            request_digest="digest-a",
+            attempt=2,
+            created_at=2,
+        )
+    )
+    found = store.find_accepted_decision("digest-a")
+    assert found is not None
+    assert found.id == "dc-2"
+    assert store.find_accepted_decision("digest-missing") is None
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py \
+  tests/unit/test_supervisor_store.py
+```
+
+Expected: 2 个用例因 `KeyError: 'request'` / `AttributeError: next_decision_attempt` 失败。
+
+- [ ] **Step 3: 实现 Source request 块**
+
+`stableagent/supervisor/source.py` 的 `_trigger` 改为：
+
+```python
+    def _trigger(
+        self,
+        item: GitHubReadItem,
+        kind: TriggerKind,
+        subject: int,
+        actor: str,
+        thread_key: str,
+    ) -> Trigger:
+        external_id = f"github:{self._repository}:{kind.value}:{subject}"
+        payload: dict[str, Any] = {"resource": item.resource, "deleted": item.deleted}
+        request = self._request_block(item.resource)
+        if request is not None:
+            payload["request"] = request
+        return Trigger(
+            id=stable_trigger_id(external_id),
+            external_id=external_id,
+            kind=kind,
+            actor=actor,
+            thread_keys=[thread_key],
+            occurred_at=item.occurred_at,
+            received_at=self._clock.now_ms(),
+            payload=payload,
+        )
+
+    def _request_block(self, resource: dict[str, Any]) -> dict[str, Any] | None:
+        """只把"有人写了正文"的事件标成候选请求；mention 命中不决定 action 集合（L4）。"""
+        body = resource.get("body")
+        if not isinstance(body, str) or not body:
+            return None
+        handle = self._bot_login.removesuffix("[bot]")
+        url = resource.get("html_url")
+        return {
+            "text": body,
+            "mentioned": f"@{handle}".casefold() in body.casefold(),
+            "url": url if isinstance(url, str) else None,
+        }
+```
+
+- [ ] **Step 4: 实现 Store 决策 helper**
+
+`stableagent/supervisor/store.py` 在 `find_accepted_decision` 之前/之后追加（放在
+`list_decisions` 之后）：
+
+```python
+    def next_decision_attempt(self, request_digest: str) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(attempt), 0) + 1 FROM decisions WHERE request_digest = ?",
+            (request_digest,),
+        ).fetchone()
+        return int(row[0])
+
+    def find_accepted_decision(self, request_digest: str) -> Decision | None:
+        row = self._conn.execute(
+            "SELECT * FROM decisions WHERE request_digest = ? AND outcome = ?"
+            " ORDER BY attempt ASC LIMIT 1",
+            (request_digest, DecisionOutcome.ACCEPT.value),
+        ).fetchone()
+        return self._row_to_decision(row) if row else None
+```
+
+- [ ] **Step 5: 跑绿并做静态检查**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py \
+  tests/unit/test_supervisor_store.py
+.venv/bin/ruff check stableagent/supervisor/source.py stableagent/supervisor/store.py
+.venv/bin/ruff format --check stableagent/supervisor/source.py stableagent/supervisor/store.py
+.venv/bin/mypy
+```
+
+Expected: `40 passed`（M2 32 + M3 2 + Store 新增 2）；ruff / mypy 全绿。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/source.py stableagent/supervisor/store.py \
+  tests/unit/test_github_source.py tests/unit/test_supervisor_store.py
+git commit -m "feat: normalize github request signals and decision attempts"
+```
+
+---
+
+### Task 3：receive 原子推进、扇出与三档决策（M3-3 / M3-4 / M3-5）
+
+**Files:**
+- Create: `stableagent/supervisor/router.py`
+- Test: `tests/unit/test_supervisor_router.py`
+
+**Interfaces:**
+- Consumes: `AutonomyMode` / `ObserveOnlyAssessor`（Task 1）、`next_decision_attempt` /
+  `find_accepted_decision`（Task 2）、P5 `StaticPolicy.admit_explicit` / `create_mandate`。
+- Produces: `RouterConfig`、`RouterError` 五子类、`RequestSignal`、`Reception`、
+  `record_decision()`、`ensure_subscription()`、`latest_trigger()`、`RouterService.receive()`。
+  Task 4 只新增 `reevaluate()` 与 unavailable 分支；Task 5/6 只调用既有 helper。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_supervisor_router.py` 全文：
+
+```python
+"""WP-6.3：receive 的原子推进、扇出与三档决策。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable
+
+import pytest
+
+from stableagent.control.audit import AuditWriter
+from stableagent.control.model import Action
+from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
+from stableagent.orchestration.model import EffectKind, TicketStatus
+from stableagent.supervisor.assessor import ObserveOnlyAssessor
+from stableagent.supervisor.model import (
+    AutonomyMode,
+    DecisionOutcome,
+    DecisionStrength,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.router import (
+    RequestSignal,
+    RouterConfig,
+    RouterModeError,
+    RouterService,
+    ensure_subscription,
+)
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
+
+
+def _thread(key: str = "issue:o/r#1", *, status: ThreadStatus = ThreadStatus.OPEN) -> Thread:
+    kind = ThreadKind.PULL_REQUEST if key.startswith("pr:") else ThreadKind.ISSUE
+    ref = key.rsplit("#", 1)[-1]
+    return Thread(
+        key=key,
+        repository="o/r",
+        kind=kind,
+        external_ref=f"#{ref}",
+        last_trigger_at=1,
+        status=status,
+    )
+
+
+def _trigger(
+    *,
+    external_id: str = "github:o/r:issue:1",
+    kind: TriggerKind = TriggerKind.ISSUE,
+    actor: str = "alice",
+    thread_keys: list[str] | None = None,
+    text: str | None = None,
+    mentioned: bool = True,
+    request: Any = None,
+) -> Trigger:
+    payload: dict[str, Any] = {
+        "resource": {"number": 1, "user": {"login": actor}},
+        "deleted": False,
+    }
+    if request is not None:
+        payload["request"] = request
+    elif text is not None:
+        payload["request"] = {"text": text, "mentioned": mentioned, "url": None}
+    return Trigger(
+        id=f"tg-{external_id}",
+        external_id=external_id,
+        kind=kind,
+        actor=actor,
+        thread_keys=thread_keys or ["issue:o/r#1"],
+        occurred_at=1,
+        received_at=1,
+        payload=payload,
+    )
+
+
+@pytest.fixture
+def clock() -> FixedClock:
+    return FixedClock()
+
+
+@pytest.fixture
+def ids() -> SequenceIds:
+    return SequenceIds()
+
+
+@pytest.fixture
+def store(tmp_path: Path, clock: FixedClock) -> SupervisorStore:
+    return SupervisorStore(tmp_path / "p6.db", clock=clock)
+
+
+@pytest.fixture
+def policy(clock: FixedClock, ids: SequenceIds) -> StaticPolicy:
+    return StaticPolicy(
+        StaticPolicyConfig(
+            repository="o/r",
+            actors=frozenset({"alice"}),
+            grantable_actions=frozenset({Action.READ_REPOSITORY, Action.RUN_COMMAND}),
+            allowed_commands=["pytest"],
+            default_validity_ms=60_000,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+
+
+def _router(
+    store: SupervisorStore,
+    policy: StaticPolicy,
+    clock: FixedClock,
+    ids: SequenceIds,
+    *,
+    mode: AutonomyMode = AutonomyMode.OBSERVE,
+    audit: AuditWriter | None = None,
+    repository: str = "o/r",
+) -> RouterService:
+    return RouterService(
+        store,
+        policy,
+        ObserveOnlyAssessor(),
+        RouterConfig(
+            repository=repository,
+            mode=mode,
+            operators=frozenset({"alice"}),
+            actions=("read_repository", "run_command"),
+            allowed_commands=("pytest",),
+        ),
+        clock=clock,
+        ids=ids,
+        audit=audit,
+    )
+
+
+def _accept(
+    router: RouterService,
+    store: SupervisorStore,
+    *,
+    thread: str = "issue:o/r#1",
+    text: str = "fix it",
+    external_id: str = "github:o/r:issue:1",
+):
+    store.upsert_thread(_thread(thread))
+    reception = router.receive(
+        _trigger(external_id=external_id, thread_keys=[thread], text=text)
+    )
+    assert reception.ticket_id is not None
+    ticket = store.get_ticket(reception.ticket_id)
+    assert ticket is not None
+    return ticket
+
+
+def test_router_rejects_auto_mode(store, policy, clock, ids) -> None:
+    with pytest.raises(RouterModeError):
+        _router(store, policy, clock, ids, mode=AutonomyMode.AUTO)
+
+
+def test_request_signal_reads_only_the_normalized_request_block() -> None:
+    signal = RequestSignal.from_trigger(_trigger(text="fix it"))
+    assert signal is not None
+    assert (signal.text, signal.mentioned, signal.stable_id) == (
+        "fix it",
+        True,
+        "github:o/r:issue:1",
+    )
+
+
+def test_receive_persists_trigger_and_writes_one_observe_decision(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    reception = _router(store, policy, clock, ids).receive(_trigger())
+    assert reception.duplicate is False
+    assert len(reception.decision_ids) == 1
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.OBSERVE
+    assert decision.strength is DecisionStrength.INFERRED
+    assert decision.reason_codes == ["inferred_candidate"]
+    assert store.get_trigger(_trigger().id) is not None
+
+
+def test_receive_duplicate_returns_duplicate_without_new_side_effects(
+    store, policy, clock, ids
+) -> None:
+    store.upsert_thread(_thread())
+    router = _router(store, policy, clock, ids)
+    first = router.receive(_trigger())
+    second = router.receive(_trigger())
+    assert first.duplicate is False
+    assert second.duplicate is True
+    assert second.decision_ids == [] and second.input_ids == []
+    assert len(store.list_decisions(trigger_id=_trigger().id)) == 1
+
+
+def test_receive_accepts_a_trigger_already_persisted_by_the_source(
+    store, policy, clock, ids
+) -> None:
+    store.upsert_thread(_thread())
+    store.insert_trigger(_trigger())
+    reception = _router(store, policy, clock, ids).receive(_trigger())
+    assert reception.duplicate is False
+    assert len(reception.decision_ids) == 1
+
+
+def test_off_mode_ignores_inferred_without_consulting_the_assessor(
+    store, policy, clock, ids
+) -> None:
+    class Bomb:
+        def assess(self, context):  # pragma: no cover - 被调用即失败
+            raise AssertionError("off 模式不得调用评估器")
+
+    store.upsert_thread(_thread())
+    router = RouterService(
+        store,
+        policy,
+        Bomb(),
+        RouterConfig(repository="o/r", mode=AutonomyMode.OFF, operators=frozenset({"alice"})),
+        clock=clock,
+        ids=ids,
+    )
+    reception = router.receive(_trigger())
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.IGNORE
+    assert decision.reason_codes == ["autonomy_off"]
+
+
+def test_explicit_admission_creates_seven_facts_atomically(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    audit = AuditWriter(policy, store, clock=clock, ids=ids)
+    router = _router(store, policy, clock, ids, audit=audit)
+    reception = router.receive(_trigger(text="fix the bug"))
+    assert reception.ticket_id is not None
+    ticket = store.get_ticket(reception.ticket_id)
+    assert ticket is not None and ticket.status is TicketStatus.QUEUED
+    mandate = store.get_mandate(ticket.mandate_id)
+    assert mandate is not None
+    assert mandate.origin_kind == "github"
+    assert mandate.requester == "alice"
+    assert mandate.scope == "github:o/r:issue:1"
+    assert mandate.actions == ["read_repository", "run_command"]
+    assert [(item.kind, item.payload) for item in store.list_inputs(ticket.id)] == [
+        ("task", "fix the bug")
+    ]
+    assert len(store.list_assignments(ticket.id)) == 1
+    assert [effect.kind for effect in store.due_effects(clock.now_ms())] == [
+        EffectKind.LAUNCH_ASSIGNMENT
+    ]
+    assert [
+        subscription.mode
+        for subscription in store.list_subscriptions(ticket_id=ticket.id, live_only=True)
+    ] == [SubscriptionMode.OWN]
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.ACCEPT
+    assert decision.strength is DecisionStrength.EXPLICIT
+    assert decision.mandate_id == mandate.id
+    assert decision.reason_codes == ["admitted"]
+    assert len(store.list_audit(kind="admit")) == 1
+
+
+def test_explicit_rejection_records_not_admitted_ignore(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    router = _router(store, policy, clock, ids)
+    reception = router.receive(_trigger(actor="mallory", text="fix it"))
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.IGNORE
+    assert decision.strength is DecisionStrength.NOT_ADMITTED
+    assert decision.reason_codes == ["actor_not_allowlisted"]
+    assert store.list_tickets() == [] and reception.ticket_id is None
+
+
+def test_explicit_without_a_mention_is_ignored(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    reception = _router(store, policy, clock, ids).receive(_trigger(text="fix it", mentioned=False))
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.reason_codes == ["mention_required"]
+
+
+def test_router_and_policy_repository_mismatch_is_ignored(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    router = _router(store, policy, clock, ids, repository="other/r")
+    reception = router.receive(_trigger(text="fix it"))
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.reason_codes == ["repository_mismatch"]
+    assert store.list_tickets() == []
+
+
+def test_malformed_request_block_is_ignored(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    reception = _router(store, policy, clock, ids).receive(
+        _trigger(request={"text": 1, "mentioned": True})
+    )
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.IGNORE
+    assert decision.strength is DecisionStrength.NOT_ADMITTED
+    assert decision.reason_codes == ["malformed_request"]
+
+
+def test_explicit_without_a_thread_row_is_ignored(store, policy, clock, ids) -> None:
+    reception = _router(store, policy, clock, ids).receive(_trigger(text="fix it"))
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.reason_codes == ["thread_unknown"]
+    assert store.list_tickets() == []
+
+
+def test_followup_on_an_owned_thread_attaches_without_a_new_ticket(
+    store, policy, clock, ids
+) -> None:
+    router = _router(store, policy, clock, ids)
+    ticket = _accept(router, store)
+    reception = router.receive(
+        _trigger(
+            external_id="github:o/r:issue_comment:2",
+            kind=TriggerKind.ISSUE_COMMENT,
+            text="also add tests",
+        )
+    )
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.ATTACH
+    assert decision.strength is DecisionStrength.EXPLICIT
+    assert decision.reason_codes == ["owned_thread_followup"]
+    assert reception.ticket_id == ticket.id
+    assert len(store.list_tickets()) == 1
+    assert len(store.list_inputs(ticket.id)) == 2
+
+
+def test_duplicate_request_digest_attaches_to_the_existing_ticket(
+    store, policy, clock, ids
+) -> None:
+    router = _router(store, policy, clock, ids)
+    ticket = _accept(router, store, text="fix it")
+    store.upsert_thread(_thread("issue:o/r#2"))
+    reception = router.receive(
+        _trigger(
+            external_id="github:o/r:issue:2",
+            thread_keys=["issue:o/r#2"],
+            text="fix it",
+        )
+    )
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.ATTACH
+    assert decision.reason_codes == ["duplicate_request"]
+    assert decision.attempt == 2
+    assert reception.ticket_id == ticket.id
+    assert len(store.list_tickets()) == 1
+    subscriptions = {
+        (item.thread_key, item.mode)
+        for item in store.list_subscriptions(ticket_id=ticket.id, live_only=True)
+    }
+    assert ("issue:o/r#2", SubscriptionMode.CONTEXT) in subscriptions
+
+
+def test_followup_on_a_stopped_ticket_is_a_stop_decision(store, policy, clock, ids) -> None:
+    router = _router(store, policy, clock, ids)
+    ticket = _accept(router, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.CANCELLED}))
+    before = len(store.list_inputs(ticket.id))
+    reception = router.receive(
+        _trigger(
+            external_id="github:o/r:issue_comment:3",
+            kind=TriggerKind.ISSUE_COMMENT,
+            text="please continue",
+        )
+    )
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.STOP
+    assert decision.reason_codes == ["stopped_ignored"]
+    assert reception.ticket_id == ticket.id
+    assert len(store.list_inputs(ticket.id)) == before
+
+
+def test_followup_on_a_completed_ticket_keeps_the_input_and_observes(
+    store, policy, clock, ids
+) -> None:
+    router = _router(store, policy, clock, ids)
+    ticket = _accept(router, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    reception = router.receive(
+        _trigger(
+            external_id="github:o/r:issue_comment:4",
+            kind=TriggerKind.ISSUE_COMMENT,
+            text="one more thing",
+        )
+    )
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.OBSERVE
+    assert decision.reason_codes == ["resume_requires_operator"]
+    assert len(store.list_inputs(ticket.id)) == 2
+    assert EffectKind.DELIVER_INPUT not in {
+        effect.kind for effect in store.due_effects(clock.now_ms())
+    }
+
+
+def test_multiple_owners_observe_ambiguous_without_a_new_ticket(
+    store, policy, clock, ids
+) -> None:
+    router = _router(store, policy, clock, ids)
+    first = _accept(router, store, thread="issue:o/r#1", text="first task")
+    second = _accept(
+        router,
+        store,
+        thread="issue:o/r#2",
+        text="second task",
+        external_id="github:o/r:issue:2",
+    )
+    ensure_subscription(
+        store,
+        ids=ids,
+        ticket_id=second.id,
+        thread_key="issue:o/r#1",
+        mode=SubscriptionMode.OWN,
+        created_at=clock.now_ms(),
+    )
+    reception = router.receive(_trigger(text="third task"))
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.OBSERVE
+    assert decision.reason_codes == ["ambiguous_owner"]
+    assert len(store.list_tickets()) == 2
+    assert first.id != second.id
+
+
+def test_fanout_delivers_one_input_per_ticket_across_thread_keys(
+    store, policy, clock, ids
+) -> None:
+    router = _router(store, policy, clock, ids)
+    first = _accept(router, store, thread="issue:o/r#1", text="first task")
+    second = _accept(
+        router,
+        store,
+        thread="issue:o/r#2",
+        text="second task",
+        external_id="github:o/r:issue:2",
+    )
+    ensure_subscription(
+        store,
+        ids=ids,
+        ticket_id=second.id,
+        thread_key="issue:o/r#1",
+        mode=SubscriptionMode.CONTEXT,
+        created_at=clock.now_ms(),
+    )
+    reception = router.receive(
+        _trigger(thread_keys=["issue:o/r#1", "issue:o/r#2"])
+    )
+    assert reception.fanned_out == 2
+    assert len(store.list_inputs(first.id)) == 2
+    assert len(store.list_inputs(second.id)) == 2
+    deliver = [
+        effect
+        for effect in store.due_effects(clock.now_ms())
+        if effect.kind is EffectKind.DELIVER_INPUT
+    ]
+    assert len(deliver) == 2
+
+
+def test_terminal_subscriptions_are_not_fanned_out(store, policy, clock, ids) -> None:
+    router = _router(store, policy, clock, ids)
+    ticket = _accept(router, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    before = len(store.list_inputs(ticket.id))
+    reception = router.receive(_trigger())
+    assert reception.fanned_out == 0
+    assert len(store.list_inputs(ticket.id)) == before
+
+
+def test_context_subscription_never_expands_the_mandate(store, policy, clock, ids) -> None:
+    router = _router(store, policy, clock, ids)
+    ticket = _accept(router, store, thread="issue:o/r#1", text="first task")
+    ensure_subscription(
+        store,
+        ids=ids,
+        ticket_id=ticket.id,
+        thread_key="issue:o/r#2",
+        mode=SubscriptionMode.CONTEXT,
+        created_at=clock.now_ms(),
+    )
+    mandate_before = store.get_mandate(ticket.mandate_id)
+    router.receive(_trigger(thread_keys=["issue:o/r#2"]))
+    mandate_after = store.get_mandate(ticket.mandate_id)
+    assert mandate_before is not None and mandate_after is not None
+    assert mandate_after.actions == mandate_before.actions
+    assert len(store.list_tickets()) == 1
+    assert len(store.list_inputs(ticket.id)) == 2
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_router.py
+```
+
+Expected: `ModuleNotFoundError: stableagent.supervisor.router`。
+
+- [ ] **Step 3: 实现 router.py（完整文件）**
+
+```python
+"""Router Intake：Trigger 进入领域的唯一命令（规格 WP-6.3、ADR-06 决策 3/4/6/7/8）。
+
+方向锁：只 import supervisor 记录与 Store、P5 Policy 与 orchestration 记录；外部形态由
+Source 标准化，Router 不解析 GitHub 原始字段。事务：`receive` 只开一个 BEGIN IMMEDIATE，
+体内无 await（L3）；任一步失败整体回滚。
+"""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from stableagent.control.audit import AuditWriter
+from stableagent.control.model import Admission, ExplicitRequest
+from stableagent.control.policy import StaticPolicy
+from stableagent.orchestration.model import (
+    TERMINAL_TICKET_STATUSES,
+    Assignment,
+    Clock,
+    Effect,
+    EffectKind,
+    IdFactory,
+    Ticket,
+    TicketInput,
+    TicketStatus,
+)
+from stableagent.supervisor.assessor import AssessmentContext, CandidateAssessor
+from stableagent.supervisor.model import (
+    AutonomyMode,
+    Decision,
+    DecisionOutcome,
+    DecisionStrength,
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    Trigger,
+    TriggerKind,
+    canonical_json,
+)
+from stableagent.supervisor.store import SupervisorStore
+
+_ALLOWED_MODES = (AutonomyMode.OFF, AutonomyMode.OBSERVE)
+
+
+class RouterError(Exception):
+    code = "router.error"
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"[{code}] {message}")
+        self.detail = message
+        self.code = code
+
+
+class RouterModeError(RouterError):
+    def __init__(self, message: str) -> None:
+        super().__init__("router.mode", message)
+
+
+class RouterPayloadError(RouterError):
+    def __init__(self, message: str) -> None:
+        super().__init__("router.payload", message)
+
+
+class RouterNotFoundError(RouterError):
+    def __init__(self, message: str) -> None:
+        super().__init__("router.not_found", message)
+
+
+class RouterPermissionError(RouterError):
+    def __init__(self, message: str) -> None:
+        super().__init__("router.permission", message)
+
+
+class RouterStateError(RouterError):
+    def __init__(self, message: str) -> None:
+        super().__init__("router.state", message)
+
+
+class RouterConfig(BaseModel):
+    """operator 写定的单仓库配置；actions 只来自这里，不来自外部文本（L4）。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    repository: str
+    mode: AutonomyMode = AutonomyMode.OBSERVE
+    operators: frozenset[str] = frozenset()
+    actions: tuple[str, ...] = ()
+    allowed_paths: tuple[str, ...] = ()
+    allowed_commands: tuple[str, ...] = ()
+    allowed_mcp: tuple[str, ...] = ()
+    network_profile: str | None = None
+    base_ref: str | None = None
+    requires_approval: bool = False
+
+
+class RequestSignal(BaseModel):
+    """Source 标准化后的显式请求；text 只进 digest 与 Input，不参与判定（L4）。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: str
+    mentioned: bool
+    stable_id: str
+    url: str | None = None
+
+    @classmethod
+    def from_trigger(cls, trigger: Trigger) -> RequestSignal | None:
+        block = trigger.payload.get("request")
+        if block is None:
+            return None
+        if not isinstance(block, dict):
+            raise RouterPayloadError("request 块不是对象")
+        text = block.get("text")
+        mentioned = block.get("mentioned")
+        if not isinstance(text, str) or not isinstance(mentioned, bool):
+            raise RouterPayloadError("request 块缺少 text/mentioned")
+        url = block.get("url")
+        if url is not None and not isinstance(url, str):
+            raise RouterPayloadError("request.url 不是字符串")
+        return cls(text=text, mentioned=mentioned, stable_id=trigger.external_id, url=url)
+
+
+class Reception(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trigger_id: str
+    duplicate: bool = False
+    decision_ids: list[str] = Field(default_factory=list)
+    ticket_id: str | None = None
+    input_ids: list[str] = Field(default_factory=list)
+    fanned_out: int = 0
+
+
+def record_decision(
+    store: SupervisorStore,
+    *,
+    ids: IdFactory,
+    created_at: int,
+    trigger_ids: list[str],
+    outcome: DecisionOutcome,
+    strength: DecisionStrength,
+    reason_codes: list[str],
+    policy_version: str,
+    request_digest: str,
+    mandate_id: str | None = None,
+) -> Decision:
+    decision = Decision(
+        id=ids.new_id("dc"),
+        trigger_ids=list(trigger_ids),
+        outcome=outcome,
+        strength=strength,
+        reason_codes=list(reason_codes),
+        policy_version=policy_version,
+        mandate_id=mandate_id,
+        request_digest=request_digest,
+        attempt=store.next_decision_attempt(request_digest),
+        created_at=created_at,
+    )
+    store.insert_decision(decision)
+    return decision
+
+
+def ensure_subscription(
+    store: SupervisorStore,
+    *,
+    ids: IdFactory,
+    ticket_id: str,
+    thread_key: str,
+    mode: SubscriptionMode,
+    created_at: int,
+) -> Subscription:
+    for subscription in store.list_subscriptions(
+        ticket_id=ticket_id, thread_key=thread_key, live_only=True
+    ):
+        if subscription.mode is mode:
+            return subscription
+    subscription = Subscription(
+        id=ids.new_id("sb"),
+        ticket_id=ticket_id,
+        thread_key=thread_key,
+        mode=mode,
+        created_at=created_at,
+    )
+    store.insert_subscription(subscription)
+    return subscription
+
+
+def latest_trigger(store: SupervisorStore, thread_key: str) -> Trigger | None:
+    triggers = store.list_triggers(thread_key=thread_key, limit=1_000)
+    return triggers[-1] if triggers else None
+
+
+def _input_text(trigger: Trigger, signal: RequestSignal | None) -> str:
+    if signal is not None:
+        return signal.text
+    return canonical_json(trigger.payload)
+
+
+class RouterService:
+    def __init__(
+        self,
+        store: SupervisorStore,
+        policy: StaticPolicy,
+        assessor: CandidateAssessor,
+        config: RouterConfig,
+        *,
+        clock: Clock,
+        ids: IdFactory,
+        audit: AuditWriter | None = None,
+    ) -> None:
+        if config.mode not in _ALLOWED_MODES:
+            raise RouterModeError(f"{config.mode.value} 未启用：P6 Beta 锁定 observe")
+        self._store = store
+        self._policy = policy
+        self._assessor = assessor
+        self._config = config
+        self._clock = clock
+        self._ids = ids
+        self._audit = audit
+
+    @property
+    def config(self) -> RouterConfig:
+        return self._config
+
+    def receive(self, trigger: Trigger) -> Reception:
+        signal, signal_error = self._read_signal(trigger)
+        admission = self._admit(trigger, signal)
+        with self._store.transaction():
+            return self._route(
+                trigger, signal=signal, signal_error=signal_error, admission=admission
+            )
+
+    # ------------------------------------------------------------------ 路由
+    def _route(
+        self,
+        trigger: Trigger,
+        *,
+        signal: RequestSignal | None,
+        signal_error: str | None,
+        admission: Admission | None,
+    ) -> Reception:
+        if self._already_decided(trigger.id):
+            return Reception(trigger_id=trigger.id, duplicate=True)
+        self._store.insert_trigger(trigger)
+        now = self._clock.now_ms()
+        input_ids = self._fanout(trigger, now, signal)
+        threads = [
+            thread
+            for key in trigger.thread_keys
+            if (thread := self._store.get_thread(key)) is not None
+        ]
+        primary = threads[0] if threads else None
+        if signal_error is not None:
+            decision = self._ignore(
+                trigger,
+                now,
+                signal_error,
+                DecisionStrength.NOT_ADMITTED,
+                digest=trigger.digest,
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        if admission is not None and signal is not None:
+            return self._route_explicit(
+                trigger, signal, admission, primary, now, input_ids
+            )
+        return self._route_inferred(trigger, threads, now, input_ids)
+
+    def _route_explicit(
+        self,
+        trigger: Trigger,
+        signal: RequestSignal,
+        admission: Admission,
+        primary: Thread | None,
+        now: int,
+        input_ids: list[str],
+    ) -> Reception:
+        if not admission.admitted:
+            decision = self._ignore(
+                trigger,
+                now,
+                admission.reason_code,
+                DecisionStrength.NOT_ADMITTED,
+                digest=admission.request_digest,
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        owners = self._live_own_tickets(trigger)
+        if len(owners) == 1:
+            owner = owners[0]
+            if owner.status is TicketStatus.CANCELLED:
+                decision = self._stop(
+                    trigger, now, "stopped_ignored", admission.request_digest
+                )
+                return self._reception(trigger, decision, ticket_id=owner.id)
+            if owner.status in (TicketStatus.COMPLETED, TicketStatus.FAILED):
+                stored = self._store_input(owner, trigger, signal, now)
+                decision = self._observe(
+                    trigger,
+                    now,
+                    ["resume_requires_operator"],
+                    digest=admission.request_digest,
+                )
+                return self._reception(
+                    trigger, decision, ticket_id=owner.id, input_ids=[stored]
+                )
+            decision = self._attach(
+                trigger, now, "owned_thread_followup", admission.request_digest
+            )
+            return self._reception(
+                trigger, decision, ticket_id=owner.id, input_ids=input_ids
+            )
+        if len(owners) > 1:
+            decision = self._observe(
+                trigger, now, ["ambiguous_owner"], digest=admission.request_digest
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        existing = self._existing_ticket(admission)
+        if existing is not None:
+            if primary is not None:
+                ensure_subscription(
+                    self._store,
+                    ids=self._ids,
+                    ticket_id=existing.id,
+                    thread_key=primary.key,
+                    mode=SubscriptionMode.CONTEXT,
+                    created_at=now,
+                )
+            decision = self._attach(
+                trigger, now, "duplicate_request", admission.request_digest
+            )
+            return self._reception(
+                trigger, decision, ticket_id=existing.id, input_ids=input_ids
+            )
+        if primary is None:
+            decision = self._ignore(
+                trigger, now, "thread_unknown", DecisionStrength.NOT_ADMITTED
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        ticket = self._accept(signal, admission, primary, now)
+        decision = record_decision(
+            self._store,
+            ids=self._ids,
+            created_at=now,
+            trigger_ids=[trigger.id],
+            outcome=DecisionOutcome.ACCEPT,
+            strength=DecisionStrength.EXPLICIT,
+            reason_codes=["admitted"],
+            policy_version=self._policy.policy_version,
+            request_digest=admission.request_digest,
+            mandate_id=ticket.mandate_id,
+        )
+        return self._reception(trigger, decision, ticket_id=ticket.id, input_ids=input_ids)
+
+    def _route_inferred(
+        self, trigger: Trigger, threads: list[Thread], now: int, input_ids: list[str]
+    ) -> Reception:
+        if self._config.mode is AutonomyMode.OFF:
+            decision = self._ignore(
+                trigger, now, "autonomy_off", DecisionStrength.INFERRED
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        context = self._assessment_context(trigger, threads)
+        assessment = self._assessor.assess(context)
+        decision = self._observe(
+            trigger, now, assessment.reason_codes, digest=trigger.digest
+        )
+        return self._reception(trigger, decision, input_ids=input_ids)
+
+    def _accept(
+        self,
+        signal: RequestSignal,
+        admission: Admission,
+        primary: Thread,
+        now: int,
+    ) -> Ticket:
+        mandate = self._policy.create_mandate(
+            admission,
+            actions=self._config.actions,
+            allowed_paths=self._config.allowed_paths,
+            allowed_commands=self._config.allowed_commands,
+            allowed_mcp=self._config.allowed_mcp,
+            network_profile=self._config.network_profile,
+            base_ref=self._config.base_ref,
+            requires_approval=self._config.requires_approval,
+        )
+        ticket = Ticket(
+            id=self._ids.new_id("tk"),
+            title=signal.text[:40],
+            task=signal.text,
+            created_at=now,
+            status=TicketStatus.QUEUED,
+            queued_at=now,
+            mandate_id=mandate.id,
+        )
+        assignment = Assignment(id=self._ids.new_id("as"), ticket_id=ticket.id, attempt=1)
+        self._store.insert_mandate(mandate)
+        self._store.insert_ticket(ticket)
+        self._store.insert_input(
+            TicketInput(
+                id=self._ids.new_id("in"),
+                ticket_id=ticket.id,
+                sequence=1,
+                kind="task",
+                payload=signal.text,
+                created_at=now,
+            )
+        )
+        self._store.insert_assignment(assignment)
+        self._store.enqueue_effect(
+            Effect(
+                id=self._ids.new_id("ef"),
+                kind=EffectKind.LAUNCH_ASSIGNMENT,
+                idempotency_key=f"launch:{assignment.id}:1",
+                payload={"assignment_id": assignment.id, "ticket_id": ticket.id},
+                due_at=now,
+            )
+        )
+        ensure_subscription(
+            self._store,
+            ids=self._ids,
+            ticket_id=ticket.id,
+            thread_key=primary.key,
+            mode=SubscriptionMode.OWN,
+            created_at=now,
+        )
+        return ticket
+
+    # ------------------------------------------------------------------ 判定辅助
+    def _read_signal(self, trigger: Trigger) -> tuple[RequestSignal | None, str | None]:
+        if trigger.kind is TriggerKind.CI_STATUS:
+            return None, None
+        try:
+            return RequestSignal.from_trigger(trigger), None
+        except RouterPayloadError:
+            return None, "malformed_request"
+
+    def _admit(self, trigger: Trigger, signal: RequestSignal | None) -> Admission | None:
+        if signal is None:
+            return None
+        admission = self._policy.admit_explicit(
+            ExplicitRequest(
+                repository=self._config.repository,
+                requester=trigger.actor,
+                mentioned=signal.mentioned,
+                stable_id=signal.stable_id,
+                text=signal.text,
+            )
+        )
+        if self._audit is not None:
+            self._audit.admitted(admission)
+        return admission
+
+    def _already_decided(self, trigger_id: str) -> bool:
+        return bool(self._store.list_decisions(trigger_id=trigger_id, limit=1))
+
+    def _live_subscriptions(
+        self, trigger: Trigger, mode: SubscriptionMode
+    ) -> list[Subscription]:
+        seen: set[str] = set()
+        result: list[Subscription] = []
+        for thread_key in trigger.thread_keys:
+            for subscription in self._store.list_subscriptions(
+                thread_key=thread_key, live_only=True
+            ):
+                if subscription.mode is not mode or subscription.id in seen:
+                    continue
+                seen.add(subscription.id)
+                result.append(subscription)
+        return result
+
+    def _live_own_tickets(self, trigger: Trigger) -> list[Ticket]:
+        tickets: dict[str, Ticket] = {}
+        for subscription in self._live_subscriptions(trigger, SubscriptionMode.OWN):
+            ticket = self._store.get_ticket(subscription.ticket_id)
+            if ticket is not None:
+                tickets[ticket.id] = ticket
+        return list(tickets.values())
+
+    def _assessment_context(
+        self, trigger: Trigger, threads: list[Thread]
+    ) -> AssessmentContext:
+        owners = self._live_own_tickets(trigger)
+        return AssessmentContext(
+            trigger=trigger,
+            thread=threads[0] if threads else None,
+            has_live_own_subscription=bool(owners),
+            has_live_context_subscription=bool(
+                self._live_subscriptions(trigger, SubscriptionMode.CONTEXT)
+            ),
+            existing_ticket_id=owners[0].id if len(owners) == 1 else None,
+            policy_version=self._policy.policy_version,
+        )
+
+    def _existing_ticket(self, admission: Admission) -> Ticket | None:
+        decision = self._store.find_accepted_decision(admission.request_digest)
+        if decision is None or decision.mandate_id is None:
+            return None
+        mandate = self._store.get_mandate(decision.mandate_id)
+        if mandate is None:
+            return None
+        return self._store.get_ticket_by_mandate_scope(
+            mandate.scope, origin_kind="github"
+        )
+
+    def _fanout(
+        self, trigger: Trigger, now: int, signal: RequestSignal | None
+    ) -> list[str]:
+        seen: set[str] = set()
+        input_ids: list[str] = []
+        for thread_key in trigger.thread_keys:
+            for subscription in self._store.list_subscriptions(
+                thread_key=thread_key, live_only=True
+            ):
+                ticket = self._store.get_ticket(subscription.ticket_id)
+                if ticket is None or ticket.status in TERMINAL_TICKET_STATUSES:
+                    continue
+                if ticket.id in seen:
+                    continue
+                seen.add(ticket.id)
+                input_ids.append(self._append_input(ticket, trigger, signal, now))
+        return input_ids
+
+    def _append_input(
+        self,
+        ticket: Ticket,
+        trigger: Trigger,
+        signal: RequestSignal | None,
+        now: int,
+    ) -> str:
+        sequence = len(self._store.list_inputs(ticket.id)) + 1
+        item = TicketInput(
+            id=self._ids.new_id("in"),
+            ticket_id=ticket.id,
+            sequence=sequence,
+            kind="text",
+            payload=_input_text(trigger, signal),
+            created_at=now,
+        )
+        self._store.insert_input(item)
+        if ticket.status is not TicketStatus.RUNNING:
+            self._store.update_ticket(
+                ticket.model_copy(update={"woken_at": ticket.woken_at or now})
+            )
+        self._store.enqueue_effect(
+            Effect(
+                id=self._ids.new_id("ef"),
+                kind=EffectKind.DELIVER_INPUT,
+                idempotency_key=f"deliver:{ticket.id}:{sequence}",
+                payload={
+                    "ticket_id": ticket.id,
+                    "input_id": item.id,
+                    "sequence": sequence,
+                },
+                due_at=now,
+            )
+        )
+        return item.id
+
+    def _store_input(
+        self, ticket: Ticket, trigger: Trigger, signal: RequestSignal, now: int
+    ) -> str:
+        text = _input_text(trigger, signal)
+        for item in self._store.list_inputs(ticket.id):
+            if item.state == "pending" and item.payload == text:
+                return item.id
+        sequence = len(self._store.list_inputs(ticket.id)) + 1
+        item = TicketInput(
+            id=self._ids.new_id("in"),
+            ticket_id=ticket.id,
+            sequence=sequence,
+            kind="text",
+            payload=text,
+            created_at=now,
+        )
+        self._store.insert_input(item)
+        return item.id
+
+    def _reception(
+        self,
+        trigger: Trigger,
+        decision: Decision,
+        *,
+        ticket_id: str | None = None,
+        input_ids: list[str] | None = None,
+    ) -> Reception:
+        ids = list(input_ids or [])
+        return Reception(
+            trigger_id=trigger.id,
+            decision_ids=[decision.id],
+            ticket_id=ticket_id,
+            input_ids=ids,
+            fanned_out=len(ids),
+        )
+
+    def _ignore(
+        self,
+        trigger: Trigger,
+        now: int,
+        reason: str,
+        strength: DecisionStrength,
+        *,
+        digest: str | None = None,
+    ) -> Decision:
+        return record_decision(
+            self._store,
+            ids=self._ids,
+            created_at=now,
+            trigger_ids=[trigger.id],
+            outcome=DecisionOutcome.IGNORE,
+            strength=strength,
+            reason_codes=[reason],
+            policy_version=self._policy.policy_version,
+            request_digest=digest or trigger.digest,
+        )
+
+    def _observe(
+        self,
+        trigger: Trigger,
+        now: int,
+        reasons: list[str],
+        *,
+        digest: str | None = None,
+    ) -> Decision:
+        return record_decision(
+            self._store,
+            ids=self._ids,
+            created_at=now,
+            trigger_ids=[trigger.id],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=list(reasons),
+            policy_version=self._policy.policy_version,
+            request_digest=digest or trigger.digest,
+        )
+
+    def _attach(
+        self, trigger: Trigger, now: int, reason: str, digest: str
+    ) -> Decision:
+        return record_decision(
+            self._store,
+            ids=self._ids,
+            created_at=now,
+            trigger_ids=[trigger.id],
+            outcome=DecisionOutcome.ATTACH,
+            strength=DecisionStrength.EXPLICIT,
+            reason_codes=[reason],
+            policy_version=self._policy.policy_version,
+            request_digest=digest,
+        )
+
+    def _stop(self, trigger: Trigger, now: int, reason: str, digest: str) -> Decision:
+        return record_decision(
+            self._store,
+            ids=self._ids,
+            created_at=now,
+            trigger_ids=[trigger.id],
+            outcome=DecisionOutcome.STOP,
+            strength=DecisionStrength.EXPLICIT,
+            reason_codes=[reason],
+            policy_version=self._policy.policy_version,
+            request_digest=digest,
+        )
+```
+
+- [ ] **Step 4: 跑绿并做静态检查**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_router.py
+.venv/bin/ruff check stableagent/supervisor/router.py
+.venv/bin/ruff format --check stableagent/supervisor/router.py
+.venv/bin/mypy
+```
+
+Expected: `20 passed`；ruff / mypy 全绿。若 `test_receive_accepts_a_trigger_already_persisted_by_the_source`
+因 `insert_trigger` 返回 False 但决策仍写入而通过，保留该用例作为 M2/M3 接缝契约。
+
+- [ ] **Step 5: 回归 M2 与边界测试**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py \
+  tests/unit/test_supervisor_model.py tests/unit/test_supervisor_store.py \
+  tests/unit/test_control_boundaries.py tests/unit/test_execution_boundaries.py
+```
+
+Expected: 全绿；`test_execution_boundaries` 不应报 `router.py`（无 `await`）。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/router.py tests/unit/test_supervisor_router.py
+git commit -m "feat: route supervisor triggers through one atomic receive"
+```
+
+---
+
+### Task 4：unavailable 与 reevaluate（M3-6）
+
+**Files:**
+- Modify: `stableagent/supervisor/router.py`
+- Test: `tests/unit/test_supervisor_router.py`
+
+**Interfaces:**
+- Consumes: Task 3 的 `_route` / `_read_signal` / `_admit` / `_route_inferred`。
+- Produces: `RouterService.reevaluate(trigger_id) -> Reception`；评估器异常只落
+  `UNAVAILABLE`，重评估不重复扇出、不新增 Trigger。
+
+- [ ] **Step 1: 写失败测试**
+
+在 `tests/unit/test_supervisor_router.py` 追加：
+
+```python
+class FlakyAssessor:
+    """第一次失败、之后委托给 ObserveOnlyAssessor；用于 unavailable → reevaluate。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def assess(self, context):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("assessor down")
+        return ObserveOnlyAssessor().assess(context)
+
+
+def _flaky_router(store, policy, clock, ids) -> RouterService:
+    return RouterService(
+        store,
+        policy,
+        FlakyAssessor(),
+        RouterConfig(
+            repository="o/r",
+            operators=frozenset({"alice"}),
+            actions=("read_repository", "run_command"),
+            allowed_commands=("pytest",),
+        ),
+        clock=clock,
+        ids=ids,
+    )
+
+
+def test_assessor_failure_records_unavailable(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    reception = _flaky_router(store, policy, clock, ids).receive(_trigger())
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.UNAVAILABLE
+    assert decision.strength is DecisionStrength.INFERRED
+    assert decision.reason_codes == ["assessor_error"]
+
+
+def test_reevaluate_retries_unavailable_without_refanout(store, policy, clock, ids) -> None:
+    router = _flaky_router(store, policy, clock, ids)
+    ticket = _accept(router, store)
+    trigger = _trigger(
+        external_id="github:o/r:issue_comment:9",
+        kind=TriggerKind.ISSUE_COMMENT,
+    )
+    first = router.receive(trigger)
+    assert store.get_decision(first.decision_ids[0]).outcome is DecisionOutcome.UNAVAILABLE
+    inputs_before = len(store.list_inputs(ticket.id))
+    retried = router.reevaluate(trigger.id)
+    assert retried.duplicate is False
+    assert retried.input_ids == []
+    decision = store.get_decision(retried.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.OBSERVE
+    assert decision.attempt == 2
+    assert "reevaluated" in decision.reason_codes
+    assert len(store.list_inputs(ticket.id)) == inputs_before
+    assert len(store.list_decisions(trigger_id=trigger.id)) == 2
+
+
+def test_reevaluate_of_a_missing_trigger_raises(store, policy, clock, ids) -> None:
+    router = _router(store, policy, clock, ids)
+    with pytest.raises(RouterNotFoundError):
+        router.reevaluate("tg-missing")
+```
+
+需要把 `RouterNotFoundError` 加入 import 列表。
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_router.py -k "unavailable or reevaluate"
+```
+
+Expected: `RouterService` 无 `reevaluate`；评估器异常直接冒泡导致前两条失败。
+
+- [ ] **Step 3: 实现**
+
+`receive` 与 `_route` 改为带 `reevaluate` 参数；新增方法：
+
+```python
+    def reevaluate(self, trigger_id: str) -> Reception:
+        trigger = self._store.get_trigger(trigger_id)
+        if trigger is None:
+            raise RouterNotFoundError(f"trigger 不存在：{trigger_id}")
+        signal, signal_error = self._read_signal(trigger)
+        admission = self._admit(trigger, signal)
+        with self._store.transaction():
+            return self._route(
+                trigger,
+                signal=signal,
+                signal_error=signal_error,
+                admission=admission,
+                reevaluate=True,
+            )
+```
+
+`_route` 的签名与开头改为：
+
+```python
+    def _route(
+        self,
+        trigger: Trigger,
+        *,
+        signal: RequestSignal | None,
+        signal_error: str | None,
+        admission: Admission | None,
+        reevaluate: bool = False,
+    ) -> Reception:
+        if not reevaluate:
+            if self._already_decided(trigger.id):
+                return Reception(trigger_id=trigger.id, duplicate=True)
+            self._store.insert_trigger(trigger)
+        now = self._clock.now_ms()
+        input_ids = [] if reevaluate else self._fanout(trigger, now, signal)
+        ...
+        return self._route_inferred(trigger, threads, now, input_ids, reevaluate=reevaluate)
+```
+
+`receive` 的调用补 `reevaluate=False`。`_route_inferred` 改为：
+
+```python
+    def _route_inferred(
+        self,
+        trigger: Trigger,
+        threads: list[Thread],
+        now: int,
+        input_ids: list[str],
+        *,
+        reevaluate: bool = False,
+    ) -> Reception:
+        if self._config.mode is AutonomyMode.OFF:
+            decision = self._ignore(
+                trigger, now, "autonomy_off", DecisionStrength.INFERRED
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        context = self._assessment_context(trigger, threads)
+        try:
+            assessment = self._assessor.assess(context)
+        except Exception:
+            decision = record_decision(
+                self._store,
+                ids=self._ids,
+                created_at=now,
+                trigger_ids=[trigger.id],
+                outcome=DecisionOutcome.UNAVAILABLE,
+                strength=DecisionStrength.INFERRED,
+                reason_codes=["assessor_error"],
+                policy_version=self._policy.policy_version,
+                request_digest=trigger.digest,
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        reasons = list(assessment.reason_codes)
+        if reevaluate:
+            reasons.append("reevaluated")
+        decision = self._observe(trigger, now, reasons, digest=trigger.digest)
+        return self._reception(trigger, decision, input_ids=input_ids)
+```
+
+- [ ] **Step 4: 跑绿并做静态检查**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_router.py
+.venv/bin/ruff check stableagent/supervisor/router.py
+.venv/bin/ruff format --check stableagent/supervisor/router.py
+.venv/bin/mypy
+```
+
+Expected: `23 passed`；ruff / mypy 全绿。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/router.py tests/unit/test_supervisor_router.py
+git commit -m "feat: record assessor failures as unavailable and allow reevaluation"
+```
+
+---
+
+### Task 5：命令层 attach / subscribe / unsubscribe / stop（M3-7 前半）
+
+**Files:**
+- Create: `stableagent/supervisor/service.py`
+- Test: `tests/unit/test_supervisor_service.py`
+
+**Interfaces:**
+- Consumes: Task 3 的 `record_decision` / `ensure_subscription` / `latest_trigger`；
+  `RouterService.config.operators`。
+- Produces: `SupervisorService(store, policy, router, *, clock, ids, audit=None)`；`receive`
+  透传；`reevaluate`、`attach`、`subscribe`、`unsubscribe`、`stop`。Task 6 只追加
+  `handback` / `resume` / `record_pull_request` 与私有 helper。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_supervisor_service.py` 全文：
+
+```python
+"""WP-6.3：命令层权限、context 订阅与人工 stop。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from stableagent.control.model import Action
+from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
+from stableagent.orchestration.model import EffectKind, TicketStatus
+from stableagent.supervisor.assessor import ObserveOnlyAssessor
+from stableagent.supervisor.model import (
+    AutonomyMode,
+    DecisionOutcome,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.router import (
+    RouterConfig,
+    RouterNotFoundError,
+    RouterPermissionError,
+    RouterService,
+    RouterStateError,
+)
+from stableagent.supervisor.service import SupervisorService
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
+
+
+def _thread(key: str = "issue:o/r#1") -> Thread:
+    kind = ThreadKind.PULL_REQUEST if key.startswith("pr:") else ThreadKind.ISSUE
+    ref = key.rsplit("#", 1)[-1]
+    return Thread(
+        key=key,
+        repository="o/r",
+        kind=kind,
+        external_ref=f"#{ref}",
+        last_trigger_at=1,
+        status=ThreadStatus.OPEN,
+    )
+
+
+def _trigger(
+    *,
+    external_id: str = "github:o/r:issue:1",
+    thread_keys: list[str] | None = None,
+    text: str | None = None,
+) -> Trigger:
+    payload: dict[str, Any] = {"resource": {"number": 1}, "deleted": False}
+    if text is not None:
+        payload["request"] = {"text": text, "mentioned": True, "url": None}
+    return Trigger(
+        id=f"tg-{external_id}",
+        external_id=external_id,
+        kind=TriggerKind.ISSUE,
+        actor="alice",
+        thread_keys=thread_keys or ["issue:o/r#1"],
+        occurred_at=1,
+        received_at=1,
+        payload=payload,
+    )
+
+
+@pytest.fixture
+def clock() -> FixedClock:
+    return FixedClock()
+
+
+@pytest.fixture
+def ids() -> SequenceIds:
+    return SequenceIds()
+
+
+@pytest.fixture
+def store(tmp_path: Path, clock: FixedClock) -> SupervisorStore:
+    return SupervisorStore(tmp_path / "p6.db", clock=clock)
+
+
+@pytest.fixture
+def service(store: SupervisorStore, clock: FixedClock, ids: SequenceIds) -> SupervisorService:
+    policy = StaticPolicy(
+        StaticPolicyConfig(
+            repository="o/r",
+            actors=frozenset({"alice"}),
+            grantable_actions=frozenset({Action.READ_REPOSITORY, Action.RUN_COMMAND}),
+            allowed_commands=["pytest"],
+            default_validity_ms=60_000,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    router = RouterService(
+        store,
+        policy,
+        ObserveOnlyAssessor(),
+        RouterConfig(
+            repository="o/r",
+            mode=AutonomyMode.OBSERVE,
+            operators=frozenset({"alice"}),
+            actions=("read_repository", "run_command"),
+            allowed_commands=("pytest",),
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    return SupervisorService(store, policy, router, clock=clock, ids=ids)
+
+
+def _accept(service: SupervisorService, store: SupervisorStore):
+    store.upsert_thread(_thread())
+    reception = service.receive(_trigger(text="fix it"))
+    assert reception.ticket_id is not None
+    ticket = store.get_ticket(reception.ticket_id)
+    assert ticket is not None
+    return ticket
+
+
+def test_non_operators_cannot_attach_or_stop(service, store) -> None:
+    ticket = _accept(service, store)
+    with pytest.raises(RouterPermissionError):
+        service.attach(ticket.id, thread_key="issue:o/r#2", actor="mallory")
+    with pytest.raises(RouterPermissionError):
+        service.stop(ticket.id, actor="mallory")
+    with pytest.raises(RouterPermissionError):
+        service.unsubscribe(ticket.id, thread_key="issue:o/r#1", actor="mallory")
+
+
+def test_attach_is_an_idempotent_context_subscription(service, store) -> None:
+    ticket = _accept(service, store)
+    store.upsert_thread(_thread("issue:o/r#2"))
+    first = service.attach(ticket.id, thread_key="issue:o/r#2", actor="alice")
+    second = service.attach(ticket.id, thread_key="issue:o/r#2", actor="alice")
+    assert first.id == second.id
+    assert first.mode is SubscriptionMode.CONTEXT
+    assert len(store.list_subscriptions(ticket_id=ticket.id, thread_key="issue:o/r#2")) == 1
+
+
+def test_subscribe_uses_the_trigger_primary_thread(service, store) -> None:
+    ticket = _accept(service, store)
+    store.upsert_thread(_thread("issue:o/r#2"))
+    trigger = _trigger(external_id="github:o/r:issue:2", thread_keys=["issue:o/r#2"])
+    store.insert_trigger(trigger)
+    subscription = service.subscribe(ticket.id, trigger_id=trigger.id, actor="alice")
+    assert subscription.thread_key == "issue:o/r#2"
+    assert subscription.mode is SubscriptionMode.CONTEXT
+
+
+def test_unsubscribe_ends_live_subscriptions_and_stops_fanout(service, store) -> None:
+    ticket = _accept(service, store)
+    store.upsert_thread(_thread("issue:o/r#2"))
+    service.attach(ticket.id, thread_key="issue:o/r#2", actor="alice")
+    assert service.unsubscribe(ticket.id, thread_key="issue:o/r#2", actor="alice") == 1
+    before = len(store.list_inputs(ticket.id))
+    reception = service.receive(
+        _trigger(external_id="github:o/r:issue:3", thread_keys=["issue:o/r#2"])
+    )
+    assert reception.fanned_out == 0
+    assert len(store.list_inputs(ticket.id)) == before
+
+
+def test_stop_cancels_ticket_effects_and_context_but_keeps_own(
+    service, store, clock
+) -> None:
+    ticket = _accept(service, store)
+    store.upsert_thread(_thread("issue:o/r#2"))
+    service.attach(ticket.id, thread_key="issue:o/r#2", actor="alice")
+    stopped = service.stop(ticket.id, actor="alice", reason="operator stop")
+    assert stopped.status is TicketStatus.CANCELLED
+    kinds = {effect.kind for effect in store.due_effects(clock.now_ms())}
+    assert EffectKind.CANCEL_ASSIGNMENT in kinds
+    live = store.list_subscriptions(ticket_id=ticket.id, live_only=True)
+    assert [item.mode for item in live] == [SubscriptionMode.OWN]
+    decisions = store.list_decisions(trigger_id=_trigger().id)
+    assert decisions[-1].outcome is DecisionOutcome.STOP
+    assert decisions[-1].reason_codes == ["manual_stop"]
+
+
+def test_stop_is_idempotent_for_a_cancelled_ticket(service, store) -> None:
+    ticket = _accept(service, store)
+    once = service.stop(ticket.id, actor="alice")
+    twice = service.stop(ticket.id, actor="alice")
+    assert once.status is TicketStatus.CANCELLED
+    assert twice.status is TicketStatus.CANCELLED
+    assert twice.ended_at == once.ended_at
+
+
+def test_stop_on_completed_ticket_only_ends_context_subscriptions(service, store) -> None:
+    ticket = _accept(service, store)
+    store.upsert_thread(_thread("issue:o/r#2"))
+    service.attach(ticket.id, thread_key="issue:o/r#2", actor="alice")
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    stopped = service.stop(ticket.id, actor="alice")
+    assert stopped.status is TicketStatus.COMPLETED
+    live = store.list_subscriptions(ticket_id=ticket.id, live_only=True)
+    assert [item.mode for item in live] == [SubscriptionMode.OWN]
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_service.py
+```
+
+Expected: `ModuleNotFoundError: stableagent.supervisor.service`。
+
+- [ ] **Step 3: 实现 service.py（完整文件）**
+
+```python
+"""Router 的运维命令层：ticket 域命令，全部检查 operator 与状态（规格 WP-6.3 第 4~6 条）。
+
+方向锁：service → router → supervisor.store → orchestration；不 import integrations。
+receive / reevaluate 留在 RouterService；命令层只做 Ticket / Subscription 的受控变更。
+"""
+
+from __future__ import annotations
+
+from stableagent.control.audit import AuditWriter
+from stableagent.control.policy import StaticPolicy
+from stableagent.orchestration.model import (
+    TERMINAL_TICKET_STATUSES,
+    AssignmentStatus,
+    Clock,
+    Effect,
+    EffectKind,
+    IdFactory,
+    Ticket,
+    TicketAction,
+    TicketStatus,
+    next_ticket_status,
+)
+from stableagent.supervisor.model import (
+    Decision,
+    DecisionOutcome,
+    DecisionStrength,
+    Subscription,
+    SubscriptionMode,
+    Trigger,
+    payload_digest,
+)
+from stableagent.supervisor.router import (
+    Reception,
+    RouterNotFoundError,
+    RouterPermissionError,
+    RouterService,
+    RouterStateError,
+    ensure_subscription,
+    latest_trigger,
+    record_decision,
+)
+from stableagent.supervisor.store import SupervisorStore
+
+_LIVE_ASSIGNMENT_STATUSES = (
+    AssignmentStatus.PENDING,
+    AssignmentStatus.RUNNING,
+    AssignmentStatus.INTERRUPTED,
+)
+
+
+class SupervisorService:
+    def __init__(
+        self,
+        store: SupervisorStore,
+        policy: StaticPolicy,
+        router: RouterService,
+        *,
+        clock: Clock,
+        ids: IdFactory,
+        audit: AuditWriter | None = None,
+    ) -> None:
+        self._store = store
+        self._policy = policy
+        self._router = router
+        self._clock = clock
+        self._ids = ids
+        self._audit = audit
+
+    @property
+    def router(self) -> RouterService:
+        return self._router
+
+    def receive(self, trigger: Trigger) -> Reception:
+        return self._router.receive(trigger)
+
+    def reevaluate(self, trigger_id: str, *, actor: str) -> Decision:
+        self._require_operator(actor)
+        reception = self._router.reevaluate(trigger_id)
+        if not reception.decision_ids:
+            raise RouterStateError("reevaluate 未产生 Decision")
+        decision = self._store.get_decision(reception.decision_ids[0])
+        if decision is None:  # pragma: no cover - 刚写入的行必可读
+            raise RouterStateError("Decision 缺失")
+        return decision
+
+    def attach(self, ticket_id: str, *, thread_key: str, actor: str) -> Subscription:
+        """把一个相关 Thread 作为 context 订阅接上；已有 live 订阅则原样返回。"""
+        self._require_operator(actor)
+        with self._store.transaction():
+            ticket = self._require_live_ticket(ticket_id)
+            self._require_thread(thread_key)
+            live = self._store.list_subscriptions(
+                ticket_id=ticket.id, thread_key=thread_key, live_only=True
+            )
+            if live:
+                return live[0]
+            return ensure_subscription(
+                self._store,
+                ids=self._ids,
+                ticket_id=ticket.id,
+                thread_key=thread_key,
+                mode=SubscriptionMode.CONTEXT,
+                created_at=self._clock.now_ms(),
+            )
+
+    def subscribe(self, ticket_id: str, *, trigger_id: str, actor: str) -> Subscription:
+        trigger = self._require_trigger(trigger_id)
+        if not trigger.thread_keys:
+            raise RouterStateError("trigger 没有 thread key")
+        return self.attach(ticket_id, thread_key=trigger.thread_keys[0], actor=actor)
+
+    def unsubscribe(self, ticket_id: str, *, thread_key: str, actor: str) -> int:
+        self._require_operator(actor)
+        with self._store.transaction():
+            self._require_ticket(ticket_id)
+            ended = 0
+            for subscription in self._store.list_subscriptions(
+                ticket_id=ticket_id, thread_key=thread_key, live_only=True
+            ):
+                ended += self._store.end_subscription(
+                    subscription.id, ended_at=self._clock.now_ms()
+                )
+            return ended
+
+    def stop(self, ticket_id: str, *, actor: str, reason: str | None = None) -> Ticket:
+        """人工停：取消未结束 Ticket、入队 cancel effect、只结束 context 订阅。
+
+        own 订阅故意保留：被 stop 的 Ticket 之后收到的明确后续消息由 Router 记 STOP 并
+        丢弃，不会因为订阅消失而被当成新任务；人工 resume 也拒绝 CANCELLED。
+        """
+        self._require_operator(actor)
+        with self._store.transaction():
+            ticket = self._require_ticket(ticket_id)
+            now = self._clock.now_ms()
+            if ticket.status is TicketStatus.CANCELLED:
+                return ticket
+            updated = ticket
+            if ticket.status not in TERMINAL_TICKET_STATUSES:
+                updated = ticket.model_copy(
+                    update={
+                        "status": next_ticket_status(ticket.status, TicketAction.CANCEL),
+                        "ended_at": now,
+                    }
+                )
+                self._store.update_ticket(updated)
+                for assignment in self._store.list_assignments(ticket_id):
+                    if assignment.status not in _LIVE_ASSIGNMENT_STATUSES:
+                        continue
+                    self._store.enqueue_effect(
+                        Effect(
+                            id=self._ids.new_id("ef"),
+                            kind=EffectKind.CANCEL_ASSIGNMENT,
+                            idempotency_key=f"cancel:{assignment.id}",
+                            payload={
+                                "assignment_id": assignment.id,
+                                "ticket_id": ticket_id,
+                                "reason": reason,
+                            },
+                            due_at=now,
+                        )
+                    )
+            for subscription in self._store.list_subscriptions(
+                ticket_id=ticket_id, live_only=True
+            ):
+                if subscription.mode is SubscriptionMode.CONTEXT:
+                    self._store.end_subscription(subscription.id, ended_at=now)
+            record_decision(
+                self._store,
+                ids=self._ids,
+                created_at=now,
+                trigger_ids=self._decision_triggers(ticket_id),
+                outcome=DecisionOutcome.STOP,
+                strength=DecisionStrength.EXPLICIT,
+                reason_codes=["manual_stop"],
+                policy_version=self._policy.policy_version,
+                request_digest=payload_digest({"command": "stop", "ticket": ticket_id}),
+            )
+            return updated
+
+    # ------------------------------------------------------------- 内部
+    def _require_operator(self, actor: str) -> None:
+        allowed = {name.casefold() for name in self._router.config.operators}
+        if actor.casefold() not in allowed:
+            raise RouterPermissionError(f"actor 不是 operator：{actor}")
+
+    def _require_ticket(self, ticket_id: str) -> Ticket:
+        ticket = self._store.get_ticket(ticket_id)
+        if ticket is None:
+            raise RouterNotFoundError(f"ticket 不存在：{ticket_id}")
+        return ticket
+
+    def _require_live_ticket(self, ticket_id: str) -> Ticket:
+        ticket = self._require_ticket(ticket_id)
+        if ticket.status in TERMINAL_TICKET_STATUSES:
+            raise RouterStateError(f"ticket 已结束：{ticket.status.value}")
+        return ticket
+
+    def _require_thread(self, thread_key: str) -> None:
+        if self._store.get_thread(thread_key) is None:
+            raise RouterNotFoundError(f"thread 不存在：{thread_key}")
+
+    def _require_trigger(self, trigger_id: str) -> Trigger:
+        trigger = self._store.get_trigger(trigger_id)
+        if trigger is None:
+            raise RouterNotFoundError(f"trigger 不存在：{trigger_id}")
+        return trigger
+
+    def _decision_triggers(self, ticket_id: str) -> list[str]:
+        own = [
+            subscription.thread_key
+            for subscription in self._store.list_subscriptions(ticket_id=ticket_id)
+            if subscription.mode is SubscriptionMode.OWN
+        ]
+        if not own:
+            return []
+        trigger = latest_trigger(self._store, own[0])
+        return [trigger.id] if trigger is not None else []
+```
+
+- [ ] **Step 4: 跑绿并做静态检查**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_service.py
+.venv/bin/ruff check stableagent/supervisor/service.py
+.venv/bin/ruff format --check stableagent/supervisor/service.py
+.venv/bin/mypy
+```
+
+Expected: `8 passed`；ruff / mypy 全绿。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/service.py tests/unit/test_supervisor_service.py
+git commit -m "feat: add supervisor command service for subscriptions and stop"
+```
+
+---
+
+### Task 6：handback / resume / record_pull_request（M3-7 后半）
+
+**Files:**
+- Modify: `stableagent/supervisor/service.py`
+- Test: `tests/unit/test_supervisor_service.py`
+
+**Interfaces:**
+- Consumes: `RequestSignal` / `ensure_subscription` / `latest_trigger`；`StaticPolicy.revalidate`；
+  `pull_request_thread_key`（`supervisor.source`）。
+- Produces: `handback(ticket_id, *, thread_key, trigger_id, actor) -> Decision`；
+  `resume(ticket_id, *, trigger_id, actor) -> Ticket`；
+  `record_pull_request(ticket_id, *, report_id, actor) -> Subscription`。
+
+- [ ] **Step 1: 写失败测试**
+
+在 `tests/unit/test_supervisor_service.py` 追加（并把 `Assignment`、`Report`、`ReportKind`、
+`DecisionOutcome` 加入 import）：
+
+```python
+def test_handback_turns_own_into_context_and_allows_a_new_ticket(service, store) -> None:
+    ticket = _accept(service, store)
+    follow = _trigger(
+        external_id="github:o/r:issue_comment:7", text="follow up"
+    )
+    store.insert_trigger(follow)
+    decision = service.handback(
+        ticket.id, thread_key="issue:o/r#1", trigger_id=follow.id, actor="alice"
+    )
+    assert decision.outcome is DecisionOutcome.OBSERVE
+    assert decision.reason_codes == ["handback"]
+    live = {
+        item.mode
+        for item in store.list_subscriptions(ticket_id=ticket.id, live_only=True)
+    }
+    assert live == {SubscriptionMode.CONTEXT}
+    reception = service.receive(
+        _trigger(
+            external_id="github:o/r:issue_comment:8",
+            text="new task",
+        )
+    )
+    assert reception.ticket_id is not None
+    assert reception.ticket_id != ticket.id
+    assert len(store.list_tickets()) == 2
+
+
+def test_resume_refuses_cancelled_and_live_tickets(service, store) -> None:
+    ticket = _accept(service, store)
+    trigger = _trigger(external_id="github:o/r:issue_comment:9", text="resume please")
+    store.insert_trigger(trigger)
+    with pytest.raises(RouterStateError):
+        service.resume(ticket.id, trigger_id=trigger.id, actor="alice")
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.CANCELLED}))
+    with pytest.raises(RouterStateError):
+        service.resume(ticket.id, trigger_id=trigger.id, actor="alice")
+
+
+def test_resume_requires_an_admitted_explicit_request(service, store) -> None:
+    ticket = _accept(service, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    plain = _trigger(external_id="github:o/r:issue_comment:10")
+    store.insert_trigger(plain)
+    with pytest.raises(RouterStateError):
+        service.resume(ticket.id, trigger_id=plain.id, actor="alice")
+
+
+def test_resume_rejects_an_expired_mandate(service, store, clock) -> None:
+    ticket = _accept(service, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    trigger = _trigger(external_id="github:o/r:issue_comment:11", text="resume please")
+    store.insert_trigger(trigger)
+    clock.advance(60_001)
+    with pytest.raises(RouterStateError, match="revalidation_failed"):
+        service.resume(ticket.id, trigger_id=trigger.id, actor="alice")
+
+
+def test_resume_requeues_with_a_new_assignment_and_reuses_the_pending_input(
+    service, store
+) -> None:
+    ticket = _accept(service, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    follow = _trigger(
+        external_id="github:o/r:issue_comment:12",
+        text="continue the work",
+    )
+    service.receive(follow)
+    inputs_before = len(store.list_inputs(ticket.id))
+    resumed = service.resume(ticket.id, trigger_id=follow.id, actor="alice")
+    assert resumed.status is TicketStatus.QUEUED
+    assert len(store.list_assignments(ticket.id)) == 2
+    assignments = store.list_assignments(ticket.id)
+    assert [item.attempt for item in assignments] == [1, 2]
+    assert len(store.list_inputs(ticket.id)) == inputs_before
+    decisions = store.list_decisions(trigger_id=follow.id)
+    assert decisions[-1].outcome is DecisionOutcome.ACCEPT
+    assert decisions[-1].reason_codes == ["resumed"]
+
+
+def test_record_pull_request_adds_own_subscription_from_a_report(service, store, clock) -> None:
+    ticket = _accept(service, store)
+    assignment = store.list_assignments(ticket.id)[0]
+    store.upsert_thread(_thread("pr:o/r#9"))
+    service.attach(ticket.id, thread_key="pr:o/r#9", actor="alice")
+    store.insert_report(
+        Report(
+            id="rp-1",
+            ticket_id=ticket.id,
+            assignment_id=assignment.id,
+            kind=ReportKind.READY,
+            summary="opened a PR",
+            created_at=clock.now_ms(),
+            details={"pull_number": 9},
+        )
+    )
+    subscription = service.record_pull_request(
+        ticket.id, report_id="rp-1", actor="alice"
+    )
+    assert subscription.thread_key == "pr:o/r#9"
+    assert subscription.mode is SubscriptionMode.OWN
+    live = store.list_subscriptions(ticket_id=ticket.id, thread_key="pr:o/r#9", live_only=True)
+    assert [item.mode for item in live] == [SubscriptionMode.OWN]
+    assert store.get_thread("pr:o/r#9") is not None
+
+
+def test_record_pull_request_rejects_a_report_without_a_number(service, store, clock) -> None:
+    ticket = _accept(service, store)
+    assignment = store.list_assignments(ticket.id)[0]
+    store.insert_report(
+        Report(
+            id="rp-2",
+            ticket_id=ticket.id,
+            assignment_id=assignment.id,
+            kind=ReportKind.READY,
+            summary="no number",
+            created_at=clock.now_ms(),
+            details={},
+        )
+    )
+    with pytest.raises(RouterStateError, match="pull_number"):
+        service.record_pull_request(ticket.id, report_id="rp-2", actor="alice")
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_service.py -k "handback or resume or pull_request"
+```
+
+Expected: `SupervisorService` 无对应方法。
+
+- [ ] **Step 3: 实现**
+
+`stableagent/supervisor/service.py` 的 import 追加：
+
+```python
+from stableagent.control.model import ExplicitRequest
+from stableagent.orchestration.model import Assignment, TicketInput
+from stableagent.supervisor.model import Thread, ThreadKind, ThreadStatus
+from stableagent.supervisor.router import RequestSignal
+from stableagent.supervisor.source import pull_request_thread_key
+```
+
+在 `stop` 之后、`# ------------------------------------------------------------- 内部`
+之前追加：
+
+```python
+    def handback(
+        self,
+        ticket_id: str,
+        *,
+        thread_key: str,
+        trigger_id: str,
+        actor: str,
+    ) -> Decision:
+        """把 own 降为 context：之后的明确消息重新走 Router，可创建新 Ticket。"""
+        self._require_operator(actor)
+        trigger = self._require_trigger(trigger_id)
+        with self._store.transaction():
+            ticket = self._require_live_ticket(ticket_id)
+            self._require_thread(thread_key)
+            now = self._clock.now_ms()
+            own = [
+                subscription
+                for subscription in self._store.list_subscriptions(
+                    ticket_id=ticket.id, thread_key=thread_key, live_only=True
+                )
+                if subscription.mode is SubscriptionMode.OWN
+            ]
+            if not own:
+                raise RouterStateError("ticket 不 own 该 thread")
+            for subscription in own:
+                self._store.end_subscription(subscription.id, ended_at=now)
+            ensure_subscription(
+                self._store,
+                ids=self._ids,
+                ticket_id=ticket.id,
+                thread_key=thread_key,
+                mode=SubscriptionMode.CONTEXT,
+                created_at=now,
+            )
+            return record_decision(
+                self._store,
+                ids=self._ids,
+                created_at=now,
+                trigger_ids=[trigger.id],
+                outcome=DecisionOutcome.OBSERVE,
+                strength=DecisionStrength.INFERRED,
+                reason_codes=["handback"],
+                policy_version=self._policy.policy_version,
+                request_digest=trigger.digest,
+            )
+
+    def resume(self, ticket_id: str, *, trigger_id: str, actor: str) -> Ticket:
+        """已结束 Ticket 的唯一重开路径：operator + 显式请求 + Mandate 复检。"""
+        self._require_operator(actor)
+        trigger = self._require_trigger(trigger_id)
+        signal = RequestSignal.from_trigger(trigger)
+        if signal is None:
+            raise RouterStateError("resume 需要显式 request")
+        admission = self._policy.admit_explicit(
+            ExplicitRequest(
+                repository=self._router.config.repository,
+                requester=trigger.actor,
+                mentioned=signal.mentioned,
+                stable_id=signal.stable_id,
+                text=signal.text,
+            )
+        )
+        if self._audit is not None:
+            self._audit.admitted(admission)
+        if not admission.admitted:
+            raise RouterPermissionError(f"resume 未准入：{admission.reason_code}")
+        with self._store.transaction():
+            ticket = self._require_ticket(ticket_id)
+            if ticket.status is TicketStatus.CANCELLED:
+                raise RouterStateError("cancelled ticket 不可 resume")
+            if ticket.status not in (TicketStatus.COMPLETED, TicketStatus.FAILED):
+                raise RouterStateError(f"ticket 未结束：{ticket.status.value}")
+            mandate = self._store.get_mandate(ticket.mandate_id)
+            if mandate is None:
+                raise RouterStateError("mandate 不存在")
+            verdict = self._policy.revalidate(mandate, when="launch")
+            if self._audit is not None:
+                self._audit.revalidated(mandate, "launch", verdict, ticket_id=ticket.id)
+            if not verdict.allowed:
+                raise RouterStateError(f"revalidation_failed:{verdict.reason}")
+            now = self._clock.now_ms()
+            pending = [
+                item
+                for item in self._store.list_inputs(ticket.id)
+                if item.state == "pending" and item.payload == signal.text
+            ]
+            if not pending:
+                sequence = len(self._store.list_inputs(ticket.id)) + 1
+                self._store.insert_input(
+                    TicketInput(
+                        id=self._ids.new_id("in"),
+                        ticket_id=ticket.id,
+                        sequence=sequence,
+                        kind="task",
+                        payload=signal.text,
+                        created_at=now,
+                    )
+                )
+            updated = ticket.model_copy(
+                update={
+                    "status": TicketStatus.QUEUED,
+                    "queued_at": now,
+                    "ended_at": None,
+                    "woken_at": None,
+                }
+            )
+            self._store.update_ticket(updated)
+            attempt = len(self._store.list_assignments(ticket.id)) + 1
+            assignment = Assignment(
+                id=self._ids.new_id("as"), ticket_id=ticket.id, attempt=attempt
+            )
+            self._store.insert_assignment(assignment)
+            self._store.enqueue_effect(
+                Effect(
+                    id=self._ids.new_id("ef"),
+                    kind=EffectKind.LAUNCH_ASSIGNMENT,
+                    idempotency_key=f"launch:{assignment.id}:{attempt}",
+                    payload={"assignment_id": assignment.id, "ticket_id": ticket.id},
+                    due_at=now,
+                )
+            )
+            own = [
+                subscription
+                for subscription in self._store.list_subscriptions(
+                    ticket_id=ticket.id, live_only=True
+                )
+                if subscription.mode is SubscriptionMode.OWN
+            ]
+            if not own and trigger.thread_keys:
+                ensure_subscription(
+                    self._store,
+                    ids=self._ids,
+                    ticket_id=ticket.id,
+                    thread_key=trigger.thread_keys[0],
+                    mode=SubscriptionMode.OWN,
+                    created_at=now,
+                )
+            record_decision(
+                self._store,
+                ids=self._ids,
+                created_at=now,
+                trigger_ids=[trigger.id],
+                outcome=DecisionOutcome.ACCEPT,
+                strength=DecisionStrength.EXPLICIT,
+                reason_codes=["resumed"],
+                policy_version=self._policy.policy_version,
+                request_digest=admission.request_digest,
+                mandate_id=mandate.id,
+            )
+            return updated
+
+    def record_pull_request(
+        self, ticket_id: str, *, report_id: str, actor: str
+    ) -> Subscription:
+        """Worker 报告里出现的 PR 才能升为 own；正文只取数字，不取授权（L4）。"""
+        self._require_operator(actor)
+        with self._store.transaction():
+            ticket = self._require_live_ticket(ticket_id)
+            report = next(
+                (
+                    item
+                    for item in self._store.list_reports(ticket.id)
+                    if item.id == report_id
+                ),
+                None,
+            )
+            if report is None:
+                raise RouterNotFoundError(f"report 不存在：{report_id}")
+            number = report.details.get("pull_number", report.details.get("pr_number"))
+            if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                raise RouterStateError("report 缺少 pull_number")
+            thread_key = pull_request_thread_key(
+                self._router.config.repository, number
+            )
+            self._store.upsert_thread(
+                Thread(
+                    key=thread_key,
+                    repository=self._router.config.repository,
+                    kind=ThreadKind.PULL_REQUEST,
+                    external_ref=f"#{number}",
+                    last_trigger_at=report.created_at,
+                    status=ThreadStatus.OPEN,
+                )
+            )
+            now = self._clock.now_ms()
+            for subscription in self._store.list_subscriptions(
+                ticket_id=ticket.id, thread_key=thread_key, live_only=True
+            ):
+                if subscription.mode is SubscriptionMode.CONTEXT:
+                    self._store.end_subscription(subscription.id, ended_at=now)
+            return ensure_subscription(
+                self._store,
+                ids=self._ids,
+                ticket_id=ticket.id,
+                thread_key=thread_key,
+                mode=SubscriptionMode.OWN,
+                created_at=now,
+            )
+```
+
+- [ ] **Step 4: 跑绿并做静态检查**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_service.py
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_router.py \
+  tests/unit/test_supervisor_service.py
+.venv/bin/ruff check stableagent/supervisor/service.py
+.venv/bin/ruff format --check stableagent/supervisor/service.py
+.venv/bin/mypy
+```
+
+Expected: `15 passed`（Service）；Router + Service 合计 `38 passed`；ruff / mypy 全绿。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/service.py tests/unit/test_supervisor_service.py
+git commit -m "feat: handback resume and pull-request subscription commands"
+```
+
+---
+
+### Task 7：CI FOCUS 32、Router 指南与 M3 出口（M3-8）
+
+**Files:**
+- Modify: `tests/unit/test_ci_focus_gate.py`
+- Modify: `.github/workflows/ci.yml`
+- Create: `docs/guides/supervisor-router.md`
+- Modify: `docs/acceptance/p6-supervisor-beta.md`、`README.md`、`docs/README.md`、
+  `docs/acceptance/README.md`、`docs/Roadmap.md`、`CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: 前 6 个 Task 的测试与模块。
+- Produces: 32 文件心脏闸门；Router 运维文档；M3 收口读数与状态面。
+
+- [ ] **Step 1: FOCUS 29 → 32（先写红）**
+
+`tests/unit/test_ci_focus_gate.py`：
+
+```python
+    "supervisor/source.py",
+    "supervisor/assessor.py",
+    "supervisor/router.py",
+    "supervisor/service.py",
+]
+
+
+def test_focus_covers_the_thirty_two_cardiac_files() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert all(f'"{name}"' in text for name in FOCUS_FILES)
+    assert len(FOCUS_FILES) == 32
+    assert "32 文件" in text  # 步骤名与注释同步
+    assert text.count('".py"') == 0  # 不许用通配兜底
+```
+
+`.github/workflows/ci.yml` 的步骤名改为
+`心脏模块覆盖率闸门（32 文件：loop/checkpoint/errors/context/evidence/orchestration/control/execution/integrations/supervisor 各 ≥90%）`，
+并在 `FOCUS` 元组中 `"supervisor/source.py",` 之后追加：
+
+```python
+              "supervisor/assessor.py",
+              "supervisor/router.py",
+              "supervisor/service.py",
+```
+
+- [ ] **Step 2: 跑红再跑绿**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py
+```
+
+Expected（只改测试、未改 workflow 时）：`assert "32 文件" in text` 失败；补齐 workflow
+后 `1 passed`。
+
+- [ ] **Step 3: 写 Router 运维指南**
+
+`docs/guides/supervisor-router.md` 全文：
+
+```markdown
+# Supervisor Router 运维指南（P6 Beta）
+
+本指南对应当前 Beta 的 `observe` 锁定：Router 只接受显式任务，推断候选只记录不执行。
+
+## 1. 唯一入口
+
+`RouterService.receive(trigger)` 是外部事件进入领域的唯一命令。它在一个
+`BEGIN IMMEDIATE` 内完成 Trigger 去重、Subscription 扇出与 Decision；任一步失败整体
+回滚。Source 已持久化的 Trigger 仍可交给 `receive`：路由层用"是否已有 Decision"判断
+是否重复，存储层用 `UNIQUE(source, external_id)` 兜底。
+
+## 2. 去重与顺序
+
+- 同一 `external_id` 只存一行 Trigger；重复投递返回 `duplicate=True`，不新增 Decision、
+  Ticket 或 effect。
+- 一个 Trigger 的同一 Ticket 至多扇出一条 Input；`sequence` 按 Ticket 递增，投递走
+  `deliver_input` effect。
+- `reevaluate` 是运维重评估，不重复扇出，只追加一条递增 `attempt` 的 Decision。
+
+## 3. 三档自治
+
+| mode | explicit | inferred |
+|---|---|---|
+| `off` | 接受 | IGNORE，记录 `autonomy_off`，不调评估器 |
+| `observe` | 接受 | OBSERVE，只记录 would-accept 与 reason code |
+| `auto` | 构造期拒绝 | 未启用 |
+
+P6 Beta 不允许部署 `auto`；该枚举值只为 P7 保留。
+
+## 4. outcome 与 reason code
+
+| outcome | 触发条件 | 典型 reason |
+|---|---|---|
+| `accept` | 显式、未准入问题不存在、无既有 owner/重复 | `admitted` / `resumed` |
+| `observe` | 推断候选；已结束 Ticket 的后续；多 owner | `inferred_candidate` / `resume_requires_operator` / `ambiguous_owner` |
+| `ignore` | 未准入、正文畸形、无 Thread、`off` | `actor_not_allowlisted` / `malformed_request` / `thread_unknown` / `autonomy_off` |
+| `attach` | 已有 Ticket 的 own 后续或重复请求 | `owned_thread_followup` / `duplicate_request` |
+| `stop` | 已 stop Ticket 的后续 | `stopped_ignored` |
+| `unavailable` | 评估器异常 | `assessor_error` |
+
+## 5. 命令与权限
+
+所有命令的 `actor` 必须在 `RouterConfig.operators` 中（大小写不敏感）：
+
+- `attach(ticket, thread)`：相关 Thread 升为 context 订阅，幂等。
+- `subscribe(ticket, trigger)`：按 Trigger 主 Thread 执行 attach。
+- `unsubscribe(ticket, thread)`：结束该 Thread 的 live 订阅，返回结束行数。
+- `stop(ticket)`：取消未结束 Ticket、入队 cancel effect、结束 context 订阅；own 订阅保留
+  作为"已停"护栏，后续明确消息记 `stop` 并丢弃。
+- `handback(ticket, thread, trigger)`：own 降为 context，之后的明确消息可创建新 Ticket。
+- `resume(ticket, trigger)`：只允许 `completed` / `failed`；要求显式请求通过准入，并用
+  `when="launch"` 复检 Mandate；`cancelled` 永久拒绝。
+- `record_pull_request(ticket, report)`：Worker 报告里带 `pull_number` 才能把 PR Thread
+  升为 own。
+
+## 6. 订阅生命周期
+
+- 创建 Ticket 时绑定 origin Thread 为 own。
+- Worker 报告 PR 后由 `record_pull_request` 添加 own PR 订阅；同一 Thread 的 context
+  订阅被结束，避免重复投递。
+- 其他 Thread 只能是 context；context 只提供上下文，不扩大 Mandate、不创建 Ticket。
+- Ticket 完成后 own 订阅保留；后续明确消息存为 pending Input 并记
+  `resume_requires_operator`，由 operator 决定是否 `resume`。
+- 人工 `stop` 后 own 订阅也保留但不接收：后续明确消息记 `stopped_ignored`。
+
+## 7. 安全边界
+
+- 外部正文只进 digest、TicketInput 与 reason 记录，不决定 action 集合（L4）。
+- Router 事务体内无 `await`（L3）；Ticket/Assignment/Effect 与 Decision 同事务。
+- Channel 不授予权限；`merge` / `auto_merge` 结构性缺席（L6）。
+- 全部测试离线；真实 GitHub 演练与推送需维护者显式授权（L8）。
+```
+
+- [ ] **Step 4: 全量门禁、三解释器与边界复核**
+
+```bash
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p6-m3-full.txt 2>&1
+.venv/bin/ruff check stableagent tests examples benchmarks > /tmp/p6-m3-ruff.txt 2>&1
+.venv/bin/ruff format --check stableagent tests examples benchmarks > /tmp/p6-m3-format.txt 2>&1
+.venv/bin/mypy > /tmp/p6-m3-mypy.txt 2>&1
+.venv/bin/python - <<'PY' > /tmp/p6-m3-coverage.txt 2>&1
+import xml.etree.ElementTree as ET
+
+root = ET.parse("coverage.xml").getroot()
+wanted = {"supervisor/assessor.py", "supervisor/router.py", "supervisor/service.py"}
+for cls in root.iter("class"):
+    name = cls.get("filename", "")
+    if name in wanted:
+        lines = cls.findall("./lines/line")
+        hit = sum(1 for line in lines if int(line.get("hits", "0")) > 0)
+        print(f"{name}: {hit}/{len(lines)} = {hit / len(lines):.2%}")
+PY
+git diff 234f620..HEAD --stat -- stableagent/core/ > /tmp/p6-m3-l1.txt 2>&1
+git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p6-m3-c1.txt 2>&1
+grep -rnE "(from|import) +stableagent\.supervisor" --include='*.py' \
+  stableagent/orchestration stableagent/control stableagent/execution stableagent/integrations \
+  > /tmp/p6-m3-reverse.txt 2>&1 || true
+git diff --check > /tmp/p6-m3-diffcheck.txt 2>&1
+```
+
+三解释器全量（与 M2 相同，不用 `--no-cov`，避免只验证新文件）：
+
+```bash
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p6-m3-py310.txt 2>&1
+env -u NO_PROXY -u no_proxy .matrix/py311/bin/pytest -q > /tmp/p6-m3-py311.txt 2>&1
+env -u NO_PROXY -u no_proxy .matrix/py312/bin/pytest -q > /tmp/p6-m3-py312.txt 2>&1
+```
+
+逐项读回 `/tmp/p6-m3-*.txt`，确认：全量 `0 failed`、三解释器 passed 数一致、三文件覆盖率均 `≥90%`、ruff
+`All checks passed!`、format 已格式化、mypy `Success`、L1/C1 两个 diff 为空、反向 import
+0 行、`git diff --check` 无输出。**只回填实测数字，不预填。**
+
+- [ ] **Step 5: 回填账本与状态面**
+
+- §1 的 M3-1…M3-8 全部改 `[x]`，每条写明用例文件、提交号与关键断言。
+- M3 标题下状态改为 `M3 收口（Task 1~7 全部完成）`。
+- §3 验证命令补 `tests/unit/test_supervisor_assessor.py`、
+  `tests/unit/test_supervisor_router.py`、`tests/unit/test_supervisor_service.py`。
+- §4 保持 `M3 展开为 7 个 Task / 38 个 Step`（与 Task 1~7 的 Step 数一致）。
+- §9 末尾追加"出口读数"小节，粘贴 Step 4 的实测值。
+- `README.md` P6 行、`docs/README.md` 主线、`docs/acceptance/README.md`、`docs/Roadmap.md`
+  改为 `M3 完成（8/8）；里程碑 3/6`，并链接 `docs/guides/supervisor-router.md`。
+- `CHANGELOG.md` 顶部新增 `### 实现（P6 M3 Router Intake，2026-11-09）`。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add tests/unit/test_ci_focus_gate.py .github/workflows/ci.yml \
+  docs/guides/supervisor-router.md docs/acceptance/p6-supervisor-beta.md \
+  README.md docs/README.md docs/acceptance/README.md docs/Roadmap.md CHANGELOG.md
+git commit -m "docs: close p6 m3 with router intake evidence"
+```
+
+---
+
+## 10. M3 自检记录（writing-plans）
+
+- **规格覆盖：** WP-6.3 第 1 条 → Task 3（`receive` 唯一入口、duplicate）；
+  第 2 条 → Task 3（扇出与 sequence）；第 3 条 → Task 3（Policy gate 三档）与 Task 1；
+  第 4 条 → Task 5/6（七条命令与权限）；第 5 条 → Task 3 + Task 6（own/context、
+  PR own）；第 6 条 → Task 3（结束/stop/重复语义）与 Task 5（stop 记录）。
+- **类型一致性：** `AutonomyMode` / `AssessmentContext` / `CandidateAssessment` 只在
+  Task 1 定义；`RouterConfig` / `RequestSignal` / `Reception` / `RouterError` 只在 Task 3
+  定义；`SupervisorService` 的构造签名从 Task 5 起不变，Task 6 只追加方法；
+  `record_decision` / `ensure_subscription` / `latest_trigger` 三处 helper 只定义一次。
+- **无占位符：** 所有实现步骤给出完整代码；Task 7 的出口读数在实测后回填，不预填数字。
+- **边界：** `supervisor` 不 import `execution` / `integrations`（Task 2 的 Source 变更
+  仍在 M2 包内）；`receive` / 命令各只开一个事务（L3）；外部正文只进 digest/Input（L4）；
+  `resume` 的 `when="launch"` 与审计行是 L5 的唯一新增复检点；`auto` 构造期拒绝与
+  `forbidden merge` 保持 L6。
