@@ -16,6 +16,8 @@ from stableagent.orchestration.model import Clock
 from stableagent.supervisor.model import (
     Channel,
     ChannelKind,
+    SourceCursor,
+    SourceHealth,
     Thread,
     ThreadKind,
     ThreadStatus,
@@ -355,6 +357,98 @@ class GitHubSource:
             trigger=self._trigger(item, TriggerKind.CI_STATUS, status_id, actor, key),
             thread=thread,
         )
+
+    async def poll(self, *, limit: int = 100, max_pages: int = 10) -> PollBatch:
+        stored = self._store.get_source_cursor("github")
+        cursor = stored.cursor if stored else None
+        try:
+            events, next_cursor, in_batch_duplicates = await self._fetch(cursor, limit, max_pages)
+        except SourceError as error:
+            self._record_failure(stored, error)
+            raise
+        return self._persist(events, next_cursor, in_batch_duplicates)
+
+    async def _fetch(
+        self, cursor: str | None, limit: int, max_pages: int
+    ) -> tuple[list[SourceEvent], str | None, int]:
+        next_cursor = cursor
+        items: list[GitHubReadItem] = []
+        for _ in range(max_pages):
+            page = await self._client.list_events(
+                repository=self._repository, cursor=next_cursor, limit=limit
+            )
+            items.extend(page.items)
+            if page.next_cursor is not None and page.next_cursor == next_cursor:
+                raise SourceSchemaError("cursor 未推进")
+            next_cursor = page.next_cursor
+            if next_cursor is None:
+                break
+        events, duplicates = self._dedupe(items)
+        return events, next_cursor, duplicates
+
+    def _persist(
+        self, events: list[SourceEvent], next_cursor: str | None, in_batch_duplicates: int
+    ) -> PollBatch:
+        with self._store.transaction():
+            fresh: list[SourceEvent] = []
+            duplicates = 0
+            for event in events:
+                if not self._store.insert_trigger(event.trigger):
+                    duplicates += 1
+                    continue
+                self._store.upsert_thread(event.thread)
+                if event.channel is not None:
+                    self._store.insert_channel(event.channel)
+                fresh.append(event)
+            self._store.put_source_cursor(
+                SourceCursor(
+                    source="github",
+                    cursor=next_cursor,
+                    last_success_at=self._clock.now_ms(),
+                    consecutive_failures=0,
+                    health=SourceHealth.OK,
+                )
+            )
+        return PollBatch(
+            events=fresh,
+            next_cursor=next_cursor,
+            duplicates=duplicates + in_batch_duplicates,
+        )
+
+    def _dedupe(self, items: list[GitHubReadItem]) -> tuple[list[SourceEvent], int]:
+        by_external: dict[str, SourceEvent] = {}
+        duplicates = 0
+        for item in items:
+            event = self.normalize(item)
+            if event is None:
+                continue
+            if event.trigger.external_id in by_external:
+                duplicates += 1
+                continue
+            by_external[event.trigger.external_id] = event
+        ordered = sorted(
+            by_external.values(),
+            key=lambda event: (event.trigger.occurred_at, event.trigger.external_id),
+        )
+        return ordered, duplicates
+
+    def _record_failure(self, stored: SourceCursor | None, error: SourceError) -> None:
+        health = (
+            SourceHealth.DEGRADED
+            if isinstance(error, SourceTransientError)
+            else SourceHealth.FAILED
+        )
+        previous = stored.consecutive_failures if stored else 0
+        with self._store.transaction():
+            self._store.put_source_cursor(
+                SourceCursor(
+                    source="github",
+                    cursor=stored.cursor if stored else None,
+                    last_success_at=stored.last_success_at if stored else None,
+                    consecutive_failures=previous + 1,
+                    health=health,
+                )
+            )
 
 
 def _int_field(resource: dict[str, Any], field: str) -> int:

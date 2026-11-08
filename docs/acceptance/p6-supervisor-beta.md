@@ -3003,6 +3003,7 @@ git commit -m "feat: map ci status to pr or repository threads"
 
 **Files:**
 - Modify: `stableagent/supervisor/source.py`
+- Modify: `tests/unit/test_control_boundaries.py`
 - Test: `tests/unit/test_github_source.py`
 
 **Interfaces:**
@@ -3254,30 +3255,44 @@ from stableagent.supervisor.model import (
 )
 ```
 
-- [ ] **Step 4: 在 `GitHubSource` 内追加 `poll` / `_dedupe` / `_record_failure`**
+- [ ] **Step 4: 在 `GitHubSource` 内追加 `poll` / `_fetch` / `_persist` / `_dedupe` / `_record_failure`**
+
+L3 静态检查（`tests/unit/test_execution_boundaries.py`）禁止在同一函数体内同时出现
+`await` 与 `Store.transaction()`：`poll` 只做编排，`_fetch` 只做异步读，`_persist`
+只做同步事务写，`_record_failure` 自己持有一个事务。
 
 ```python
     async def poll(self, *, limit: int = 100, max_pages: int = 10) -> PollBatch:
         stored = self._store.get_source_cursor("github")
         cursor = stored.cursor if stored else None
-        next_cursor = cursor
-        items: list[GitHubReadItem] = []
         try:
-            for _ in range(max_pages):
-                page = await self._client.list_events(
-                    repository=self._repository, cursor=next_cursor, limit=limit
-                )
-                items.extend(page.items)
-                if page.next_cursor is not None and page.next_cursor == next_cursor:
-                    raise SourceSchemaError("cursor 未推进")
-                next_cursor = page.next_cursor
-                if next_cursor is None:
-                    break
-            events = self._dedupe(items)
+            events, next_cursor, in_batch_duplicates = await self._fetch(cursor, limit, max_pages)
         except SourceError as error:
             self._record_failure(stored, error)
             raise
+        return self._persist(events, next_cursor, in_batch_duplicates)
 
+    async def _fetch(
+        self, cursor: str | None, limit: int, max_pages: int
+    ) -> tuple[list[SourceEvent], str | None, int]:
+        next_cursor = cursor
+        items: list[GitHubReadItem] = []
+        for _ in range(max_pages):
+            page = await self._client.list_events(
+                repository=self._repository, cursor=next_cursor, limit=limit
+            )
+            items.extend(page.items)
+            if page.next_cursor is not None and page.next_cursor == next_cursor:
+                raise SourceSchemaError("cursor 未推进")
+            next_cursor = page.next_cursor
+            if next_cursor is None:
+                break
+        events, duplicates = self._dedupe(items)
+        return events, next_cursor, duplicates
+
+    def _persist(
+        self, events: list[SourceEvent], next_cursor: str | None, in_batch_duplicates: int
+    ) -> PollBatch:
         with self._store.transaction():
             fresh: list[SourceEvent] = []
             duplicates = 0
@@ -3298,19 +3313,28 @@ from stableagent.supervisor.model import (
                     health=SourceHealth.OK,
                 )
             )
-        return PollBatch(events=fresh, next_cursor=next_cursor, duplicates=duplicates)
+        return PollBatch(
+            events=fresh,
+            next_cursor=next_cursor,
+            duplicates=duplicates + in_batch_duplicates,
+        )
 
-    def _dedupe(self, items: list[GitHubReadItem]) -> list[SourceEvent]:
+    def _dedupe(self, items: list[GitHubReadItem]) -> tuple[list[SourceEvent], int]:
         by_external: dict[str, SourceEvent] = {}
+        duplicates = 0
         for item in items:
             event = self.normalize(item)
             if event is None:
                 continue
-            by_external.setdefault(event.trigger.external_id, event)
-        return sorted(
+            if event.trigger.external_id in by_external:
+                duplicates += 1
+                continue
+            by_external[event.trigger.external_id] = event
+        ordered = sorted(
             by_external.values(),
             key=lambda event: (event.trigger.occurred_at, event.trigger.external_id),
         )
+        return ordered, duplicates
 
     def _record_failure(self, stored: SourceCursor | None, error: SourceError) -> None:
         health = (
@@ -3331,19 +3355,48 @@ from stableagent.supervisor.model import (
             )
 ```
 
-- [ ] **Step 5: 跑测试与静态检查**
+- [ ] **Step 5: 调整 P6 方向锁测试**
 
-Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py`
-`.venv/bin/ruff check stableagent/supervisor/source.py tests/unit/test_github_source.py`
-`.venv/bin/ruff format --check stableagent/supervisor/source.py tests/unit/test_github_source.py`
+`supervisor` 是 P6 新顶层，按 ADR-06 合法导入 `integrations`；P5 的"旧包不得导入
+P5 层"用例必须把 P6 排除，同时补一条反向断言（旧包不得导入 supervisor）。
+
+```python
+P6_PACKAGES = ("supervisor",)
+
+
+def _legacy_packages() -> list[str]:
+    """ROOT 下除 P5 三新包与 P6 supervisor 以外的全部包目录。"""
+    excluded = {*P5_PACKAGES, *P6_PACKAGES, "__pycache__"}
+    return sorted(
+        path.name for path in ROOT.iterdir() if path.is_dir() and path.name not in excluded
+    )
+
+
+def test_no_package_imports_supervisor() -> None:
+    """L2 反向：supervisor 在最上游，旧包与 P5 包都不许 import 它。"""
+    offenders: list[tuple[str, list[str]]] = []
+    for module in _modules(*(_legacy_packages() + list(P5_PACKAGES))):
+        banned = sorted(
+            name for name in _imports_of(module) if name.startswith("stableagent.supervisor")
+        )
+        if banned:
+            offenders.append((_label(module), banned))
+    assert not offenders
+```
+
+- [ ] **Step 6: 跑测试与静态检查**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_github_source.py tests/unit/test_control_boundaries.py tests/unit/test_execution_boundaries.py`
+`.venv/bin/ruff check stableagent/supervisor/source.py tests/unit/test_github_source.py tests/unit/test_control_boundaries.py`
+`.venv/bin/ruff format --check stableagent/supervisor/source.py tests/unit/test_github_source.py tests/unit/test_control_boundaries.py`
 `.venv/bin/mypy`
 
-Expected: 32 passed；ruff/mypy 无新增问题。
+Expected: 全绿（source 32 + 两个边界文件共 45）；ruff/mypy 无新增问题。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add stableagent/supervisor/source.py tests/unit/test_github_source.py
+git add stableagent/supervisor/source.py tests/unit/test_github_source.py tests/unit/test_control_boundaries.py
 git commit -m "feat: poll github with cursors dedupe and source health"
 ```
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 
 import pytest
@@ -16,6 +17,7 @@ from stableagent.integrations.github import (
 from stableagent.supervisor.model import (
     Channel,
     ChannelKind,
+    SourceHealth,
     ThreadKind,
     ThreadStatus,
     TriggerKind,
@@ -23,6 +25,7 @@ from stableagent.supervisor.model import (
 from stableagent.supervisor.source import (
     FakeChannelWriter,
     GitHubSource,
+    Source,
     SourceAuthError,
     SourceGoneError,
     SourceSchemaError,
@@ -359,3 +362,208 @@ def test_unknown_ci_state_is_a_schema_error(tmp_path: pathlib.Path) -> None:
                 {"id": 503, "sha": "abc123", "state": "exploded"},
             )
         )
+
+
+def _poll_source(
+    tmp_path: pathlib.Path,
+    items: list[GitHubReadItem],
+    *,
+    page_size: int | None = None,
+):
+    clock = FixedClock()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    client = FakeGitHubReadClient(items, page_size=page_size)
+    source = GitHubSource(
+        store, client, repository="owner/repo", bot_login="sa-agent[bot]", clock=clock
+    )
+    return source, store, client
+
+
+async def test_poll_pages_sorts_dedupes_and_writes_in_one_transaction(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 2, "state": "open", "user": {"login": "alice"}},
+            occurred_at=200,
+        ),
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+            occurred_at=100,
+        ),
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 2, "state": "open", "user": {"login": "alice"}},
+            occurred_at=200,
+        ),
+    ]
+    source, store, client = _poll_source(tmp_path, items, page_size=2)
+    assert isinstance(source, Source)
+
+    batch = await source.poll(limit=10)
+
+    assert [event.thread.external_ref for event in batch.events] == ["#1", "#2"]
+    assert batch.duplicates == 1
+    assert batch.next_cursor is None
+    assert [call["cursor"] for call in client.calls] == [None, "offset:2"]
+    assert store.get_trigger_by_external("github", "github:owner/repo:issue:1") is not None
+    cursor = store.get_source_cursor("github")
+    assert cursor is not None
+    assert cursor.cursor is None
+    assert cursor.health is SourceHealth.OK
+    assert cursor.consecutive_failures == 0
+
+
+async def test_second_poll_skips_triggers_already_in_the_store(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+        )
+    ]
+    source, _, _ = _poll_source(tmp_path, items)
+    assert len((await source.poll(limit=10)).events) == 1
+
+    again = await source.poll(limit=10)
+
+    assert again.events == []
+    assert again.duplicates == 1
+
+
+async def test_poll_stops_at_max_pages_and_resumes_from_cursor(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": number, "state": "open", "user": {"login": "alice"}},
+            occurred_at=number,
+        )
+        for number in (1, 2, 3)
+    ]
+    source, store, _ = _poll_source(tmp_path, items, page_size=1)
+
+    first = await source.poll(limit=10, max_pages=1)
+    assert [event.thread.external_ref for event in first.events] == ["#1"]
+    assert first.next_cursor == "offset:1"
+    stored = store.get_source_cursor("github")
+    assert stored is not None and stored.cursor == "offset:1"
+
+    second = await source.poll(limit=10, max_pages=2)
+    assert [event.thread.external_ref for event in second.events] == ["#2", "#3"]
+    assert second.next_cursor is None
+    stored = store.get_source_cursor("github")
+    assert stored is not None and stored.cursor is None
+
+
+@pytest.mark.parametrize(
+    ("error", "health"),
+    [
+        (SourceTransientError("503"), SourceHealth.DEGRADED),
+        (SourceAuthError("403"), SourceHealth.FAILED),
+        (SourceGoneError("404"), SourceHealth.FAILED),
+        (SourceSchemaError("bad payload"), SourceHealth.FAILED),
+    ],
+)
+async def test_poll_records_cursor_health_before_reraising(
+    tmp_path: pathlib.Path, error: Exception, health: SourceHealth
+) -> None:
+    source, store, client = _poll_source(tmp_path, [])
+    client.fail_next = error
+
+    with pytest.raises(type(error)):
+        await source.poll(limit=10)
+
+    cursor = store.get_source_cursor("github")
+    assert cursor is not None
+    assert cursor.health is health
+    assert cursor.consecutive_failures == 1
+
+
+async def test_malformed_item_fails_the_whole_batch_without_writing(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+        ),
+        _read_item(GitHubReadKind.ISSUE, {"state": "open", "user": {"login": "alice"}}),
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+
+    with pytest.raises(SourceSchemaError):
+        await source.poll(limit=10)
+
+    assert store.list_triggers() == []
+    assert store.list_threads() == []
+    cursor = store.get_source_cursor("github")
+    assert cursor is not None and cursor.health is SourceHealth.FAILED
+
+
+async def test_deleted_event_closes_the_thread_and_still_records_the_trigger(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 1, "state": "open", "user": {"login": "alice"}},
+            deleted=True,
+        )
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+
+    batch = await source.poll(limit=10)
+
+    assert len(batch.events) == 1
+    assert batch.events[0].thread.status is ThreadStatus.CLOSED
+    thread = store.get_thread("issue:owner/repo#1")
+    assert thread is not None and thread.status is ThreadStatus.CLOSED
+
+
+async def test_poll_drops_our_own_bot_events_but_still_advances(
+    tmp_path: pathlib.Path,
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {"id": 1, "issue_number": 7, "user": {"login": "sa-agent[bot]"}},
+        )
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+
+    batch = await source.poll(limit=10)
+
+    assert batch.events == []
+    assert batch.duplicates == 0
+    assert store.get_source_cursor("github") is not None
+
+
+async def test_poll_writes_state_in_a_single_transaction(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    items = [
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {"id": 1, "issue_number": 7, "user": {"login": "alice"}},
+        )
+    ]
+    source, store, _ = _poll_source(tmp_path, items)
+    seen: list[bool] = []
+    original = store.transaction
+
+    @contextlib.contextmanager
+    def watched():
+        with original():
+            seen.append(store.in_transaction)
+            yield
+
+    monkeypatch.setattr(store, "transaction", watched)
+
+    await source.poll(limit=10)
+
+    assert seen == [True]

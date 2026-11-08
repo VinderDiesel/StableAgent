@@ -20,8 +20,11 @@ ROOT = pathlib.Path(stableagent.__file__).parent
 
 # 三新包：`execution`/`integrations` 要到 M2/M4 才落包，名单先含三者（空目录 → 语料空转）。
 P5_PACKAGES = ("control", "execution", "integrations")
-# 计划的五旧包，作为"至少扫到这些"的下界（实际语料取 ROOT 下全部非 P5 包）。
+# 计划的五旧包，作为"至少扫到这些"的下界（实际语料取 ROOT 下全部非 P5/P6 包）。
 LEGACY_PACKAGES = ("core", "context", "providers", "tools", "orchestration")
+# P6 的 supervisor 是最上游消费者：ADR-06 决策 1 允许它 import P5 三包，
+# 但它自己在反向门里必须被任何旧包/P5 包 import。
+P6_PACKAGES = ("supervisor",)
 P5_IMPORT_PREFIXES = tuple(f"stableagent.{name}" for name in P5_PACKAGES)
 # control 的上游：方向锁 integrations → execution → control → orchestration → core，反向不许。
 UPSTREAM_OF_CONTROL = ("stableagent.execution", "stableagent.integrations")
@@ -73,11 +76,10 @@ def test_control_error_code_inventory_is_unique_and_prefixed() -> None:
 
 
 def _legacy_packages() -> list[str]:
-    """ROOT 下除三新包以外的全部包目录——旧包新增目录不需要改名单，反向门自动覆盖。"""
+    """ROOT 下除 P5 三新包与 P6 supervisor 以外的全部包目录。"""
+    excluded = {*P5_PACKAGES, *P6_PACKAGES, "__pycache__"}
     return sorted(
-        path.name
-        for path in ROOT.iterdir()
-        if path.is_dir() and path.name not in {*P5_PACKAGES, "__pycache__"}
+        path.name for path in ROOT.iterdir() if path.is_dir() and path.name not in excluded
     )
 
 
@@ -160,6 +162,18 @@ def test_no_legacy_package_imports_p5_layers() -> None:
     offenders: list[tuple[str, list[str]]] = []
     for module in _modules(*packages):
         banned = sorted(name for name in _imports_of(module) if name.startswith(P5_IMPORT_PREFIXES))
+        if banned:
+            offenders.append((_label(module), banned))
+    assert not offenders
+
+
+def test_no_package_imports_supervisor() -> None:
+    """L2 反向：supervisor 在最上游，旧包与 P5 包都不许 import 它。"""
+    offenders: list[tuple[str, list[str]]] = []
+    for module in _modules(*(_legacy_packages() + list(P5_PACKAGES))):
+        banned = sorted(
+            name for name in _imports_of(module) if name.startswith("stableagent.supervisor")
+        )
         if banned:
             offenders.append((_label(module), banned))
     assert not offenders
