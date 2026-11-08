@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from stableagent.integrations.github import (
@@ -11,9 +13,16 @@ from stableagent.integrations.github import (
     GitHubReadKind,
     GitHubReadPage,
 )
-from stableagent.supervisor.model import Channel, ChannelKind
+from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    ThreadKind,
+    ThreadStatus,
+    TriggerKind,
+)
 from stableagent.supervisor.source import (
     FakeChannelWriter,
+    GitHubSource,
     SourceAuthError,
     SourceGoneError,
     SourceSchemaError,
@@ -25,6 +34,8 @@ from stableagent.supervisor.source import (
     stable_channel_id,
     stable_trigger_id,
 )
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock
 
 
 def _item(number: int = 1, *, occurred_at: int = 1) -> GitHubReadItem:
@@ -96,3 +107,94 @@ def test_thread_keys_and_ids_are_stable() -> None:
     first = stable_channel_id("issue:owner/repo#7", ChannelKind.ISSUE_COMMENT, "#7")
     second = stable_channel_id("issue:owner/repo#7", ChannelKind.ISSUE_COMMENT, "#7")
     assert first == second and first.startswith("ch-")
+
+
+def _source(tmp_path: pathlib.Path):
+    clock = FixedClock()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    client = FakeGitHubReadClient([])
+    source = GitHubSource(
+        store, client, repository="owner/repo", bot_login="sa-agent[bot]", clock=clock
+    )
+    return source, store, clock
+
+
+def _read_item(
+    kind: GitHubReadKind,
+    resource: dict[str, object],
+    *,
+    occurred_at: int = 10,
+    deleted: bool = False,
+) -> GitHubReadItem:
+    return GitHubReadItem(kind=kind, occurred_at=occurred_at, resource=resource, deleted=deleted)
+
+
+def test_issue_normalizes_to_trigger_thread_and_digest(tmp_path: pathlib.Path) -> None:
+    source, _, clock = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 7, "state": "open", "user": {"login": "octocat"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "issue:owner/repo#7"
+    assert event.thread.external_ref == "#7"
+    assert event.thread.kind is ThreadKind.ISSUE
+    assert event.thread.status is ThreadStatus.OPEN
+    assert event.channel is None
+    assert event.trigger.kind is TriggerKind.ISSUE
+    assert event.trigger.external_id == "github:owner/repo:issue:7"
+    assert event.trigger.id.startswith("tg-")
+    assert event.trigger.thread_keys == ["issue:owner/repo#7"]
+    assert event.trigger.actor == "octocat"
+    assert event.trigger.occurred_at == 10
+    assert event.trigger.received_at == clock.now_ms()
+    assert event.trigger.payload == {
+        "resource": {"number": 7, "state": "open", "user": {"login": "octocat"}},
+        "deleted": False,
+    }
+    assert event.trigger.digest
+
+
+def test_closed_pull_request_maps_to_a_closed_pr_thread(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.PULL_REQUEST,
+            {"number": 9, "state": "closed", "user": {"login": "alice"}},
+        )
+    )
+    assert event is not None
+    assert event.thread.key == "pr:owner/repo#9"
+    assert event.thread.kind is ThreadKind.PULL_REQUEST
+    assert event.thread.status is ThreadStatus.CLOSED
+    assert event.trigger.kind is TriggerKind.PULL_REQUEST
+    assert event.trigger.external_id == "github:owner/repo:pull_request:9"
+
+
+def test_bot_identity_is_filtered_case_insensitively(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE,
+            {"number": 7, "state": "open", "user": {"login": "SA-Agent[BOT]"}},
+        )
+    )
+    assert event is None
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        {"state": "open", "user": {"login": "alice"}},
+        {"number": "7", "state": "open", "user": {"login": "alice"}},
+        {"number": 7, "state": "open"},
+    ],
+)
+def test_malformed_issue_is_a_schema_error(
+    tmp_path: pathlib.Path, resource: dict[str, object]
+) -> None:
+    source, _, _ = _source(tmp_path)
+    with pytest.raises(SourceSchemaError):
+        source.normalize(_read_item(GitHubReadKind.ISSUE, resource))

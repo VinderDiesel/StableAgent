@@ -11,7 +11,18 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from stableagent.supervisor.model import Channel, ChannelKind, Thread, Trigger
+from stableagent.integrations.github import GitHubReadClient, GitHubReadItem
+from stableagent.orchestration.model import Clock
+from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.store import SupervisorStore
 
 
 class SourceError(Exception):
@@ -117,3 +128,117 @@ def review_thread_key(repository: str, pull_number: int, review_id: int) -> str:
 
 def repository_thread_key(repository: str) -> str:
     return f"repo:{repository}"
+
+
+class GitHubSource:
+    """单仓库只读 Source：`normalize` 无副作用；写库只发生在 `poll`。"""
+
+    def __init__(
+        self,
+        store: SupervisorStore,
+        client: GitHubReadClient,
+        *,
+        repository: str,
+        bot_login: str,
+        clock: Clock,
+    ) -> None:
+        self._store = store
+        self._client = client
+        self._repository = repository
+        self._bot_login = bot_login
+        self._clock = clock
+
+    def normalize(self, item: GitHubReadItem) -> SourceEvent | None:
+        kind = TriggerKind(item.kind.value)
+        if kind is TriggerKind.ISSUE:
+            return self._issue(item)
+        if kind is TriggerKind.PULL_REQUEST:
+            return self._pull_request(item)
+        raise SourceSchemaError(f"unsupported kind {item.kind.value}")
+
+    def _issue(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        number = _int_field(resource, "number")
+        key = issue_thread_key(self._repository, number)
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.ISSUE, number, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.ISSUE,
+                external_ref=f"#{number}",
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+        )
+
+    def _pull_request(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        number = _int_field(resource, "number")
+        key = pull_request_thread_key(self._repository, number)
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.PULL_REQUEST, number, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref=f"#{number}",
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+        )
+
+    def _trigger(
+        self,
+        item: GitHubReadItem,
+        kind: TriggerKind,
+        subject: int,
+        actor: str,
+        thread_key: str,
+    ) -> Trigger:
+        external_id = f"github:{self._repository}:{kind.value}:{subject}"
+        return Trigger(
+            id=stable_trigger_id(external_id),
+            external_id=external_id,
+            kind=kind,
+            actor=actor,
+            thread_keys=[thread_key],
+            occurred_at=item.occurred_at,
+            received_at=self._clock.now_ms(),
+            payload={"resource": item.resource, "deleted": item.deleted},
+        )
+
+    def _is_self(self, actor: str) -> bool:
+        return actor.casefold() == self._bot_login.casefold()
+
+
+def _int_field(resource: dict[str, Any], field: str) -> int:
+    value = resource.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SourceSchemaError(f"{field} 必须是整数")
+    return value
+
+
+def _actor(resource: dict[str, Any]) -> str:
+    user = resource.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    if isinstance(login, str) and login:
+        return login
+    actor = resource.get("actor")
+    if isinstance(actor, str) and actor:
+        return actor
+    raise SourceSchemaError("缺少 actor / user.login")
+
+
+def _thread_status(
+    item: GitHubReadItem, resource: dict[str, Any], *, closed_state: str = "closed"
+) -> ThreadStatus:
+    if item.deleted or resource.get("state") == closed_state:
+        return ThreadStatus.CLOSED
+    return ThreadStatus.OPEN
