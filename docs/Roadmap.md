@@ -321,11 +321,15 @@ Channel ← Durable Outbox ← Report / Result ←──────────
 - 仅在需要决策、审批、失败或结果可用时通知人。
 - 在 `observe` 模式下完成足够的真实数据评估，再决定哪些规则可切换 `auto`。
 
-**当前进度（2026-11-08）**：M1 基础层完成（8/8）——ADR-06 Accepted，`supervisor/` 的领域模型、
-`SupervisorStore`（P5 库无损扩展、同连接同事务）与六个只读监管视图落地，CI 心脏覆盖率闸门
-25→28；本地门禁 `715 passed, 6 skipped`（覆盖 98.99%），Python 3.10 / 3.11 / 3.12 一致。
-逐项证据见 [P6 验收账本](acceptance/p6-supervisor-beta.md)。下一步：M2 GitHubSource 与
-Trigger 接入（规格 WP-6.2）。
+**当前进度（2026-11-09）**：M1 基础层（8/8）与 M2 GitHub Source（8/8）完成——M1 落地
+ADR-06、`supervisor/` 领域模型、`SupervisorStore`（P5 库无损扩展、同连接同事务）与六个
+只读监管视图；M2 接入只读 polling：Issue/PR/评论/评审/CI status 标准化为
+Trigger/Thread/Channel，cursor 分页可续、双重去重、错误四分类落 `source_health`，写入
+仍在单个 `BEGIN IMMEDIATE` 事务内；CI 心脏覆盖率闸门 25→28→29。本地门禁
+`749 passed, 6 skipped`（覆盖 98.89%），Python 3.10 / 3.11 / 3.12 一致。逐项证据见
+[P6 验收账本](acceptance/p6-supervisor-beta.md)，部署口径见
+[GitHub Source 指南](guides/supervisor-github-source.md)。下一步：M3 Router Intake、
+Subscription 与 Decision（规格 WP-6.3）。
 
 ---
 

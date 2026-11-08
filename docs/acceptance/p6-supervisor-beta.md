@@ -80,17 +80,33 @@ supervisor。
 
 ### M2：GitHubSource 与 Trigger 接入（规格 WP-6.2）
 
-> **状态：Task 1~7 执行中（2026-11-08 展开）。** 主路径确定为 polling；读客户端沿用 P5 的
+> **状态：M2 收口（Task 1~7 全部完成）。** 主路径为 polling；读客户端沿用 P5 的
 > "协议 + 确定性 fake" 形态，读权限与写权限分离。任务级计划见 §7。
 
-- [ ] **M2-1** `Source` / `ChannelWriter` 协议、Source 错误四分类与 `SourceEvent`/`PollBatch` 记录。
-- [ ] **M2-2** Issue / PR 标准化：稳定 Thread key、`#number` external_ref、bot 身份过滤。
-- [ ] **M2-3** comment / review 映射：issue comment、PR comment、review 会话与 reply Channel。
-- [ ] **M2-4** CI status：有 PR 挂 PR Thread，无 PR 用 repository Thread。
-- [ ] **M2-5** `poll`：cursor 分页、乱序排序、批内去重、删除事件、临时/403/404/schema 错误。
-- [ ] **M2-6** 部署文档：polling 路径、只读权限、cursor 契约与 webhook 后续接法。
-- [ ] **M2-7** CI FOCUS 由 28 扩到 29（新增 `supervisor/source.py`），契约测试同步。
-- [ ] **M2-8** M2 出口：全量门禁、三解释器、L1/约束 1 复核、账本与状态面回填。
+- [x] **M2-1** `Source` / `ChannelWriter` 协议、Source 错误四分类与 `SourceEvent`/`PollBatch` 记录。
+      `tests/unit/test_github_source.py` 起步用例通过；提交 `0c8b9a4`。
+- [x] **M2-2** Issue / PR 标准化：稳定 Thread key、`#number` external_ref、bot 身份过滤。
+      新增 Issue/PR 与 bot 过滤用例；提交 `082c7d4`。
+- [x] **M2-3** comment / review 映射：issue comment、PR comment、review 会话与 reply Channel。
+      新增评论/评审与 Channel 用例；提交 `88c2faa`。
+- [x] **M2-4** CI status：有 PR 挂 PR Thread，无 PR 用 repository Thread。
+      新增 CI 映射用例；提交 `86f8dcb`。
+- [x] **M2-5** `poll`：cursor 分页、乱序排序、批内去重、删除事件、临时/403/404/schema 错误。
+      `tests/unit/test_github_source.py` 累计 32 passed；提交 `8f5a6b9`。
+- [x] **M2-6** 部署文档：polling 路径、只读权限、cursor 契约与 webhook 后续接法。
+      `docs/guides/supervisor-github-source.md` 7 节全量落盘。
+- [x] **M2-7** CI FOCUS 由 28 扩到 29（新增 `supervisor/source.py`），契约测试同步。
+      `tests/unit/test_ci_focus_gate.py` 1 passed；coverage.xml 实测 `supervisor/source.py`
+      行覆盖率 `96.27%`（≥90%）；提交 `04d6317`。
+- [x] **M2-8** M2 出口：全量门禁、三解释器、L1/约束 1 复核、账本与状态面回填。
+      本地读数（落盘 `/tmp/p6-m2-*.txt` 后读回）：`749 passed, 6 skipped, 0 failed`
+      （19.73s，覆盖 98.89%）；`ruff check` `All checks passed!`；`ruff format --check`
+      `145 files already formatted`；`mypy` `Success: no issues found in 65 source files`；
+      3.10 / 3.11.16 / 3.12.14 均为 `749 passed, 6 skipped`；
+      `git diff 234f620..HEAD --stat -- stableagent/core/` 与
+      `... -- stableagent/orchestration/service.py` 均为 0 行；
+      下层包真实 import `stableagent.supervisor` 的 grep 命中 0 行；`git diff --check` 无输出。
+      本提交完成账本与状态面回填。
 
 ### M3：Router Intake、Subscription 与 Decision（规格 WP-6.3；待 M2 收口后展开）
 
@@ -127,8 +143,9 @@ git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py   # 必须
 
 ## 4. 任务级实施计划说明
 
-M1 展开为 **8 个 Task / 47 个 Step**。每个 Task 独立可验收、独立提交；Task 之间的
-接口在各自 `Interfaces` 块写清。任务级 Step 不计入里程碑步骤。
+M1 展开为 **8 个 Task / 47 个 Step**，M2 展开为 **7 个 Task / 43 个 Step**。每个 Task
+独立可验收、独立提交；Task 之间的接口在各自 `Interfaces` 块写清。任务级 Step 不计入
+里程碑步骤。
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-08）
 
@@ -3540,8 +3557,8 @@ Source 以 `source.schema` 失败，避免死循环。
 | issue | `github:{repo}:issue:{n}` | `issue:{repo}#{n}` | 无 |
 | pull_request | `github:{repo}:pull_request:{n}` | `pr:{repo}#{n}` | 无 |
 | issue_comment | `github:{repo}:issue_comment:{id}` | Issue 或 PR thread | `#n`（ISSUE_COMMENT / PULL_REQUEST_COMMENT） |
-| review_comment | `github:{repo}:review_comment:{id}` | `review:{repo}#{pull}#{review_id}` | `review:{review_id}`（REVIEW_REPLY） |
-| review | `github:{repo}:review:{id}` | `review:{repo}#{pull}#{review_id}` | `review:{review_id}`（REVIEW_REPLY） |
+| review_comment | `github:{repo}:review_comment:{id}` | `review:{repo}#{pull}:{review_id}` | `review:{review_id}`（REVIEW_REPLY） |
+| review | `github:{repo}:review:{id}` | `review:{repo}#{pull}:{review_id}` | `review:{review_id}`（REVIEW_REPLY） |
 | ci_status | `github:{repo}:ci_status:{id}` | 有 PR 用 `pr:{repo}#{n}`，否则 `repo:{repo}` | 无 |
 
 Thread 状态：Issue/PR `state == "closed"`、review `state == "dismissed"` 或删除事件
@@ -3561,7 +3578,7 @@ Thread 状态：Issue/PR `state == "closed"`、review `state == "dismissed"` 或
 | 网络 / 限流 / 5xx | `source.transient` | `degraded` | 下一轮重试，`consecutive_failures` 递增 |
 | 403 | `source.auth` | `failed` | 人工检查 token 与可见性 |
 | 404 | `source.gone` | `failed` | 仓库不可见或事件已删除，停止重试 |
-| 载荷不合约 | `source.schema` | `failed` | 修复映射或 fixture 后再启动 |
+| 载荷不符合契约 | `source.schema` | `failed` | 修复映射或 fixture 后再启动 |
 
 失败时整批不落库；健康记录在抛错前写入，监管视图的 `source_health` 因此能看到原因。
 
@@ -3583,7 +3600,7 @@ P6 Beta 不启用 webhook。后续若接入：
 - [ ] **Step 2: 全量门禁（读数落盘后读回）**
 
 ```bash
-.venv/bin/pytest -q > /tmp/p6-m2-full.txt 2>&1
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p6-m2-full.txt 2>&1
 .venv/bin/ruff check stableagent tests examples benchmarks > /tmp/p6-m2-ruff.txt 2>&1
 .venv/bin/ruff format --check stableagent tests examples benchmarks > /tmp/p6-m2-format.txt 2>&1
 .venv/bin/mypy > /tmp/p6-m2-mypy.txt 2>&1
@@ -3611,7 +3628,8 @@ Expected: 三份末行均为 `0 failed`，passed 数一致（跳过数可不同�
 ```bash
 git diff 234f620..HEAD --stat -- stableagent/core/ > /tmp/p6-m2-l1.txt
 git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py > /tmp/p6-m2-c1.txt
-grep -rn "supervisor" stableagent/core stableagent/orchestration stableagent/control \
+grep -rnE "(from|import) +stableagent\.supervisor" --include='*.py' \
+  stableagent/core stableagent/orchestration stableagent/control \
   stableagent/execution stableagent/integrations > /tmp/p6-m2-imports.txt
 git diff --check > /tmp/p6-m2-check.txt 2>&1
 ```

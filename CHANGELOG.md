@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+### 实现（P6 M2 GitHub Source，2026-11-09）
+- `stableagent/supervisor/source.py`：`Source` / `ChannelWriter` 协议、`SourceEvent` /
+  `PollBatch` 记录与 `source.transient` / `auth` / `gone` / `schema` 四分类；`GitHubSource`
+  把 Issue、PR、issue comment、review comment、review、CI status 标准化为 Thread 与
+  Trigger，稳定 id 由 sha256 派生，bot 身份大小写无关过滤
+- `GitHubSource.poll`：cursor 分页（`max_pages` 默认 10，未读完的 cursor 持久化）、
+  批内与库内 `UNIQUE(source, external_id)` 双重去重、按 `(occurred_at, external_id)`
+  排序、删除事件落 `closed`；Trigger/Thread/Channel/cursor 在同一事务写，失败整批回滚
+- `integrations/github.py`：只读 `GitHubReadKind` / `GitHubReadItem` / `GitHubReadPage` /
+  `GitHubReadClient` 协议与确定性 `FakeGitHubReadClient`；integrations 不 import supervisor
+- 错误健康：`source.transient` 记 `degraded`，其余记 `failed`，均在抛错前写
+  `source_cursors`；监管视图的 `source_health` 可直接看到
+- 新增 [GitHub Source 部署与 cursor 契约](docs/guides/supervisor-github-source.md)：
+  只读权限、polling 主路径、事件映射、去重、错误健康与 webhook 后续接法
+- CI 心脏覆盖率闸门由 28 扩到 29 文件（新增 `supervisor/source.py`）
+- 测试：`749 passed, 6 skipped, 0 failed`、覆盖率 98.89%；`supervisor/source.py`
+  行覆盖率 96.27%；Python 3.10.20 / 3.11.16 / 3.12.14 一致；`stableagent/core/` 与
+  `orchestration/service.py` 对 `234f620` 均 0 行 diff
+- 状态口径：P6 M2 完成 8/8（里程碑 2/6），P6 仍为 Active，**不宣布阶段交付**
+
 ### 实现（P6 M1 基础层，2026-11-08）
 - `stableagent/supervisor/`：`model.py` 的 `Trigger`/`Thread`/`Channel`/`Subscription`/`Decision`/
   `SourceCursor` 六个不可变记录、canonical JSON 与 payload digest；`store.py` 的

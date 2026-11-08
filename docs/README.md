@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-当前主线 **P6：单仓库 Super-Agent Beta 的 M1 基础层已完成**（2026-11-08）——ADR-06 Accepted；`supervisor/` 的领域模型、`SupervisorStore`（P5 库无损扩展、同连接同事务）与六个只读监管视图落地，CI 心脏覆盖率闸门由 25 扩到 28 文件；本地门禁 `715 passed, 6 skipped`（覆盖 98.99%），Python 3.10 / 3.11 / 3.12 三解释器一致，L1 与 `orchestration/service.py` 仍为零 diff。逐项证据写在 [P6 验收账本](acceptance/p6-supervisor-beta.md)。**P5：受控执行与仓库集成已正式收口**（2026-11-08）——2026-11-03 实施计划经维护者确认（ADR-05 Accepted），M1~M4 共 40/40、DoD 46/46；2.6 的 `RUN_COMMAND`→Assignment Report 接线落地后本地门禁 `689 passed, 6 skipped`，收口提交 `380e440` 的远端 CI run `42433929377` 在 Python 3.10 / 3.12 双 job 全绿。**P4：Ticket 编排内核已 60/60 正式收口**（编排内核、离线示例、基准与 18 文件覆盖率闸门落地，远端 CI run 41596839282 在 Python 3.10 / 3.12 双绿，账本见 [P4 验收账本](acceptance/p4-ticket-orchestration.md)）。**P3：Worker Context Runtime 已 52/52 正式收口**（实现、文档、benchmark、ADR-03 与远端 CI 证据齐备，run 41384598912 在 3.10 / 3.12 全绿）。
+当前主线 **P6：单仓库 Super-Agent Beta 的 M2 GitHub Source 已完成**（2026-11-09）——在 M1 基础层之上接入只读 polling：`GitHubSource` 把 Issue/PR/评论/评审/CI status 标准化为 Trigger/Thread/Channel，cursor 分页可续、批内与库内双重去重、错误四分类落 `source_health`，写入仍在单个 `BEGIN IMMEDIATE` 事务内；CI 心脏覆盖率闸门由 28 扩到 29 文件。本地门禁 `749 passed, 6 skipped`（覆盖 98.89%），`supervisor/source.py` 行覆盖率 96.27%，Python 3.10 / 3.11 / 3.12 三解释器一致，L1 与 `orchestration/service.py` 仍为零 diff。逐项证据写在 [P6 验收账本](acceptance/p6-supervisor-beta.md)。**P5：受控执行与仓库集成已正式收口**（2026-11-08）——2026-11-03 实施计划经维护者确认（ADR-05 Accepted），M1~M4 共 40/40、DoD 46/46；2.6 的 `RUN_COMMAND`→Assignment Report 接线落地后本地门禁 `689 passed, 6 skipped`，收口提交 `380e440` 的远端 CI run `42433929377` 在 Python 3.10 / 3.12 双 job 全绿。**P4：Ticket 编排内核已 60/60 正式收口**（编排内核、离线示例、基准与 18 文件覆盖率闸门落地，远端 CI run 41596839282 在 Python 3.10 / 3.12 双绿，账本见 [P4 验收账本](acceptance/p4-ticket-orchestration.md)）。**P3：Worker Context Runtime 已 52/52 正式收口**（实现、文档、benchmark、ADR-03 与远端 CI 证据齐备，run 41384598912 在 3.10 / 3.12 全绿）。
 
 - 现行范围和阶段顺序：[Roadmap](Roadmap.md)
-- 当前阶段 P6：[实施规格](specs/p6-single-repository-super-agent-beta.md) → [验收账本与实施计划](acceptance/p6-supervisor-beta.md) → [ADR-06](design-decisions/06-super-agent-router.md)；升级/降级见 [supervisor 迁移指南](guides/supervisor-migration.md)
+- 当前阶段 P6：[实施规格](specs/p6-single-repository-super-agent-beta.md) → [验收账本与实施计划](acceptance/p6-supervisor-beta.md) → [ADR-06](design-decisions/06-super-agent-router.md)；[GitHub Source 部署与 cursor 契约](guides/supervisor-github-source.md)；升级/降级见 [supervisor 迁移指南](guides/supervisor-migration.md)
 - 已完成阶段 P5：[实施规格](specs/p5-guarded-execution-repository-integration.md) → [验收账本（已完成证据）](acceptance/p5-guarded-execution.md) → [ADR-05](design-decisions/05-guarded-execution.md)
 - 已完成阶段 P4：[实施规格](specs/p4-ticket-orchestration-kernel.md) → [验收账本（已完成证据）](acceptance/p4-ticket-orchestration.md) → [ADR-04](design-decisions/04-ticket-orchestration.md)
 - 已完成阶段 P3：[实施规格](specs/p3-worker-context-runtime.md) 与 [验收账本（已完成证据）](acceptance/p3-context-engineering.md)
@@ -49,7 +49,7 @@
 | P3 | 完成 | [P3 Spec](specs/p3-worker-context-runtime.md) | [P3 Acceptance](acceptance/p3-context-engineering.md) | [ADR-03](design-decisions/03-context-engineering.md) |
 | P4 | 完成（DoD 60/60，里程碑 30/30） | [P4 Spec](specs/p4-ticket-orchestration-kernel.md) | [P4 Acceptance](acceptance/p4-ticket-orchestration.md) | [ADR-04](design-decisions/04-ticket-orchestration.md) |
 | P5 | 完成（DoD 46/46，里程碑 40/40；远端 CI run 42433929377 在 3.10/3.12 双绿） | [P5 Spec](specs/p5-guarded-execution-repository-integration.md) | [P5 Acceptance](acceptance/p5-guarded-execution.md) | [ADR-05](design-decisions/05-guarded-execution.md) |
-| P6 | 进行中（M1 完成，8/8；里程碑 1/6） | [P6 Spec](specs/p6-single-repository-super-agent-beta.md) | [P6 Acceptance](acceptance/p6-supervisor-beta.md) | [ADR-06](design-decisions/06-super-agent-router.md) |
+| P6 | 进行中（M2 完成，8/8；里程碑 2/6） | [P6 Spec](specs/p6-single-repository-super-agent-beta.md) | [P6 Acceptance](acceptance/p6-supervisor-beta.md) | [ADR-06](design-decisions/06-super-agent-router.md) |
 | P7 | 未来 | [P7 Spec](specs/p7-production-hardening-ecosystem.md) | 待阶段启动时创建 | ADR-07，待创建 |
 
 ## 文档维护
