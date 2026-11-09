@@ -25,8 +25,12 @@ from stableagent.orchestration.outbox import EffectDispatcher, EffectHandler
 from stableagent.orchestration.scheduler import Scheduler
 from stableagent.orchestration.service import OrchestrationService, RecoverySummary
 from stableagent.supervisor.assessor import ObserveOnlyAssessor
-from stableagent.supervisor.model import SourceCursor
-from stableagent.supervisor.router import RouterConfig, RouterService
+from stableagent.supervisor.model import RuntimeControl, SourceCursor
+from stableagent.supervisor.router import (
+    RouterConfig,
+    RouterPermissionError,
+    RouterService,
+)
 from stableagent.supervisor.service import SupervisorService
 from stableagent.supervisor.source import PollBatch, Source, SourceError
 from stableagent.supervisor.store import SupervisorStore
@@ -97,6 +101,7 @@ class RuntimeStatus(BaseModel):
 @dataclass(frozen=True)
 class RuntimeBundle:
     runtime: Runtime
+    controller: RuntimeController
     router: RouterService
     service: SupervisorService
     orchestration: OrchestrationService
@@ -212,6 +217,20 @@ class Runtime:
             pending_approvals=len(self._store.list_pending_approvals()),
         )
 
+    def pause(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        return self._store.set_runtime_paused(
+            True, actor=actor, now=self._clock.now_ms(), reason=reason
+        )
+
+    def resume(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        control = self._store.set_runtime_paused(
+            False, actor=actor, now=self._clock.now_ms(), reason=reason
+        )
+        if self._started:
+            self._renew_lock()
+            self._route_pending()
+        return control
+
     def _renew_lock(self) -> None:
         if not self._store.heartbeat_runtime_lock(
             self._config.owner, now=self._clock.now_ms(), ttl_ms=self._config.lock_ttl_ms
@@ -270,11 +289,43 @@ def build_runtime(
         config=config,
         clock=clock,
     )
+    controller = RuntimeController(runtime, service, orchestration)
     return RuntimeBundle(
         runtime=runtime,
+        controller=controller,
         router=router,
         service=service,
         orchestration=orchestration,
         scheduler=scheduler,
         effects=effects,
     )
+
+
+class RuntimeController:
+    """运行控制命令面：只做 operator 校验与委托，业务规则仍在既有服务层。"""
+
+    def __init__(
+        self,
+        runtime: Runtime,
+        supervisor: SupervisorService,
+        orchestration: OrchestrationService,
+    ) -> None:
+        self._runtime = runtime
+        self._supervisor = supervisor
+        self._orchestration = orchestration
+
+    def status(self) -> RuntimeStatus:
+        return self._runtime.status()
+
+    def pause_processing(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        self._require_operator(actor)
+        return self._runtime.pause(actor=actor, reason=reason)
+
+    def resume_processing(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        self._require_operator(actor)
+        return self._runtime.resume(actor=actor, reason=reason)
+
+    def _require_operator(self, actor: str) -> None:
+        allowed = {name.casefold() for name in self._runtime.config.router.operators}
+        if actor.casefold() not in allowed:
+            raise RouterPermissionError(f"actor 不是 operator：{actor}")

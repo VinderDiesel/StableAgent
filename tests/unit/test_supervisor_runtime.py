@@ -11,7 +11,7 @@ from stableagent.control.model import Action
 from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
 from stableagent.orchestration.model import EffectKind
 from stableagent.supervisor.model import Thread, ThreadKind, Trigger, TriggerKind
-from stableagent.supervisor.router import RouterConfig
+from stableagent.supervisor.router import RouterConfig, RouterPermissionError
 from stableagent.supervisor.runtime import (
     RuntimeConfig,
     RuntimeLockError,
@@ -228,3 +228,40 @@ async def test_status_reports_runtime_facts_without_start(env) -> None:
     online = bundle.runtime.status()
     assert online.started is True and online.owner == "test-runtime"
     assert online.queued_tickets == 0 and online.source_health == ()
+
+
+async def test_pause_persists_and_resume_routes_pending_triggers(env) -> None:
+    bundle, store, _, source, _ = env
+    bundle.runtime.start()
+    control = bundle.controller.pause_processing(actor="alice", reason="maintenance")
+    assert control.paused is True
+    assert store.get_runtime_control().reason == "maintenance"
+    source.feed(_event())
+
+    paused_step = await bundle.runtime.step()
+    assert paused_step.received == 1 and store.list_decisions() == []
+
+    resumed = bundle.controller.resume_processing(actor="alice")
+    assert resumed.paused is False
+    assert len(store.list_decisions()) == 1  # 暂停期间记录的 Trigger 立即补路由
+
+
+async def test_pause_control_is_visible_in_status(env) -> None:
+    bundle, _, _, _, _ = env
+    bundle.controller.pause_processing(actor="alice", reason="maintenance")
+
+    status = bundle.controller.status()
+
+    assert status.paused is True
+    assert status.paused_by == "alice" and status.reason == "maintenance"
+    assert status.paused_at is not None
+
+
+async def test_control_commands_are_operator_gated_case_insensitively(env) -> None:
+    bundle, _, _, _, _ = env
+    with pytest.raises(RouterPermissionError):
+        bundle.controller.pause_processing(actor="mallory")
+    control = bundle.controller.pause_processing(actor="ALICE")
+    assert control.paused is True and control.actor == "ALICE"
+    with pytest.raises(RouterPermissionError):
+        bundle.controller.resume_processing(actor="mallory")
