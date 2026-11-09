@@ -213,6 +213,10 @@ class GitHubSource:
         thread_key: str,
     ) -> Trigger:
         external_id = f"github:{self._repository}:{kind.value}:{subject}"
+        payload: dict[str, Any] = {"resource": item.resource, "deleted": item.deleted}
+        request = self._request_block(item.resource)
+        if request is not None:
+            payload["request"] = request
         return Trigger(
             id=stable_trigger_id(external_id),
             external_id=external_id,
@@ -221,8 +225,21 @@ class GitHubSource:
             thread_keys=[thread_key],
             occurred_at=item.occurred_at,
             received_at=self._clock.now_ms(),
-            payload={"resource": item.resource, "deleted": item.deleted},
+            payload=payload,
         )
+
+    def _request_block(self, resource: dict[str, Any]) -> dict[str, Any] | None:
+        """只把"有人写了正文"的事件标成候选请求；mention 命中不决定 action 集合（L4）。"""
+        body = resource.get("body")
+        if not isinstance(body, str) or not body:
+            return None
+        handle = self._bot_login.removesuffix("[bot]")
+        url = resource.get("html_url")
+        return {
+            "text": body,
+            "mentioned": f"@{handle}".casefold() in body.casefold(),
+            "url": url if isinstance(url, str) else None,
+        }
 
     def _is_self(self, actor: str) -> bool:
         return actor.casefold() == self._bot_login.casefold()

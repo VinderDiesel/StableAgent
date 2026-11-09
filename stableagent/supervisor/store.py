@@ -372,6 +372,21 @@ class SupervisorStore(Store):
         ).fetchall()
         return [self._row_to_decision(row) for row in rows]
 
+    def next_decision_attempt(self, request_digest: str) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(attempt), 0) + 1 FROM decisions WHERE request_digest = ?",
+            (request_digest,),
+        ).fetchone()
+        return int(row[0])
+
+    def find_accepted_decision(self, request_digest: str) -> Decision | None:
+        row = self._conn.execute(
+            "SELECT * FROM decisions WHERE request_digest = ? AND outcome = ?"
+            " ORDER BY attempt ASC LIMIT 1",
+            (request_digest, DecisionOutcome.ACCEPT.value),
+        ).fetchone()
+        return self._row_to_decision(row) if row else None
+
     def get_source_cursor(self, source: str) -> SourceCursor | None:
         row = self._conn.execute(
             "SELECT * FROM source_cursors WHERE source = ?", (source,)

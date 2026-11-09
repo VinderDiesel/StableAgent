@@ -257,3 +257,55 @@ def test_source_cursor_upsert_keeps_one_row(store: SupervisorStore) -> None:
         SourceHealth.DEGRADED,
     )
     assert [c.source for c in store.list_source_cursors()] == ["github"]
+
+
+def test_next_decision_attempt_counts_per_digest(store: SupervisorStore) -> None:
+    assert store.next_decision_attempt("digest-a") == 1
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=[],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=["x"],
+            policy_version="p5-v1",
+            request_digest="digest-a",
+            attempt=1,
+            created_at=1,
+        )
+    )
+    assert store.next_decision_attempt("digest-a") == 2
+    assert store.next_decision_attempt("digest-b") == 1
+
+
+def test_find_accepted_decision_skips_observe_rows(store: SupervisorStore) -> None:
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=[],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=["x"],
+            policy_version="p5-v1",
+            request_digest="digest-a",
+            attempt=1,
+            created_at=1,
+        )
+    )
+    store.insert_decision(
+        Decision(
+            id="dc-2",
+            trigger_ids=[],
+            outcome=DecisionOutcome.ACCEPT,
+            strength=DecisionStrength.EXPLICIT,
+            reason_codes=["admitted"],
+            policy_version="p5-v1",
+            request_digest="digest-a",
+            attempt=2,
+            created_at=2,
+        )
+    )
+    found = store.find_accepted_decision("digest-a")
+    assert found is not None
+    assert found.id == "dc-2"
+    assert store.find_accepted_decision("digest-missing") is None

@@ -567,3 +567,50 @@ async def test_poll_writes_state_in_a_single_transaction(
     await source.poll(limit=10)
 
     assert seen == [True]
+
+
+def test_comment_body_carries_a_normalized_request_signal(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    event = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {
+                "id": 21,
+                "issue_number": 7,
+                "user": {"login": "alice"},
+                "body": "please @SA-Agent take a look",
+                "html_url": "https://github.com/owner/repo/issues/7#issuecomment-21",
+            },
+        )
+    )
+    assert event is not None
+    assert event.trigger.payload["request"] == {
+        "text": "please @SA-Agent take a look",
+        "mentioned": True,
+        "url": "https://github.com/owner/repo/issues/7#issuecomment-21",
+    }
+
+
+def test_plain_body_and_ci_status_have_no_false_mention(tmp_path: pathlib.Path) -> None:
+    source, _, _ = _source(tmp_path)
+    comment = source.normalize(
+        _read_item(
+            GitHubReadKind.ISSUE_COMMENT,
+            {
+                "id": 22,
+                "issue_number": 7,
+                "user": {"login": "alice"},
+                "body": "unrelated note",
+            },
+        )
+    )
+    ci = source.normalize(
+        _read_item(
+            GitHubReadKind.CI_STATUS,
+            {"id": 501, "sha": "abc123", "state": "success", "pull_number": 9},
+        )
+    )
+    assert comment is not None and ci is not None
+    assert comment.trigger.payload["request"]["mentioned"] is False
+    assert comment.trigger.payload["request"]["url"] is None
+    assert "request" not in ci.trigger.payload
