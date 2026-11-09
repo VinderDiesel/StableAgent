@@ -128,8 +128,19 @@ class ApprovalService:
         )
         return [_from_row(row) for row in rows]
 
-    def decide(self, approval_id: str, approve: bool, by: str) -> ApprovalRequest:
-        """pending → approved/denied 一次性翻转；终态再决定是错误，不做"改判"。"""
+    def decide(
+        self,
+        approval_id: str,
+        approve: bool,
+        by: str,
+        *,
+        effect: Effect | None = None,
+    ) -> ApprovalRequest:
+        """pending → approved/denied 一次性翻转；approve 时可在同一事务内入队 effect。
+
+        `Store.enqueue_effect` 自己不开事务，所以这里只开一个 BEGIN IMMEDIATE：任一步
+        失败，审批状态与 effect 一起回滚，不存在"已批准、未入队"的窗口（L3）。
+        """
         current = self.get(approval_id)
         if current is None:
             raise UnknownApprovalError(approval_id)
@@ -141,6 +152,8 @@ class ApprovalService:
             self._store.update_approval(
                 approval_id, status=status.value, decided_by=by, decided_at=now
             )
+            if approve and effect is not None:
+                self._store.enqueue_effect(effect)
             if not approve:
                 self._fail_running_assignment(current.assignment_id, now)
         return current.model_copy(update={"status": status, "decided_by": by, "decided_at": now})

@@ -7,9 +7,17 @@ from typing import Any
 
 import pytest
 
-from stableagent.control.model import Action
+from stableagent.control.approval import ApprovalService
+from stableagent.control.model import Action, ApprovalStatus
 from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
-from stableagent.orchestration.model import EffectKind, Report, ReportKind, TicketStatus
+from stableagent.orchestration.model import (
+    Effect,
+    EffectKind,
+    EffectState,
+    Report,
+    ReportKind,
+    TicketStatus,
+)
 from stableagent.supervisor.assessor import ObserveOnlyAssessor
 from stableagent.supervisor.model import (
     AutonomyMode,
@@ -123,7 +131,16 @@ def _build_service(
         clock=clock,
         ids=ids,
     )
-    return SupervisorService(store, policy, router, clock=clock, ids=ids, audit=audit)
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    return SupervisorService(
+        store,
+        policy,
+        router,
+        clock=clock,
+        ids=ids,
+        audit=audit,
+        approvals=approvals,
+    )
 
 
 def _accept(service: SupervisorService, store: SupervisorStore):
@@ -434,3 +451,53 @@ def test_resume_audits_admission_and_launch_revalidation(make_service, store) ->
     assert audit.admissions[0][0].admitted is True
     assert [item[1] for item in audit.revalidations] == ["launch"]
     assert audit.revalidations[0][3] == ticket.id
+
+
+def test_stop_revokes_pending_approvals(service, store, clock) -> None:
+    ticket = _accept(service, store)
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approvals.submit(ticket.id, Action.COMMENT_ISSUE, "d-1", "notification:accepted")
+
+    service.stop(ticket.id, actor="alice")
+
+    assert approvals.for_ticket(ticket.id, status=ApprovalStatus.PENDING) == []
+
+
+def test_retry_effect_only_accepts_failed_rows(service, store, clock) -> None:
+    store.enqueue_effect(
+        Effect(
+            id="ef-failed",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="notify:tk:accepted",
+            payload={"ticket_id": "tk-1"},
+            state=EffectState.FAILED,
+            attempts=3,
+            due_at=1,
+            last_error="boom",
+        )
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-pending",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="notify:tk:result",
+            payload={"ticket_id": "tk-1"},
+            state=EffectState.PENDING,
+            due_at=1,
+        )
+    )
+    clock.advance(10)
+
+    updated = service.retry_effect("ef-failed", actor="alice")
+
+    assert updated.state is EffectState.PENDING
+    assert updated.attempts == 0
+    assert updated.due_at == clock.now_ms()
+    assert updated.last_error is None
+    assert updated.idempotency_key == "notify:tk:accepted"
+    with pytest.raises(RouterStateError):
+        service.retry_effect("ef-pending", actor="alice")
+    with pytest.raises(RouterNotFoundError):
+        service.retry_effect("ef-missing", actor="alice")
+    with pytest.raises(RouterPermissionError):
+        service.retry_effect("ef-failed", actor="mallory")

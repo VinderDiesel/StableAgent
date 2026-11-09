@@ -6,6 +6,7 @@ receive / reevaluate 留在 RouterService；命令层只做 Ticket / Subscriptio
 
 from __future__ import annotations
 
+from stableagent.control.approval import ApprovalService
 from stableagent.control.audit import AuditWriter
 from stableagent.control.model import ExplicitRequest
 from stableagent.control.policy import StaticPolicy
@@ -16,6 +17,7 @@ from stableagent.orchestration.model import (
     Clock,
     Effect,
     EffectKind,
+    EffectState,
     IdFactory,
     Ticket,
     TicketAction,
@@ -66,6 +68,7 @@ class SupervisorService:
         clock: Clock,
         ids: IdFactory,
         audit: AuditWriter | None = None,
+        approvals: ApprovalService | None = None,
     ) -> None:
         self._store = store
         self._policy = policy
@@ -73,6 +76,7 @@ class SupervisorService:
         self._clock = clock
         self._ids = ids
         self._audit = audit
+        self._approvals = approvals
 
     @property
     def router(self) -> RouterService:
@@ -80,6 +84,27 @@ class SupervisorService:
 
     def receive(self, trigger: Trigger) -> Reception:
         return self._router.receive(trigger)
+
+    def retry_effect(self, effect_id: str, *, actor: str) -> Effect:
+        """只把 FAILED effect 改回 PENDING；原幂等键与 payload 不变（at-least-once）。"""
+        self._require_operator(actor)
+        effect = self._store.get_effect(effect_id)
+        if effect is None:
+            raise RouterNotFoundError(f"effect 不存在：{effect_id}")
+        if effect.state is not EffectState.FAILED:
+            raise RouterStateError(f"retry_effect 只接受 FAILED：{effect.state.value}")
+        now = self._clock.now_ms()
+        updated = effect.model_copy(
+            update={
+                "state": EffectState.PENDING,
+                "attempts": 0,
+                "due_at": now,
+                "last_error": None,
+            }
+        )
+        with self._store.transaction():
+            self._store.update_effect(updated)
+        return updated
 
     def reevaluate(self, trigger_id: str, *, actor: str) -> Decision:
         self._require_operator(actor)
@@ -139,6 +164,8 @@ class SupervisorService:
         self._require_operator(actor)
         with self._store.transaction():
             ticket = self._require_ticket(ticket_id)
+            if self._approvals is not None:
+                self._approvals.revoke_pending(ticket_id)
             now = self._clock.now_ms()
             if ticket.status is TicketStatus.CANCELLED:
                 return ticket

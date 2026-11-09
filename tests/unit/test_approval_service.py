@@ -13,6 +13,9 @@ from stableagent.control.model import Action, ApprovalStatus, Resource, resource
 from stableagent.orchestration.model import (
     Assignment,
     AssignmentStatus,
+    Effect,
+    EffectKind,
+    EffectState,
     Ticket,
     TicketStatus,
 )
@@ -319,3 +322,57 @@ def test_denial_without_a_running_assignment_is_still_decidable(
     approval = approvals.submit(TICKET, Action.PUSH_BRANCH, _digest(BRANCH_A), "high_risk")
     approvals.decide(approval.id, False, "octocat")
     assert approvals.get(approval.id).status is ApprovalStatus.DENIED
+
+
+def test_approve_enqueues_effect_in_the_same_transaction(store, clock) -> None:
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.COMMENT_ISSUE, "d-1", "notification:accepted")
+    effect = Effect(
+        id="ef-1",
+        kind=EffectKind.GITHUB_COMMENT,
+        idempotency_key="notify:tk-0001:accepted",
+        payload={"ticket_id": TICKET},
+        due_at=clock.now_ms(),
+    )
+
+    decided = approvals.decide(approval.id, True, "alice", effect=effect)
+
+    assert decided.status is ApprovalStatus.APPROVED
+    stored = store.get_effect("ef-1")
+    assert stored is not None and stored.state is EffectState.PENDING
+
+
+def test_approve_rolls_back_when_effect_enqueue_fails(store, clock, monkeypatch) -> None:
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.COMMENT_ISSUE, "d-1", "notification:accepted")
+    effect = Effect(
+        id="ef-1",
+        kind=EffectKind.GITHUB_COMMENT,
+        idempotency_key="notify:tk-0001:accepted",
+        due_at=clock.now_ms(),
+    )
+
+    def boom(_effect):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(store, "enqueue_effect", boom)
+    with pytest.raises(RuntimeError):
+        approvals.decide(approval.id, True, "alice", effect=effect)
+
+    assert approvals.get(approval.id).status is ApprovalStatus.PENDING
+
+
+def test_deny_never_enqueues_the_supplied_effect(store, clock) -> None:
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.COMMENT_ISSUE, "d-1", "notification:accepted")
+    effect = Effect(
+        id="ef-1",
+        kind=EffectKind.GITHUB_COMMENT,
+        idempotency_key="notify:tk-0001:accepted",
+        due_at=clock.now_ms(),
+    )
+
+    decided = approvals.decide(approval.id, False, "alice", effect=effect)
+
+    assert decided.status is ApprovalStatus.DENIED
+    assert store.get_effect("ef-1") is None
