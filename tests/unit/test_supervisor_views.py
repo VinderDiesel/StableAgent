@@ -26,11 +26,15 @@ from stableagent.supervisor.model import (
     DecisionStrength,
     SourceCursor,
     SourceHealth,
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
     Trigger,
     TriggerKind,
 )
 from stableagent.supervisor.store import SupervisorStore
-from stableagent.supervisor.views import SupervisorViews
+from stableagent.supervisor.views import SupervisorViews, thread_url
 from tests.support import FixedClock
 
 
@@ -181,3 +185,154 @@ def test_ticket_timeline_uses_sanctioned_summaries_only(store: SupervisorStore) 
     rendered = json.dumps([e.model_dump() for e in events])
     assert "exit=0" in rendered
     assert "RAW-SECRET-INPUT" not in rendered and "SECRET-TASK" not in rendered
+
+
+def test_status_sections_group_attention_health_and_queue(store: SupervisorStore) -> None:
+    waiting = _ticket(store, "tk-wait", TicketStatus.WAITING)
+    running = _ticket(store, "tk-run", TicketStatus.RUNNING)
+    store.insert_approval(
+        id="ap-1",
+        ticket_id=waiting.id,
+        action="comment_issue",
+        resource_digest="d-1",
+        reason="notification:attention",
+        requested_at=1,
+    )
+    store.insert_assignment(
+        Assignment(id="as-1", ticket_id=running.id, status=AssignmentStatus.RUNNING)
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-1",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="k-1",
+            payload={"assignment_id": "as-1"},
+            state=EffectState.PENDING,
+            due_at=0,
+        )
+    )
+    store.put_source_cursor(SourceCursor(source="github", cursor="9"))
+
+    sections = SupervisorViews(store, clock=FixedClock()).status_sections()
+
+    assert [(item.priority, item.target_id) for item in sections.attention] == [
+        (0, "ap-1"),
+        (2, "tk-wait"),
+    ]
+    assert [cursor.source for cursor in sections.source_health] == ["github"]
+    assert sections.queue.queued_tickets == 0
+    assert sections.queue.running_assignments == 1
+    assert sections.queue.due_effects == 1
+    assert sections.queue.failed_effects == 0
+    assert sections.queue.pending_approvals == 1
+
+
+def test_attention_items_carry_targets_actions_and_links(store: SupervisorStore) -> None:
+    waiting = _ticket(store, "tk-wait", TicketStatus.WAITING)
+    store.upsert_thread(
+        Thread(
+            key="issue:o/r#1",
+            repository="o/r",
+            kind=ThreadKind.ISSUE,
+            external_ref="#1",
+            last_trigger_at=1,
+        )
+    )
+    store.insert_subscription(
+        Subscription(
+            id="sb-1",
+            ticket_id=waiting.id,
+            thread_key="issue:o/r#1",
+            mode=SubscriptionMode.OWN,
+            created_at=1,
+        )
+    )
+    store.insert_approval(
+        id="ap-1",
+        ticket_id=waiting.id,
+        action="comment_issue",
+        resource_digest="d-1",
+        reason="notification:attention",
+        requested_at=1,
+    )
+
+    items = SupervisorViews(store).needs_attention()
+    approval = next(item for item in items if item.source == "approval")
+
+    assert approval.target_id == "ap-1"
+    assert approval.actions == ("approve", "deny", "stop")
+    assert approval.needs == "approve or deny the pending external write"
+    assert approval.why == "comment_issue requires approval"
+    assert approval.ticket_link == "https://github.com/o/r/issues/1"
+    assert approval.thread_link == approval.ticket_link
+
+
+def test_attention_links_stay_empty_without_a_live_subscription(
+    store: SupervisorStore,
+) -> None:
+    waiting = _ticket(store, "tk-wait", TicketStatus.WAITING)
+    store.insert_approval(
+        id="ap-1",
+        ticket_id=waiting.id,
+        action="comment_issue",
+        resource_digest="d-1",
+        reason="notification:attention",
+        requested_at=1,
+    )
+
+    approval = next(
+        item for item in SupervisorViews(store).needs_attention() if item.source == "approval"
+    )
+
+    assert approval.ticket_link is None and approval.thread_link is None
+
+
+def test_thread_url_maps_issue_pull_request_review_and_repository() -> None:
+    assert (
+        thread_url(
+            Thread(
+                key="issue:o/r#7",
+                repository="o/r",
+                kind=ThreadKind.ISSUE,
+                external_ref="#7",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r/issues/7"
+    )
+    assert (
+        thread_url(
+            Thread(
+                key="pr:o/r#8",
+                repository="o/r",
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref="#8",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r/pull/8"
+    )
+    assert (
+        thread_url(
+            Thread(
+                key="review:o/r#9:42",
+                repository="o/r",
+                kind=ThreadKind.REVIEW,
+                external_ref="review:42",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r"
+    )
+    assert (
+        thread_url(
+            Thread(
+                key="repo:o/r",
+                repository="o/r",
+                kind=ThreadKind.REPOSITORY,
+                external_ref="o/r",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r"
+    )

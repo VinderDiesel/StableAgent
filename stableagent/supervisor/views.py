@@ -10,8 +10,18 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from stableagent.orchestration.model import TicketStatus
-from stableagent.supervisor.model import SourceCursor
+from stableagent.orchestration.model import (
+    AssignmentStatus,
+    Clock,
+    SystemClock,
+    TicketStatus,
+)
+from stableagent.supervisor.model import (
+    SourceCursor,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+)
 from stableagent.supervisor.store import SupervisorStore
 
 
@@ -20,8 +30,14 @@ class AttentionItem(BaseModel):
 
     priority: int
     source: Literal["approval", "failed_effect", "waiting_ticket", "ready_ticket"]
-    ticket_id: str | None
-    detail: str
+    ticket_id: str | None = None
+    target_id: str = ""
+    needs: str = ""
+    why: str = ""
+    actions: tuple[str, ...] = ()
+    ticket_link: str | None = None
+    thread_link: str | None = None
+    detail: str = ""
 
 
 class TicketSummary(BaseModel):
@@ -60,46 +76,140 @@ _OPEN_STATUSES = (
     TicketStatus.BLOCKED,
 )
 
+_ACTIONS_BY_SOURCE: dict[str, tuple[str, ...]] = {
+    "approval": ("approve", "deny", "stop"),
+    "failed_effect": ("retry", "stop"),
+    "waiting_ticket": ("stop",),
+    "ready_ticket": ("stop",),
+}
+_NEEDS_BY_SOURCE = {
+    "approval": "approve or deny the pending external write",
+    "failed_effect": "retry or stop the failed effect",
+    "waiting_ticket": "reply to the ticket or stop it",
+    "ready_ticket": "review the result or stop it",
+}
+
+
+class QueueCounts(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    queued_tickets: int
+    running_assignments: int
+    due_effects: int
+    failed_effects: int
+    pending_approvals: int
+
+
+class StatusSections(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    attention: list[AttentionItem]
+    source_health: list[SourceCursor]
+    queue: QueueCounts
+
+
+def thread_url(thread: Thread) -> str | None:
+    """展示用链接：Issue/PR 指向具体条目，Review/Repository 按规格回落仓库 URL。"""
+    base = f"https://github.com/{thread.repository}"
+    if thread.kind is ThreadKind.ISSUE:
+        return f"{base}/issues/{thread.external_ref.lstrip('#')}"
+    if thread.kind is ThreadKind.PULL_REQUEST:
+        return f"{base}/pull/{thread.external_ref.lstrip('#')}"
+    return base
+
+
+def _live_thread(store: SupervisorStore, ticket_id: str) -> Thread | None:
+    subscriptions = sorted(
+        store.list_subscriptions(ticket_id=ticket_id, live_only=True),
+        key=lambda item: (item.mode is not SubscriptionMode.OWN, item.created_at, item.id),
+    )
+    for subscription in subscriptions:
+        thread = store.get_thread(subscription.thread_key)
+        if thread is not None:
+            return thread
+    return None
+
+
+def ticket_links(store: SupervisorStore, ticket_id: str) -> tuple[str | None, str | None]:
+    thread = _live_thread(store, ticket_id)
+    if thread is None:
+        return None, None
+    url = thread_url(thread)
+    return url, url
+
+
+def ticket_url(store: SupervisorStore, ticket_id: str) -> str | None:
+    return ticket_links(store, ticket_id)[0]
+
 
 class SupervisorViews:
-    def __init__(self, store: SupervisorStore) -> None:
+    def __init__(self, store: SupervisorStore, *, clock: Clock | None = None) -> None:
         self._store = store
+        self._clock = clock or SystemClock()
 
     def needs_attention(self) -> list[AttentionItem]:
         items: list[AttentionItem] = []
         for row in self._store.list_pending_approvals():
+            ticket_link, thread_link = ticket_links(self._store, row["ticket_id"])
             items.append(
                 AttentionItem(
                     priority=0,
                     source="approval",
                     ticket_id=row["ticket_id"],
+                    target_id=row["id"],
+                    needs=_NEEDS_BY_SOURCE["approval"],
+                    why=f"{row['action']} requires approval",
+                    actions=_ACTIONS_BY_SOURCE["approval"],
+                    ticket_link=ticket_link,
+                    thread_link=thread_link,
                     detail=f"approval pending: {row['action']}",
                 )
             )
         for row in self._store.list_failed_effects():
+            ticket_link, thread_link = ticket_links(self._store, row["ticket_id"])
             items.append(
                 AttentionItem(
                     priority=1,
                     source="failed_effect",
                     ticket_id=row["ticket_id"],
+                    target_id=row["effect_id"],
+                    needs=_NEEDS_BY_SOURCE["failed_effect"],
+                    why=row["last_error"] or "effect failed after retries",
+                    actions=_ACTIONS_BY_SOURCE["failed_effect"],
+                    ticket_link=ticket_link,
+                    thread_link=thread_link,
                     detail=f"effect failed: {row['kind']}",
                 )
             )
         for ticket in self._store.list_tickets(status=TicketStatus.WAITING):
+            ticket_link, thread_link = ticket_links(self._store, ticket.id)
             items.append(
                 AttentionItem(
                     priority=2,
                     source="waiting_ticket",
                     ticket_id=ticket.id,
+                    target_id=ticket.id,
+                    needs=_NEEDS_BY_SOURCE["waiting_ticket"],
+                    why="ticket is waiting for human input",
+                    actions=_ACTIONS_BY_SOURCE["waiting_ticket"],
+                    ticket_link=ticket_link,
+                    thread_link=thread_link,
                     detail="ticket waiting for human input",
                 )
             )
         for ticket in self._store.list_tickets(status=TicketStatus.READY):
+            ticket_link, thread_link = ticket_links(self._store, ticket.id)
             items.append(
                 AttentionItem(
                     priority=3,
                     source="ready_ticket",
                     ticket_id=ticket.id,
+                    target_id=ticket.id,
+                    needs=_NEEDS_BY_SOURCE["ready_ticket"],
+                    why="ticket finished and needs review",
+                    actions=_ACTIONS_BY_SOURCE["ready_ticket"],
+                    ticket_link=ticket_link,
+                    thread_link=thread_link,
                     detail="ticket ready for review",
                 )
             )
@@ -133,6 +243,19 @@ class SupervisorViews:
 
     def source_health(self) -> list[SourceCursor]:
         return self._store.list_source_cursors()
+
+    def status_sections(self) -> StatusSections:
+        return StatusSections(
+            attention=self.needs_attention(),
+            source_health=self.source_health(),
+            queue=QueueCounts(
+                queued_tickets=self._store.count_tickets(status=TicketStatus.QUEUED),
+                running_assignments=self._store.count_assignments(status=AssignmentStatus.RUNNING),
+                due_effects=self._store.count_due_effects(self._clock.now_ms()),
+                failed_effects=len(self._store.list_failed_effects()),
+                pending_approvals=len(self._store.list_pending_approvals()),
+            ),
+        )
 
     def thread_timeline(self, thread_key: str) -> list[TimelineEvent]:
         events: list[TimelineEvent] = []
