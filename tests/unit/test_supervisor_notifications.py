@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
-from stableagent.orchestration.model import Report, ReportKind, Ticket
+from pathlib import Path
+
+import pytest
+
+from stableagent.control.approval import ApprovalService
+from stableagent.control.model import Action, ApprovalStatus
+from stableagent.orchestration.model import (
+    Assignment,
+    Mandate,
+    Report,
+    ReportKind,
+    Ticket,
+    TicketStatus,
+)
+from stableagent.supervisor.model import (
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+)
 from stableagent.supervisor.notifications import (
+    NotificationConfig,
+    NotificationDrafter,
     NotificationKind,
     latest_summary,
     render_notification,
 )
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
 
 
 def _ticket(*, title: str = "Fix parser") -> Ticket:
@@ -87,3 +110,172 @@ def test_render_omits_summary_when_expected_report_is_missing() -> None:
     )
 
     assert body == "[Failed] Fix parser\nhttps://github.com/o/r/issues/1"
+
+
+@pytest.fixture
+def env(tmp_path: Path):
+    clock = FixedClock()
+    ids = SequenceIds()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    return store, approvals, clock
+
+
+def _seed_ticket(
+    store: SupervisorStore,
+    *,
+    ticket_id: str = "tk-1",
+    status: TicketStatus = TicketStatus.RUNNING,
+    created_at: int = 1,
+    kind: ThreadKind = ThreadKind.ISSUE,
+    external_ref: str = "#1",
+    subscription: bool = True,
+    assignment: bool = True,
+) -> Ticket:
+    suffix = ticket_id.removeprefix("tk-")
+    mandate_id = f"md-{suffix}"
+    store.insert_mandate(
+        Mandate(
+            id=mandate_id,
+            origin_kind="github",
+            scope="github:o/r:issue:1",
+            granted_at=1,
+            repository="o/r",
+            actions=["comment_issue"],
+        )
+    )
+    ticket = Ticket(
+        id=ticket_id,
+        title="Fix parser",
+        task="SECRET-TASK",
+        created_at=created_at,
+        status=status,
+        mandate_id=mandate_id,
+    )
+    store.insert_ticket(ticket)
+    if assignment:
+        store.insert_assignment(Assignment(id=f"as-{suffix}", ticket_id=ticket_id, attempt=1))
+    if subscription:
+        key = (
+            f"issue:o/r#{external_ref.lstrip('#')}"
+            if kind is ThreadKind.ISSUE
+            else f"pr:o/r#{external_ref.lstrip('#')}"
+        )
+        store.upsert_thread(
+            Thread(
+                key=key,
+                repository="o/r",
+                kind=kind,
+                external_ref=external_ref,
+                last_trigger_at=1,
+            )
+        )
+        store.insert_subscription(
+            Subscription(
+                id=f"sb-{suffix}",
+                ticket_id=ticket_id,
+                thread_key=key,
+                mode=SubscriptionMode.OWN,
+                created_at=1,
+            )
+        )
+    return ticket
+
+
+def test_draft_due_submits_one_pending_comment_approval(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+        repository="o/r",
+        clock=clock,
+    )
+
+    assert drafter.draft_due() == 1
+
+    pending = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)
+    assert len(pending) == 1
+    approval = pending[0]
+    assert approval.action is Action.COMMENT_ISSUE
+    assert approval.reason == "notification:accepted"
+    assert approval.assignment_id == "as-1"
+    draft = drafter.build("tk-1")
+    assert draft is not None
+    assert draft.digest == approval.resource_digest
+    assert draft.payload == {
+        "ticket_id": "tk-1",
+        "assignment_id": "as-1",
+        "stable_id": "github:o/r:issue:1",
+        "repository": "o/r",
+        "url": "https://github.com/o/r/issues/1",
+        "body": "[Accepted] Fix parser\nhttps://github.com/o/r/issues/1",
+    }
+    assert "SECRET-TASK" not in draft.payload["body"]
+
+
+def test_draft_due_is_idempotent_across_steps(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(),
+        repository="o/r",
+        clock=clock,
+    )
+
+    assert drafter.draft_due() == 1
+    assert drafter.draft_due() == 0
+    assert len(approvals.for_ticket("tk-1")) == 1
+
+
+def test_denied_notification_silences_the_ticket(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    drafter = NotificationDrafter(
+        store, approvals, NotificationConfig(), repository="o/r", clock=clock
+    )
+    assert drafter.draft_due() == 1
+    approval = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    approvals.decide(approval.id, False, "alice")
+
+    assert drafter.draft_due() == 0
+    assert approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING) == []
+
+
+def test_draft_due_skips_without_live_subscription_or_assignment(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store, ticket_id="tk-nosub", subscription=False)
+    _seed_ticket(store, ticket_id="tk-noas", assignment=False)
+    drafter = NotificationDrafter(
+        store, approvals, NotificationConfig(), repository="o/r", clock=clock
+    )
+
+    assert drafter.draft_due() == 0
+
+
+def test_draft_due_respects_since_ms(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store, created_at=1)
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(since_ms=100),
+        repository="o/r",
+        clock=clock,
+    )
+
+    assert drafter.draft_due() == 0
+
+
+def test_draft_due_requires_github_mandate_with_comment_action(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    store._conn.execute("UPDATE mandates SET actions = '[]' WHERE id = 'md-1'")
+    drafter = NotificationDrafter(
+        store, approvals, NotificationConfig(), repository="o/r", clock=clock
+    )
+
+    assert drafter.draft_due() == 0

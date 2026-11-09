@@ -152,6 +152,20 @@ def thread_url(thread: Thread) -> str | None:
     return base
 
 
+def comment_url(thread: Thread) -> str | None:
+    """GitHub 评论要落在 Issue/PR 上；Review 回落到其 PR，仓库级 Thread 不草拟。"""
+    base = f"https://github.com/{thread.repository}"
+    if thread.kind is ThreadKind.ISSUE:
+        return f"{base}/issues/{thread.external_ref.lstrip('#')}"
+    if thread.kind is ThreadKind.PULL_REQUEST:
+        return f"{base}/pull/{thread.external_ref.lstrip('#')}"
+    if thread.kind is ThreadKind.REVIEW:
+        tail = thread.key.split("#", 1)[1] if "#" in thread.key else ""
+        number = tail.split(":", 1)[0]
+        return f"{base}/pull/{number}" if number.isdigit() else None
+    return None
+
+
 def _live_thread(store: SupervisorStore, ticket_id: str) -> Thread | None:
     subscriptions = sorted(
         store.list_subscriptions(ticket_id=ticket_id, live_only=True),

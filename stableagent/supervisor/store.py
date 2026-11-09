@@ -15,6 +15,7 @@ from stableagent.orchestration.model import (
     AssignmentStatus,
     Clock,
     EffectState,
+    Ticket,
     TicketStatus,
 )
 from stableagent.orchestration.store import Store
@@ -559,3 +560,17 @@ class SupervisorStore(Store):
             (now_ms, EffectState.PENDING.value, EffectState.RETRY_WAIT.value),
         ).fetchone()
         return int(row[0])
+
+    def list_tickets_for_notifications(self, *, since_ms: int, limit: int = 200) -> list[Ticket]:
+        rows = self._conn.execute(
+            "SELECT id FROM tickets WHERE status IN"
+            " ('queued','running','waiting','ready','failed') AND created_at >= ?"
+            " ORDER BY created_at ASC, id ASC LIMIT ?",
+            (since_ms, limit),
+        ).fetchall()
+        tickets = []
+        for row in rows:
+            ticket = self.get_ticket(row["id"])
+            if ticket is not None:
+                tickets.append(ticket)
+        return tickets
