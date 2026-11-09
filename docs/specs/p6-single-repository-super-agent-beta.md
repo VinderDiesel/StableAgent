@@ -267,11 +267,14 @@ P6 Beta 的发布配置必须锁为 `observe`，并将 `auto` 接口标记为未
 **CLI 与配置**
 
 - 入口 `python -m stableagent.supervisor.cli`，全局参数 `--db`、`--config`、
-  `--operator`。配置为 JSON，字段 `repository`、`operators`、`actions`、
-  `policy_version`（可选）、`notifications`（可选，形状同 `NotificationConfig`）；
-  pydantic `extra="forbid"`，不含任何凭据。`approve` 重算 digest 时使用这份
-  `notifications`，必须与 Runtime 的 `NotificationConfig` 一致；不一致会得到不同
-  digest，命令按退出码 3 拒绝而不写库。
+  `--operator`。配置为 JSON，字段 `repository`、`operators`、`actors`（可选，构造
+  `StaticPolicy` 用）、`actions`、`policy_version`（可选）、`default_validity_ms`
+  （可选，默认 86400000，构造 `StaticPolicy` 用）、`notifications`（可选，形状同
+  `NotificationConfig`）；pydantic `extra="forbid"`，不含任何凭据。`approve` 重算
+  digest 时使用这份 `notifications`，必须与 Runtime 的 `NotificationConfig` 一致；
+  不一致会得到不同 digest，命令按退出码 3 拒绝而不写库。只有 reason 以
+  `notification:` 开头的审批才重算 digest；P5 既有的其它审批没有可重算的正文，
+  按原 digest 直接翻转，不新增校验。
 - 只读命令：`status`、`ticket <id>`、`thread <key>`。
 - 写命令：`approve`、`deny`、`stop`、`retry`、`reevaluate`、`pause`、`resume`；
   每条都必须带与目标完全一致的 `--confirm <目标 ID>`（全局命令为

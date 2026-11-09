@@ -209,8 +209,9 @@ git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py   # 必须
 ## 4. 任务级实施计划说明
 
 M1 展开为 **8 个 Task / 47 个 Step**，M2 展开为 **7 个 Task / 43 个 Step**，M3 展开为
-**7 个 Task / 38 个 Step**，M4 展开为 **7 个 Task / 39 个 Step**。每个 Task 独立可验收、
-独立提交；Task 之间的接口在各自 `Interfaces` 块写清。任务级 Step 不计入里程碑步骤。
+**7 个 Task / 38 个 Step**，M4 展开为 **7 个 Task / 39 个 Step**，M5 展开为
+**8 个 Task / 44 个 Step**。每个 Task 独立可验收、独立提交；Task 之间的接口在各自
+`Interfaces` 块写清。任务级 Step 不计入里程碑步骤。
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-08）
 
@@ -8811,3 +8812,3675 @@ git commit -m "docs: close p6 m4 with runtime recovery evidence"
      两者均只影响排版。
   4. Task 2 的"租约丢失"用例需先让另一 owner 在过期后接管，心跳才会因 owner 变更失败
      （自检阶段已修正，实现未改）。
+
+## 12. M5 任务级实施计划（writing-plans 产出，2026-11-09）
+
+**Goal：** 给单仓库 Beta 一个只读首屏、可审计的写入口与生命周期通知草稿：CLI 只读
+`status/ticket/thread`，所有写命令必须带 `--confirm <target-id>`；通知先草拟成
+`COMMENT_ISSUE` 审批，人工批准后才由 Runtime 的 effect 发出，拒绝后该 Ticket 永久静默。
+
+**Architecture：** 读侧扩 `supervisor/views.py`（首屏段落 + Ticket 详情）；通知模板与
+草拟器落在新 `supervisor/notifications.py`；写侧复用 `ApprovalService` /
+`SupervisorService` / `OrchestrationService`，只补"批准与 effect 同事务"、"失败 effect
+重试"与 stop 撤销；`supervisor/console.py` 只做 operator 门禁、`--confirm` 校验与渲染，
+`supervisor/cli.py` 只做 argparse 与退出码。`Runtime` 在 tick 后、外部 effect 派发前草拟
+通知；不新增 `EffectKind`，通知复用 `GITHUB_COMMENT`。
+
+**Spec：** [P6 实施规格](../specs/p6-single-repository-super-agent-beta.md) WP-6.5 与
+§2.5；设计决议见同文件 `WP-6.5 设计决议（M5，2026-11-09）`。
+
+**边界裁定（维护者已确认）：**
+
+- CLI-only，仅标准库 argparse；不做 TUI/Web，不发任何外部网络请求。
+- 每条写命令必须 `--confirm <target-id>`：approve/deny 传 approval id，stop 传 ticket id，
+  retry 传 effect 或 ticket id，reevaluate 传 trigger id；pause/resume 传字面量
+  `pause`/`resume`。
+- 生命周期通知一律先草拟成 `COMMENT_ISSUE` 审批，人工批准才发；任一 COMMENT_ISSUE
+  被 DENIED 后，该 Ticket 不再草拟任何通知（拒绝即静默）。
+- 飞书/微信/Slack 等 IM 推送与凭据配置留 P7；M5 不读任何凭据、不写 effect payload 之外
+  的通知正文。
+
+**Global Constraints（每个 Task 都隐含遵守）：**
+
+- L1：`stableagent/core/` 对 `234f620` 零 diff；约束 1：`orchestration/service.py` 零字符改动。
+- L2：方向锁 `supervisor → integrations → execution → control → orchestration → core`；
+  既有包不得 import `stableagent.supervisor`；`supervisor` 不直接 import `integrations`。
+- L3：`Store.transaction()` 体内不得出现 `await`；批准 + effect、stop + 撤销都在单一事务内。
+- L4：外部正文只进 digest/Report/TicketInput，不参与授权；通知正文只取 Ticket 标题与
+  结构化 Report 摘要，不进 prompt/日志。
+- L6：不新增 `merge` / `enable_auto_merge` 路径；`EffectKind` 不加成员。
+- L7：不读凭据；CLI 配置 `extra="forbid"`，不出现 token/secret 字段。
+- L8：全部用例离线（Fake Source / 确定性时钟）；定向测试加 `--no-cov`。
+
+---
+
+### Task 1：首屏段落、注意力目标与稳定链接（M5-1）
+
+**Files:**
+- Modify: `stableagent/supervisor/views.py`
+- Test: `tests/unit/test_supervisor_views.py`
+
+**Interfaces:**
+- Consumes: `SupervisorStore.list_pending_approvals()` / `list_failed_effects()` /
+  `list_subscriptions(ticket_id=..., live_only=True)` / `get_thread(key)` /
+  `count_tickets` / `count_assignments` / `count_due_effects`。
+- Produces:
+  - `QueueCounts(queued_tickets, running_assignments, due_effects, failed_effects, pending_approvals)`
+  - `StatusSections(attention, source_health, queue)`
+  - `AttentionItem(priority, source, target_id, ticket_id, needs, why, actions,
+    ticket_link, thread_link, detail)`
+  - `thread_url(thread: Thread) -> str | None`
+  - `SupervisorViews(store, *, clock: Clock | None = None)`
+  - `SupervisorViews.status_sections() -> StatusSections`
+
+- [ ] **Step 1: 写失败测试**
+
+扩写 `tests/unit/test_supervisor_views.py` 顶部既有 import（同一模块保持一条 import，
+避免 ruff `I001`/`F811`）：
+
+```python
+from stableagent.orchestration.model import (
+    Assignment,
+    AssignmentStatus,
+    Effect,
+    EffectKind,
+    EffectState,
+    Mandate,
+    Report,
+    ReportKind,
+    Ticket,
+    TicketInput,
+    TicketStatus,
+)
+from stableagent.supervisor.model import (
+    Decision,
+    DecisionOutcome,
+    DecisionStrength,
+    SourceCursor,
+    SourceHealth,
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.views import SupervisorViews, thread_url
+```
+
+在文件末尾追加：
+
+```python
+def test_status_sections_group_attention_health_and_queue(store: SupervisorStore) -> None:
+    waiting = _ticket(store, "tk-wait", TicketStatus.WAITING)
+    running = _ticket(store, "tk-run", TicketStatus.RUNNING)
+    store.insert_approval(
+        id="ap-1",
+        ticket_id=waiting.id,
+        action="comment_issue",
+        resource_digest="d-1",
+        reason="notification:attention",
+        requested_at=1,
+    )
+    store.insert_assignment(
+        Assignment(id="as-1", ticket_id=running.id, status=AssignmentStatus.RUNNING)
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-1",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="k-1",
+            payload={"assignment_id": "as-1"},
+            state=EffectState.PENDING,
+            due_at=0,
+        )
+    )
+    store.put_source_cursor(SourceCursor(source="github", cursor="9"))
+
+    sections = SupervisorViews(store, clock=FixedClock()).status_sections()
+
+    assert [(item.priority, item.target_id) for item in sections.attention] == [(0, "ap-1")]
+    assert [cursor.source for cursor in sections.source_health] == ["github"]
+    assert sections.queue.queued_tickets == 0
+    assert sections.queue.running_assignments == 1
+    assert sections.queue.due_effects == 1
+    assert sections.queue.failed_effects == 0
+    assert sections.queue.pending_approvals == 1
+
+
+def test_attention_items_carry_targets_actions_and_links(store: SupervisorStore) -> None:
+    waiting = _ticket(store, "tk-wait", TicketStatus.WAITING)
+    store.upsert_thread(
+        Thread(
+            key="issue:o/r#1",
+            repository="o/r",
+            kind=ThreadKind.ISSUE,
+            external_ref="#1",
+            last_trigger_at=1,
+        )
+    )
+    store.insert_subscription(
+        Subscription(
+            id="sb-1",
+            ticket_id=waiting.id,
+            thread_key="issue:o/r#1",
+            mode=SubscriptionMode.OWN,
+            created_at=1,
+        )
+    )
+    store.insert_approval(
+        id="ap-1",
+        ticket_id=waiting.id,
+        action="comment_issue",
+        resource_digest="d-1",
+        reason="notification:attention",
+        requested_at=1,
+    )
+
+    items = SupervisorViews(store).needs_attention()
+    approval = next(item for item in items if item.source == "approval")
+
+    assert approval.target_id == "ap-1"
+    assert approval.actions == ("approve", "deny", "stop")
+    assert approval.needs == "approve or deny the pending external write"
+    assert approval.why == "comment_issue requires approval"
+    assert approval.ticket_link == "https://github.com/o/r/issues/1"
+    assert approval.thread_link == approval.ticket_link
+
+
+def test_attention_links_stay_empty_without_a_live_subscription(
+    store: SupervisorStore,
+) -> None:
+    waiting = _ticket(store, "tk-wait", TicketStatus.WAITING)
+    store.insert_approval(
+        id="ap-1",
+        ticket_id=waiting.id,
+        action="comment_issue",
+        resource_digest="d-1",
+        reason="notification:attention",
+        requested_at=1,
+    )
+
+    approval = next(
+        item for item in SupervisorViews(store).needs_attention() if item.source == "approval"
+    )
+
+    assert approval.ticket_link is None and approval.thread_link is None
+
+
+def test_thread_url_maps_issue_pull_request_review_and_repository() -> None:
+    assert (
+        thread_url(
+            Thread(
+                key="issue:o/r#7",
+                repository="o/r",
+                kind=ThreadKind.ISSUE,
+                external_ref="#7",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r/issues/7"
+    )
+    assert (
+        thread_url(
+            Thread(
+                key="pr:o/r#8",
+                repository="o/r",
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref="#8",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r/pull/8"
+    )
+    assert (
+        thread_url(
+            Thread(
+                key="review:o/r#9:42",
+                repository="o/r",
+                kind=ThreadKind.REVIEW,
+                external_ref="review:42",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r"
+    )
+    assert (
+        thread_url(
+            Thread(
+                key="repo:o/r",
+                repository="o/r",
+                kind=ThreadKind.REPOSITORY,
+                external_ref="o/r",
+                last_trigger_at=1,
+            )
+        )
+        == "https://github.com/o/r"
+    )
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_views.py \
+  > /tmp/p6-m5-t1-red.txt 2>&1; tail -20 /tmp/p6-m5-t1-red.txt
+```
+
+Expected：`ImportError`（`thread_url` 不存在）与 `AttributeError`
+（`status_sections` 不存在），不是断言失败。
+
+- [ ] **Step 3: 实现首屏模型、目标映射与链接**
+
+`stableagent/supervisor/views.py` 顶部 import 扩写为（保持一条 import）：
+
+```python
+from stableagent.orchestration.model import (
+    AssignmentStatus,
+    Clock,
+    SystemClock,
+    TicketStatus,
+)
+from stableagent.supervisor.model import (
+    SourceCursor,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+)
+```
+
+在 `_OPEN_STATUSES` 之后追加：
+
+```python
+_ACTIONS_BY_SOURCE: dict[str, tuple[str, ...]] = {
+    "approval": ("approve", "deny", "stop"),
+    "failed_effect": ("retry", "stop"),
+    "waiting_ticket": ("stop",),
+    "ready_ticket": ("stop",),
+}
+_NEEDS_BY_SOURCE = {
+    "approval": "approve or deny the pending external write",
+    "failed_effect": "retry or stop the failed effect",
+    "waiting_ticket": "reply to the ticket or stop it",
+    "ready_ticket": "review the result or stop it",
+}
+
+
+class QueueCounts(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    queued_tickets: int
+    running_assignments: int
+    due_effects: int
+    failed_effects: int
+    pending_approvals: int
+
+
+class StatusSections(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    attention: list[AttentionItem]
+    source_health: list[SourceCursor]
+    queue: QueueCounts
+
+
+def thread_url(thread: Thread) -> str | None:
+    """展示用链接：Issue/PR 指向具体条目，Review/Repository 按规格回落仓库 URL。"""
+    base = f"https://github.com/{thread.repository}"
+    if thread.kind is ThreadKind.ISSUE:
+        return f"{base}/issues/{thread.external_ref.lstrip('#')}"
+    if thread.kind is ThreadKind.PULL_REQUEST:
+        return f"{base}/pull/{thread.external_ref.lstrip('#')}"
+    return base
+
+
+def _live_thread(store: SupervisorStore, ticket_id: str) -> Thread | None:
+    subscriptions = sorted(
+        store.list_subscriptions(ticket_id=ticket_id, live_only=True),
+        key=lambda item: (item.mode is not SubscriptionMode.OWN, item.created_at, item.id),
+    )
+    for subscription in subscriptions:
+        thread = store.get_thread(subscription.thread_key)
+        if thread is not None:
+            return thread
+    return None
+
+
+def ticket_links(store: SupervisorStore, ticket_id: str) -> tuple[str | None, str | None]:
+    thread = _live_thread(store, ticket_id)
+    if thread is None:
+        return None, None
+    url = thread_url(thread)
+    return url, url
+
+
+def ticket_url(store: SupervisorStore, ticket_id: str) -> str | None:
+    return ticket_links(store, ticket_id)[0]
+```
+
+把既有 `AttentionItem` 替换为（新增字段全部带默认值，既有构造点不受影响）：
+
+```python
+class AttentionItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    priority: int
+    source: Literal["approval", "failed_effect", "waiting_ticket", "ready_ticket"]
+    ticket_id: str | None = None
+    target_id: str = ""
+    needs: str = ""
+    why: str = ""
+    actions: tuple[str, ...] = ()
+    ticket_link: str | None = None
+    thread_link: str | None = None
+    detail: str = ""
+```
+
+把 `SupervisorViews.__init__` 替换为：
+
+```python
+def __init__(self, store: SupervisorStore, *, clock: Clock | None = None) -> None:
+    self._store = store
+    self._clock = clock or SystemClock()
+```
+
+把 `needs_attention` 的四处 `AttentionItem(...)` 依次替换为：
+
+```python
+for row in self._store.list_pending_approvals():
+    ticket_link, thread_link = ticket_links(self._store, row["ticket_id"])
+    items.append(
+        AttentionItem(
+            priority=0,
+            source="approval",
+            ticket_id=row["ticket_id"],
+            target_id=row["id"],
+            needs=_NEEDS_BY_SOURCE["approval"],
+            why=f"{row['action']} requires approval",
+            actions=_ACTIONS_BY_SOURCE["approval"],
+            ticket_link=ticket_link,
+            thread_link=thread_link,
+            detail=f"approval pending: {row['action']}",
+        )
+    )
+for row in self._store.list_failed_effects():
+    ticket_link, thread_link = ticket_links(self._store, row["ticket_id"])
+    items.append(
+        AttentionItem(
+            priority=1,
+            source="failed_effect",
+            ticket_id=row["ticket_id"],
+            target_id=row["effect_id"],
+            needs=_NEEDS_BY_SOURCE["failed_effect"],
+            why=row["last_error"] or "effect failed after retries",
+            actions=_ACTIONS_BY_SOURCE["failed_effect"],
+            ticket_link=ticket_link,
+            thread_link=thread_link,
+            detail=f"effect failed: {row['kind']}",
+        )
+    )
+for ticket in self._store.list_tickets(status=TicketStatus.WAITING):
+    ticket_link, thread_link = ticket_links(self._store, ticket.id)
+    items.append(
+        AttentionItem(
+            priority=2,
+            source="waiting_ticket",
+            ticket_id=ticket.id,
+            target_id=ticket.id,
+            needs=_NEEDS_BY_SOURCE["waiting_ticket"],
+            why="ticket is waiting for human input",
+            actions=_ACTIONS_BY_SOURCE["waiting_ticket"],
+            ticket_link=ticket_link,
+            thread_link=thread_link,
+            detail="ticket waiting for human input",
+        )
+    )
+for ticket in self._store.list_tickets(status=TicketStatus.READY):
+    ticket_link, thread_link = ticket_links(self._store, ticket.id)
+    items.append(
+        AttentionItem(
+            priority=3,
+            source="ready_ticket",
+            ticket_id=ticket.id,
+            target_id=ticket.id,
+            needs=_NEEDS_BY_SOURCE["ready_ticket"],
+            why="ticket finished and needs review",
+            actions=_ACTIONS_BY_SOURCE["ready_ticket"],
+            ticket_link=ticket_link,
+            thread_link=thread_link,
+            detail="ticket ready for review",
+        )
+    )
+```
+
+在 `failed_effects()` 之后追加：
+
+```python
+def status_sections(self) -> StatusSections:
+    return StatusSections(
+        attention=self.needs_attention(),
+        source_health=self.source_health(),
+        queue=QueueCounts(
+            queued_tickets=self._store.count_tickets(status=TicketStatus.QUEUED),
+            running_assignments=self._store.count_assignments(
+                status=AssignmentStatus.RUNNING
+            ),
+            due_effects=self._store.count_due_effects(self._clock.now_ms()),
+            failed_effects=len(self._store.list_failed_effects()),
+            pending_approvals=len(self._store.list_pending_approvals()),
+        ),
+    )
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_views.py \
+  > /tmp/p6-m5-t1-green.txt 2>&1; tail -5 /tmp/p6-m5-t1-green.txt
+.venv/bin/ruff check stableagent/supervisor/views.py tests/unit/test_supervisor_views.py
+.venv/bin/ruff format --check stableagent/supervisor/views.py \
+  tests/unit/test_supervisor_views.py
+```
+
+Expected：`10 passed`；ruff 两项均通过。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/views.py tests/unit/test_supervisor_views.py
+git commit -m "feat: enrich supervisor first screen with targets and links"
+```
+
+---
+
+### Task 2：Ticket 详情与时间线 object_id（M5-2）
+
+**Files:**
+- Modify: `stableagent/supervisor/views.py`
+- Test: `tests/unit/test_supervisor_views.py`
+
+**Interfaces:**
+- Consumes: Task 1 的 `ticket_links` / `ticket_url`；`SupervisorStore.list_assignments` /
+  `list_subscriptions` / `get_ticket` / `list_reports` / `list_inputs` /
+  `list_decisions`。
+- Produces:
+  - `TimelineEvent(at, kind, summary, object_id=None)`
+  - `AssignmentSummary(id, attempt, status, started_at, ended_at, failure)`
+  - `SubscriptionView(id, thread_key, mode, created_at, ended_at)`
+  - `TicketDetail(ticket, mandate_id, assignments, subscriptions, ticket_link,
+    thread_link, timeline)`
+  - `SupervisorViews.ticket_detail(ticket_id) -> TicketDetail`
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_supervisor_views.py` 顶部 import 增加 `AssignmentSummary` 不必要；测试只
+读模型字段。文件末尾追加：
+
+```python
+def test_ticket_detail_lists_assignments_subscriptions_and_timeline(
+    store: SupervisorStore,
+) -> None:
+    ticket = _ticket(store, "tk-1", TicketStatus.RUNNING)
+    store.insert_assignment(
+        Assignment(id="as-1", ticket_id=ticket.id, attempt=1, status=AssignmentStatus.RUNNING)
+    )
+    store.upsert_thread(
+        Thread(
+            key="issue:o/r#1",
+            repository="o/r",
+            kind=ThreadKind.ISSUE,
+            external_ref="#1",
+            last_trigger_at=1,
+        )
+    )
+    store.insert_subscription(
+        Subscription(
+            id="sb-1",
+            ticket_id=ticket.id,
+            thread_key="issue:o/r#1",
+            mode=SubscriptionMode.OWN,
+            created_at=1,
+        )
+    )
+    store.insert_report(
+        Report(
+            id="rp-1",
+            ticket_id=ticket.id,
+            assignment_id="as-1",
+            kind=ReportKind.PROGRESS,
+            summary="local-restricted exit=0",
+            created_at=20,
+        )
+    )
+
+    detail = SupervisorViews(store).ticket_detail(ticket.id)
+
+    assert detail.ticket.id == ticket.id
+    assert detail.mandate_id == ticket.mandate_id
+    assert [(item.id, item.attempt, item.status) for item in detail.assignments] == [
+        ("as-1", 1, AssignmentStatus.RUNNING)
+    ]
+    assert [item.thread_key for item in detail.subscriptions] == ["issue:o/r#1"]
+    assert detail.ticket_link == "https://github.com/o/r/issues/1"
+    assert [event.kind for event in detail.timeline] == ["report"]
+    assert detail.timeline[0].object_id == "rp-1"
+    assert "SECRET-TASK" not in json.dumps(detail.model_dump())
+
+
+def test_ticket_detail_unknown_ticket_raises_key_error(store: SupervisorStore) -> None:
+    with pytest.raises(KeyError):
+        SupervisorViews(store).ticket_detail("tk-missing")
+
+
+def test_thread_timeline_events_carry_object_ids(store: SupervisorStore) -> None:
+    trigger = Trigger(
+        id="tg-1",
+        external_id="issue:1",
+        kind=TriggerKind.ISSUE,
+        actor="alice",
+        thread_keys=["issue:acme/widgets#1"],
+        occurred_at=10,
+        received_at=11,
+        payload={"body": "DO-NOT-LEAK"},
+    )
+    store.insert_trigger(trigger)
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=["tg-1"],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            policy_version="p6-v1",
+            request_digest="d-1",
+            created_at=12,
+        )
+    )
+
+    events = SupervisorViews(store).thread_timeline("issue:acme/widgets#1")
+
+    assert [event.object_id for event in events] == ["tg-1", "dc-1"]
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_views.py \
+  > /tmp/p6-m5-t2-red.txt 2>&1; tail -20 /tmp/p6-m5-t2-red.txt
+```
+
+Expected：`AttributeError: 'SupervisorViews' object has no attribute 'ticket_detail'`
+以及 `object_id` 断言失败。
+
+- [ ] **Step 3: 实现详情模型与 object_id**
+
+`TimelineEvent` 增加尾字段：
+
+```python
+class TimelineEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    at: int
+    kind: Literal["trigger", "decision", "report", "input"]
+    summary: str
+    object_id: str | None = None
+```
+
+新增模型：
+
+```python
+class AssignmentSummary(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    attempt: int
+    status: AssignmentStatus
+    started_at: int | None
+    ended_at: int | None
+    failure: str | None
+
+
+class SubscriptionView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    thread_key: str
+    mode: SubscriptionMode
+    created_at: int
+    ended_at: int | None
+
+
+class TicketDetail(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    ticket: TicketSummary
+    mandate_id: str
+    assignments: list[AssignmentSummary]
+    subscriptions: list[SubscriptionView]
+    ticket_link: str | None
+    thread_link: str | None
+    timeline: list[TimelineEvent]
+```
+
+`thread_timeline` 中 trigger 与 decision 的事件补 id：
+
+```python
+events.append(
+    TimelineEvent(
+        at=trigger.occurred_at,
+        kind="trigger",
+        summary=f"{trigger.kind.value}:{trigger.actor}",
+        object_id=trigger.id,
+    )
+)
+...
+decisions[decision.id] = TimelineEvent(
+    at=decision.created_at,
+    kind="decision",
+    summary=decision.outcome.value,
+    object_id=decision.id,
+)
+```
+
+`ticket_timeline` 中 report / input / decision 的事件补 id：
+
+```python
+events = [
+    TimelineEvent(
+        at=report.created_at,
+        kind="report",
+        summary=report.summary,
+        object_id=report.id,
+    )
+    for report in self._store.list_reports(ticket_id)
+]
+events.extend(
+    TimelineEvent(
+        at=ticket_input.created_at,
+        kind="input",
+        summary=f"{ticket_input.kind}:{ticket_input.state}",
+        object_id=ticket_input.id,
+    )
+    for ticket_input in self._store.list_inputs(ticket_id)
+)
+events.extend(
+    TimelineEvent(
+        at=decision.created_at,
+        kind="decision",
+        summary=decision.outcome.value,
+        object_id=decision.id,
+    )
+    for decision in self._store.list_decisions(mandate_id=ticket.mandate_id)
+)
+```
+
+在 `ticket_timeline` 之后追加：
+
+```python
+def ticket_detail(self, ticket_id: str) -> TicketDetail:
+    ticket = self._store.get_ticket(ticket_id)
+    if ticket is None:
+        raise KeyError(ticket_id)
+    ticket_link, thread_link = ticket_links(self._store, ticket_id)
+    return TicketDetail(
+        ticket=TicketSummary(
+            id=ticket.id,
+            title=ticket.title,
+            status=ticket.status,
+            created_at=ticket.created_at,
+        ),
+        mandate_id=ticket.mandate_id,
+        assignments=[
+            AssignmentSummary(
+                id=assignment.id,
+                attempt=assignment.attempt,
+                status=assignment.status,
+                started_at=assignment.started_at,
+                ended_at=assignment.ended_at,
+                failure=assignment.failure,
+            )
+            for assignment in self._store.list_assignments(ticket_id)
+        ],
+        subscriptions=[
+            SubscriptionView(
+                id=subscription.id,
+                thread_key=subscription.thread_key,
+                mode=subscription.mode,
+                created_at=subscription.created_at,
+                ended_at=subscription.ended_at,
+            )
+            for subscription in self._store.list_subscriptions(ticket_id=ticket_id)
+        ],
+        ticket_link=ticket_link,
+        thread_link=thread_link,
+        timeline=self.ticket_timeline(ticket_id),
+    )
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_views.py \
+  > /tmp/p6-m5-t2-green.txt 2>&1; tail -5 /tmp/p6-m5-t2-green.txt
+.venv/bin/ruff check stableagent/supervisor/views.py tests/unit/test_supervisor_views.py
+.venv/bin/ruff format --check stableagent/supervisor/views.py \
+  tests/unit/test_supervisor_views.py
+```
+
+Expected：`13 passed`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/views.py tests/unit/test_supervisor_views.py
+git commit -m "feat: add supervisor ticket detail and timeline ids"
+```
+
+---
+
+### Task 3：通知模板、限长与纯函数配置（M5-3）
+
+**Files:**
+- Create: `stableagent/supervisor/notifications.py`
+- Test: `tests/unit/test_supervisor_notifications.py`
+
+**Interfaces:**
+- Consumes: `Ticket`、`Report`、`ReportKind`、`TicketStatus`。
+- Produces:
+  - `NotificationKind`（`ACCEPTED` / `RESULT` / `ATTENTION` / `FAILURE`）
+  - `STATUS_KINDS: dict[TicketStatus, NotificationKind]`
+  - `REPORT_KINDS: dict[NotificationKind, ReportKind | None]`
+  - `NotificationConfig(enabled=True, max_chars=400, since_ms=0)`
+  - `latest_summary(reports, kind) -> str | None`
+  - `render_notification(ticket, kind, reports, *, max_chars, url) -> str`
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/unit/test_supervisor_notifications.py`：
+
+```python
+"""WP-6.5：生命周期通知是纯函数；正文只取标题、结构化摘要与稳定链接。"""
+
+from __future__ import annotations
+
+from stableagent.orchestration.model import Report, ReportKind, Ticket
+from stableagent.supervisor.notifications import (
+    NotificationKind,
+    latest_summary,
+    render_notification,
+)
+
+
+def _ticket(*, title: str = "Fix parser") -> Ticket:
+    return Ticket(
+        id="tk-1",
+        title=title,
+        task="SECRET-TASK",
+        created_at=1,
+        mandate_id="md-1",
+    )
+
+
+def _report(kind: ReportKind, summary: str, *, created_at: int, report_id: str) -> Report:
+    return Report(
+        id=report_id,
+        ticket_id="tk-1",
+        assignment_id="as-1",
+        kind=kind,
+        summary=summary,
+        created_at=created_at,
+    )
+
+
+def test_render_accepted_uses_title_and_link_only() -> None:
+    body = render_notification(
+        _ticket(),
+        NotificationKind.ACCEPTED,
+        [],
+        max_chars=400,
+        url="https://github.com/o/r/issues/1",
+    )
+
+    assert body == "[Accepted] Fix parser\nhttps://github.com/o/r/issues/1"
+    assert "SECRET-TASK" not in body
+
+
+def test_render_result_uses_latest_ready_summary() -> None:
+    reports = [
+        _report(ReportKind.READY, "older", created_at=2, report_id="rp-1"),
+        _report(ReportKind.READY, "newer", created_at=3, report_id="rp-2"),
+    ]
+
+    body = render_notification(
+        _ticket(), NotificationKind.RESULT, reports, max_chars=400, url=None
+    )
+
+    assert "newer" in body and "older" not in body
+
+
+def test_latest_summary_ignores_other_report_kinds() -> None:
+    reports = [
+        _report(ReportKind.PROGRESS, "progress", created_at=9, report_id="rp-1"),
+        _report(ReportKind.FAILED, "failed", created_at=8, report_id="rp-2"),
+    ]
+
+    assert latest_summary(reports, ReportKind.READY) is None
+
+
+def test_render_truncates_to_max_chars_with_ellipsis() -> None:
+    body = render_notification(
+        _ticket(title="x" * 80),
+        NotificationKind.ACCEPTED,
+        [],
+        max_chars=32,
+        url=None,
+    )
+
+    assert len(body) == 32
+    assert body.endswith("…")
+
+
+def test_render_omits_summary_when_expected_report_is_missing() -> None:
+    body = render_notification(
+        _ticket(),
+        NotificationKind.FAILURE,
+        [],
+        max_chars=400,
+        url="https://github.com/o/r/issues/1",
+    )
+
+    assert body == "[Failed] Fix parser\nhttps://github.com/o/r/issues/1"
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_notifications.py \
+  > /tmp/p6-m5-t3-red.txt 2>&1; tail -20 /tmp/p6-m5-t3-red.txt
+```
+
+Expected：`ModuleNotFoundError: No module named 'stableagent.supervisor.notifications'`。
+
+- [ ] **Step 3: 实现纯函数与配置**
+
+新建 `stableagent/supervisor/notifications.py`：
+
+```python
+"""生命周期通知：固定模板、限长与草拟（规格 WP-6.5）。
+
+正文只由 Ticket 标题、对应种类的 Report `summary` 与稳定链接拼成；绝不读取
+`Ticket.task`、`Trigger.payload`、`TicketInput.payload` 或日志（L4/L7）。
+本模块不 import `runtime` / `integrations`，发送仍由 outbox + ApprovalGate 完成。
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from stableagent.orchestration.model import Report, ReportKind, Ticket, TicketStatus
+
+
+class NotificationKind(str, Enum):
+    ACCEPTED = "accepted"
+    RESULT = "result"
+    ATTENTION = "attention"
+    FAILURE = "failure"
+
+
+STATUS_KINDS: dict[TicketStatus, NotificationKind] = {
+    TicketStatus.QUEUED: NotificationKind.ACCEPTED,
+    TicketStatus.RUNNING: NotificationKind.ACCEPTED,
+    TicketStatus.WAITING: NotificationKind.ATTENTION,
+    TicketStatus.READY: NotificationKind.RESULT,
+    TicketStatus.FAILED: NotificationKind.FAILURE,
+}
+
+REPORT_KINDS: dict[NotificationKind, ReportKind | None] = {
+    NotificationKind.ACCEPTED: None,
+    NotificationKind.RESULT: ReportKind.READY,
+    NotificationKind.ATTENTION: ReportKind.WAITING_FOR_HUMAN,
+    NotificationKind.FAILURE: ReportKind.FAILED,
+}
+
+_HEADERS = {
+    NotificationKind.ACCEPTED: "Accepted",
+    NotificationKind.RESULT: "Ready for review",
+    NotificationKind.ATTENTION: "Waiting for you",
+    NotificationKind.FAILURE: "Failed",
+}
+
+
+class NotificationConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    max_chars: int = Field(default=400, ge=32)
+    since_ms: int = Field(default=0, ge=0)
+
+
+def latest_summary(reports: list[Report], kind: ReportKind) -> str | None:
+    matching = [report for report in reports if report.kind is kind]
+    if not matching:
+        return None
+    latest = max(matching, key=lambda report: (report.created_at, report.id))
+    return latest.summary
+
+
+def render_notification(
+    ticket: Ticket,
+    kind: NotificationKind,
+    reports: list[Report],
+    *,
+    max_chars: int,
+    url: str | None,
+) -> str:
+    lines = [f"[{_HEADERS[kind]}] {ticket.title}"]
+    expected = REPORT_KINDS[kind]
+    if expected is not None:
+        summary = latest_summary(reports, expected)
+        if summary:
+            lines.append(summary)
+    if url:
+        lines.append(url)
+    body = "\n".join(lines)
+    if len(body) > max_chars:
+        return body[: max_chars - 1] + "…"
+    return body
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_notifications.py \
+  > /tmp/p6-m5-t3-green.txt 2>&1; tail -5 /tmp/p6-m5-t3-green.txt
+.venv/bin/ruff check stableagent/supervisor/notifications.py \
+  tests/unit/test_supervisor_notifications.py
+.venv/bin/ruff format --check stableagent/supervisor/notifications.py \
+  tests/unit/test_supervisor_notifications.py
+```
+
+Expected：`5 passed`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/notifications.py \
+  tests/unit/test_supervisor_notifications.py
+git commit -m "feat: add supervisor notification templates and limits"
+```
+
+---
+
+### Task 4：通知草拟器、digest 与审批去重（M5-4）
+
+**Files:**
+- Modify: `stableagent/supervisor/views.py`
+- Modify: `stableagent/supervisor/notifications.py`
+- Modify: `stableagent/supervisor/store.py`
+- Test: `tests/unit/test_supervisor_notifications.py`
+
+**Interfaces:**
+- Consumes: `ApprovalService.submit(ticket_id, action, digest, reason,
+  assignment_id=None)`；`SupervisorStore.list_subscriptions` / `get_thread` /
+  `get_mandate` / `list_assignments` / `list_reports`。
+- Produces:
+  - `SupervisorStore.list_tickets_for_notifications(*, since_ms, limit=200) -> list[Ticket]`
+  - `views.comment_url(thread) -> str | None`
+  - `NotificationDraft(ticket_id, assignment_id, kind, payload, digest)`
+  - `notification_digest(payload) -> str`
+  - `notification_effect(draft, *, effect_id, now) -> Effect`
+  - `NotificationDrafter(store, approvals, config, *, repository, clock)`
+  - `NotificationDrafter.build(ticket_id) -> NotificationDraft | None`
+  - `NotificationDrafter.draft_due() -> int`
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_supervisor_notifications.py` 顶部 import 扩写为：
+
+```python
+from pathlib import Path
+
+import pytest
+
+from stableagent.control.approval import ApprovalService
+from stableagent.control.model import Action, ApprovalStatus
+from stableagent.orchestration.model import (
+    Assignment,
+    Mandate,
+    Report,
+    ReportKind,
+    Ticket,
+    TicketStatus,
+)
+from stableagent.supervisor.model import (
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+)
+from stableagent.supervisor.notifications import (
+    NotificationConfig,
+    NotificationDrafter,
+    NotificationKind,
+    latest_summary,
+    render_notification,
+)
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
+```
+
+文件末尾追加：
+
+```python
+@pytest.fixture
+def env(tmp_path: Path):
+    clock = FixedClock()
+    ids = SequenceIds()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    return store, approvals, clock
+
+
+def _seed_ticket(
+    store: SupervisorStore,
+    *,
+    ticket_id: str = "tk-1",
+    status: TicketStatus = TicketStatus.RUNNING,
+    created_at: int = 1,
+    kind: ThreadKind = ThreadKind.ISSUE,
+    external_ref: str = "#1",
+    subscription: bool = True,
+    assignment: bool = True,
+) -> Ticket:
+    suffix = ticket_id.removeprefix("tk-")
+    mandate_id = f"md-{suffix}"
+    store.insert_mandate(
+        Mandate(
+            id=mandate_id,
+            origin_kind="github",
+            scope="github:o/r:issue:1",
+            granted_at=1,
+            repository="o/r",
+            actions=["comment_issue"],
+        )
+    )
+    ticket = Ticket(
+        id=ticket_id,
+        title="Fix parser",
+        task="SECRET-TASK",
+        created_at=created_at,
+        status=status,
+        mandate_id=mandate_id,
+    )
+    store.insert_ticket(ticket)
+    if assignment:
+        store.insert_assignment(Assignment(id=f"as-{suffix}", ticket_id=ticket_id, attempt=1))
+    if subscription:
+        key = (
+            f"issue:o/r#{external_ref.lstrip('#')}"
+            if kind is ThreadKind.ISSUE
+            else f"pr:o/r#{external_ref.lstrip('#')}"
+        )
+        store.upsert_thread(
+            Thread(
+                key=key,
+                repository="o/r",
+                kind=kind,
+                external_ref=external_ref,
+                last_trigger_at=1,
+            )
+        )
+        store.insert_subscription(
+            Subscription(
+                id=f"sb-{suffix}",
+                ticket_id=ticket_id,
+                thread_key=key,
+                mode=SubscriptionMode.OWN,
+                created_at=1,
+            )
+        )
+    return ticket
+
+
+def test_draft_due_submits_one_pending_comment_approval(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+        repository="o/r",
+        clock=clock,
+    )
+
+    assert drafter.draft_due() == 1
+
+    pending = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)
+    assert len(pending) == 1
+    approval = pending[0]
+    assert approval.action is Action.COMMENT_ISSUE
+    assert approval.reason == "notification:accepted"
+    assert approval.assignment_id == "as-1"
+    draft = drafter.build("tk-1")
+    assert draft is not None
+    assert draft.digest == approval.resource_digest
+    assert draft.payload == {
+        "ticket_id": "tk-1",
+        "assignment_id": "as-1",
+        "stable_id": "github:o/r:issue:1",
+        "repository": "o/r",
+        "url": "https://github.com/o/r/issues/1",
+        "body": "[Accepted] Fix parser\nhttps://github.com/o/r/issues/1",
+    }
+    assert "SECRET-TASK" not in draft.payload["body"]
+
+
+def test_draft_due_is_idempotent_across_steps(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(),
+        repository="o/r",
+        clock=clock,
+    )
+
+    assert drafter.draft_due() == 1
+    assert drafter.draft_due() == 0
+    assert len(approvals.for_ticket("tk-1")) == 1
+
+
+def test_denied_notification_silences_the_ticket(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    drafter = NotificationDrafter(
+        store, approvals, NotificationConfig(), repository="o/r", clock=clock
+    )
+    assert drafter.draft_due() == 1
+    approval = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    approvals.decide(approval.id, False, "alice")
+
+    assert drafter.draft_due() == 0
+    assert approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING) == []
+
+
+def test_draft_due_skips_without_live_subscription_or_assignment(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store, ticket_id="tk-nosub", subscription=False)
+    _seed_ticket(store, ticket_id="tk-noas", assignment=False)
+    drafter = NotificationDrafter(
+        store, approvals, NotificationConfig(), repository="o/r", clock=clock
+    )
+
+    assert drafter.draft_due() == 0
+
+
+def test_draft_due_respects_since_ms(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store, created_at=1)
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(since_ms=100),
+        repository="o/r",
+        clock=clock,
+    )
+
+    assert drafter.draft_due() == 0
+
+
+def test_draft_due_requires_github_mandate_with_comment_action(env) -> None:
+    store, approvals, clock = env
+    _seed_ticket(store)
+    store._conn.execute("UPDATE mandates SET actions = '[]' WHERE id = 'md-1'")
+    drafter = NotificationDrafter(
+        store, approvals, NotificationConfig(), repository="o/r", clock=clock
+    )
+
+    assert drafter.draft_due() == 0
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_notifications.py \
+  > /tmp/p6-m5-t4-red.txt 2>&1; tail -20 /tmp/p6-m5-t4-red.txt
+```
+
+Expected：`ImportError: cannot import name 'NotificationDrafter'`。
+
+- [ ] **Step 3: 实现 comment_url、存储查询、草拟器与 effect**
+
+`stableagent/supervisor/views.py` 在 `thread_url` 之后追加：
+
+```python
+def comment_url(thread: Thread) -> str | None:
+    """GitHub 评论要落在 Issue/PR 上；Review 回落到其 PR，仓库级 Thread 不草拟。"""
+    base = f"https://github.com/{thread.repository}"
+    if thread.kind is ThreadKind.ISSUE:
+        return f"{base}/issues/{thread.external_ref.lstrip('#')}"
+    if thread.kind is ThreadKind.PULL_REQUEST:
+        return f"{base}/pull/{thread.external_ref.lstrip('#')}"
+    if thread.kind is ThreadKind.REVIEW:
+        tail = thread.key.split("#", 1)[1] if "#" in thread.key else ""
+        number = tail.split(":", 1)[0]
+        return f"{base}/pull/{number}" if number.isdigit() else None
+    return None
+```
+
+`stableagent/supervisor/store.py` 的 `orchestration.model` import 增加 `Ticket`，并在
+`count_due_effects` 之后追加：
+
+```python
+    def list_tickets_for_notifications(
+        self, *, since_ms: int, limit: int = 200
+    ) -> list[Ticket]:
+        rows = self._conn.execute(
+            "SELECT id FROM tickets WHERE status IN"
+            " ('queued','running','waiting','ready','failed') AND created_at >= ?"
+            " ORDER BY created_at ASC, id ASC LIMIT ?",
+            (since_ms, limit),
+        ).fetchall()
+        tickets = []
+        for row in rows:
+            ticket = self.get_ticket(row["id"])
+            if ticket is not None:
+                tickets.append(ticket)
+        return tickets
+```
+
+`stableagent/supervisor/notifications.py` 顶部 import 扩写为：
+
+```python
+from dataclasses import dataclass
+from typing import Any
+
+from stableagent.control.approval import ApprovalService
+from stableagent.control.model import Action, ApprovalStatus, resource_digest
+from stableagent.integrations.github_effects import github_resource
+from stableagent.orchestration.model import (
+    Clock,
+    Effect,
+    EffectKind,
+    Report,
+    ReportKind,
+    Ticket,
+    TicketStatus,
+)
+from stableagent.supervisor.model import SubscriptionMode
+from stableagent.supervisor.store import SupervisorStore
+from stableagent.supervisor.views import comment_url
+```
+
+> 方向锁说明：`notifications.py` 只 import `integrations.github_effects` 的**纯函数**
+> `github_resource`（不 import client / handler），用于与 handler 算出同一个 digest；
+> 这与既有 `control.approval` 依赖同一资源形状一致，不新增网络或执行依赖。
+
+在文件末尾追加：
+
+```python
+@dataclass(frozen=True)
+class NotificationDraft:
+    ticket_id: str
+    assignment_id: str
+    kind: NotificationKind
+    payload: dict[str, Any]
+    digest: str
+
+
+def notification_digest(payload: dict[str, Any]) -> str:
+    return resource_digest(
+        Action.COMMENT_ISSUE, github_resource(Action.COMMENT_ISSUE, payload)
+    )
+
+
+def notification_effect(draft: NotificationDraft, *, effect_id: str, now: int) -> Effect:
+    return Effect(
+        id=effect_id,
+        kind=EffectKind.GITHUB_COMMENT,
+        idempotency_key=f"notify:{draft.ticket_id}:{draft.kind.value}",
+        payload=dict(draft.payload),
+        due_at=now,
+    )
+
+
+class NotificationDrafter:
+    def __init__(
+        self,
+        store: SupervisorStore,
+        approvals: ApprovalService,
+        config: NotificationConfig,
+        *,
+        repository: str,
+        clock: Clock,
+    ) -> None:
+        self._store = store
+        self._approvals = approvals
+        self._config = config
+        self._repository = repository
+        self._clock = clock
+
+    def build(self, ticket_id: str) -> NotificationDraft | None:
+        ticket = self._store.get_ticket(ticket_id)
+        if ticket is None:
+            return None
+        kind = STATUS_KINDS.get(ticket.status)
+        if kind is None:
+            return None
+        mandate = self._store.get_mandate(ticket.mandate_id)
+        if (
+            mandate is None
+            or mandate.origin_kind != "github"
+            or Action.COMMENT_ISSUE.value not in mandate.actions
+        ):
+            return None
+        assignments = self._store.list_assignments(ticket_id)
+        if not assignments:
+            return None
+        assignment = max(assignments, key=lambda item: item.attempt)
+        url = self._ticket_comment_url(ticket_id)
+        if url is None:
+            return None
+        body = render_notification(
+            ticket,
+            kind,
+            self._store.list_reports(ticket_id),
+            max_chars=self._config.max_chars,
+            url=url,
+        )
+        payload = {
+            "ticket_id": ticket.id,
+            "assignment_id": assignment.id,
+            "stable_id": mandate.scope,
+            "repository": self._repository,
+            "url": url,
+            "body": body,
+        }
+        return NotificationDraft(
+            ticket_id=ticket.id,
+            assignment_id=assignment.id,
+            kind=kind,
+            payload=payload,
+            digest=notification_digest(payload),
+        )
+
+    def draft_due(self) -> int:
+        if not self._config.enabled:
+            return 0
+        drafted = 0
+        for ticket in self._store.list_tickets_for_notifications(
+            since_ms=self._config.since_ms
+        ):
+            if self._silenced(ticket.id):
+                continue
+            draft = self.build(ticket.id)
+            if draft is None or self._already_drafted(ticket.id, draft.digest):
+                continue
+            self._approvals.submit(
+                ticket.id,
+                Action.COMMENT_ISSUE,
+                draft.digest,
+                f"notification:{draft.kind.value}",
+                assignment_id=draft.assignment_id,
+            )
+            drafted += 1
+        return drafted
+
+    def _ticket_comment_url(self, ticket_id: str) -> str | None:
+        subscriptions = sorted(
+            self._store.list_subscriptions(ticket_id=ticket_id, live_only=True),
+            key=lambda item: (item.mode is not SubscriptionMode.OWN, item.created_at, item.id),
+        )
+        for subscription in subscriptions:
+            thread = self._store.get_thread(subscription.thread_key)
+            if thread is None:
+                continue
+            url = comment_url(thread)
+            if url is not None:
+                return url
+        return None
+
+    def _silenced(self, ticket_id: str) -> bool:
+        return any(
+            approval.action is Action.COMMENT_ISSUE
+            and approval.status is ApprovalStatus.DENIED
+            for approval in self._approvals.for_ticket(ticket_id)
+        )
+
+    def _already_drafted(self, ticket_id: str, digest: str) -> bool:
+        return any(
+            approval.action is Action.COMMENT_ISSUE
+            and approval.resource_digest == digest
+            for approval in self._approvals.for_ticket(ticket_id)
+        )
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_notifications.py \
+  > /tmp/p6-m5-t4-green.txt 2>&1; tail -5 /tmp/p6-m5-t4-green.txt
+.venv/bin/ruff check stableagent/supervisor/notifications.py \
+  stableagent/supervisor/store.py stableagent/supervisor/views.py \
+  tests/unit/test_supervisor_notifications.py
+.venv/bin/ruff format --check stableagent/supervisor/notifications.py \
+  stableagent/supervisor/store.py stableagent/supervisor/views.py \
+  tests/unit/test_supervisor_notifications.py
+```
+
+Expected：`11 passed`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/notifications.py stableagent/supervisor/store.py \
+  stableagent/supervisor/views.py tests/unit/test_supervisor_notifications.py
+git commit -m "feat: draft lifecycle notifications behind approvals"
+```
+
+---
+
+### Task 5：批准与 effect 同事务、失败 effect 重试、stop 撤销（M5-5）
+
+**Files:**
+- Modify: `stableagent/control/approval.py`
+- Modify: `stableagent/supervisor/service.py`
+- Test: `tests/unit/test_approval_service.py`
+- Test: `tests/unit/test_supervisor_service.py`
+
+**Interfaces:**
+- Consumes: `Store.enqueue_effect(effect)`（不开事务）、`Store.get_effect` /
+  `update_effect`、`ApprovalService.for_ticket` / `decide` / `revoke_pending`。
+- Produces:
+  - `ApprovalService.decide(approval_id, approve, by, *, effect: Effect | None = None)`
+  - `SupervisorService(..., approvals: ApprovalService | None = None)`
+  - `SupervisorService.retry_effect(effect_id, *, actor) -> Effect`
+  - `SupervisorService.stop` 在同一事务内撤销 pending 审批。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_approval_service.py` 顶部 import 扩写为：
+
+```python
+from stableagent.orchestration.model import (
+    Assignment,
+    AssignmentStatus,
+    Effect,
+    EffectKind,
+    EffectState,
+    Ticket,
+    TicketStatus,
+)
+```
+
+文件末尾追加：
+
+```python
+def test_approve_enqueues_effect_in_the_same_transaction(store, clock) -> None:
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.COMMENT_ISSUE, "d-1", "notification:accepted")
+    effect = Effect(
+        id="ef-1",
+        kind=EffectKind.GITHUB_COMMENT,
+        idempotency_key="notify:tk-0001:accepted",
+        payload={"ticket_id": TICKET},
+        due_at=clock.now_ms(),
+    )
+
+    decided = approvals.decide(approval.id, True, "alice", effect=effect)
+
+    assert decided.status is ApprovalStatus.APPROVED
+    stored = store.get_effect("ef-1")
+    assert stored is not None and stored.state is EffectState.PENDING
+
+
+def test_approve_rolls_back_when_effect_enqueue_fails(store, clock, monkeypatch) -> None:
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.COMMENT_ISSUE, "d-1", "notification:accepted")
+    effect = Effect(
+        id="ef-1",
+        kind=EffectKind.GITHUB_COMMENT,
+        idempotency_key="notify:tk-0001:accepted",
+        due_at=clock.now_ms(),
+    )
+
+    def boom(_effect):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(store, "enqueue_effect", boom)
+    with pytest.raises(RuntimeError):
+        approvals.decide(approval.id, True, "alice", effect=effect)
+
+    assert approvals.get(approval.id).status is ApprovalStatus.PENDING
+
+
+def test_deny_never_enqueues_the_supplied_effect(store, clock) -> None:
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approval = approvals.submit(TICKET, Action.COMMENT_ISSUE, "d-1", "notification:accepted")
+    effect = Effect(
+        id="ef-1",
+        kind=EffectKind.GITHUB_COMMENT,
+        idempotency_key="notify:tk-0001:accepted",
+        due_at=clock.now_ms(),
+    )
+
+    decided = approvals.decide(approval.id, False, "alice", effect=effect)
+
+    assert decided.status is ApprovalStatus.DENIED
+    assert store.get_effect("ef-1") is None
+```
+
+`tests/unit/test_supervisor_service.py` 顶部 import 扩写为：
+
+```python
+from stableagent.control.approval import ApprovalService
+from stableagent.control.model import Action, ApprovalStatus
+from stableagent.orchestration.model import (
+    Effect,
+    EffectKind,
+    EffectState,
+    Report,
+    ReportKind,
+    TicketStatus,
+)
+```
+
+把 `_build_service` 的返回改为（同事务审批注入）：
+
+```python
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    return SupervisorService(
+        store,
+        policy,
+        router,
+        clock=clock,
+        ids=ids,
+        audit=audit,
+        approvals=approvals,
+    )
+```
+
+文件末尾追加：
+
+```python
+def test_stop_revokes_pending_approvals(service, store, clock) -> None:
+    ticket = _accept(service, store)
+    approvals = ApprovalService(store, clock=clock, ids=SequenceIds())
+    approvals.submit(
+        ticket.id, Action.COMMENT_ISSUE, "d-1", "notification:accepted"
+    )
+
+    service.stop(ticket.id, actor="alice")
+
+    assert approvals.for_ticket(ticket.id, status=ApprovalStatus.PENDING) == []
+
+
+def test_retry_effect_only_accepts_failed_rows(service, store, clock) -> None:
+    store.enqueue_effect(
+        Effect(
+            id="ef-failed",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="notify:tk:accepted",
+            payload={"ticket_id": "tk-1"},
+            state=EffectState.FAILED,
+            attempts=3,
+            due_at=1,
+            last_error="boom",
+        )
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-pending",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="notify:tk:result",
+            payload={"ticket_id": "tk-1"},
+            state=EffectState.PENDING,
+            due_at=1,
+        )
+    )
+    clock.advance(10)
+
+    updated = service.retry_effect("ef-failed", actor="alice")
+
+    assert updated.state is EffectState.PENDING
+    assert updated.attempts == 0
+    assert updated.due_at == clock.now_ms()
+    assert updated.last_error is None
+    assert updated.idempotency_key == "notify:tk:accepted"
+    with pytest.raises(RouterStateError):
+        service.retry_effect("ef-pending", actor="alice")
+    with pytest.raises(RouterNotFoundError):
+        service.retry_effect("ef-missing", actor="alice")
+    with pytest.raises(RouterPermissionError):
+        service.retry_effect("ef-failed", actor="mallory")
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_approval_service.py \
+  tests/unit/test_supervisor_service.py > /tmp/p6-m5-t5-red.txt 2>&1
+tail -20 /tmp/p6-m5-t5-red.txt
+```
+
+Expected：`TypeError: decide() got an unexpected keyword argument 'effect'` 与
+`TypeError: SupervisorService.__init__() got an unexpected keyword argument 'approvals'`。
+
+- [ ] **Step 3: 实现控制层写路径**
+
+`stableagent/control/approval.py` 把 `decide` 替换为：
+
+```python
+    def decide(
+        self,
+        approval_id: str,
+        approve: bool,
+        by: str,
+        *,
+        effect: Effect | None = None,
+    ) -> ApprovalRequest:
+        """pending → approved/denied 一次性翻转；approve 时可在同一事务内入队 effect。
+
+        `Store.enqueue_effect` 自己不开事务，所以这里只开一个 BEGIN IMMEDIATE：任一步
+        失败，审批状态与 effect 一起回滚，不存在"已批准、未入队"的窗口（L3）。
+        """
+        current = self.get(approval_id)
+        if current is None:
+            raise UnknownApprovalError(approval_id)
+        if current.status is not ApprovalStatus.PENDING:
+            raise ApprovalDecidedError(approval_id, current.status.value)
+        status = ApprovalStatus.APPROVED if approve else ApprovalStatus.DENIED
+        now = self._clock.now_ms()
+        with self._store.transaction():
+            self._store.update_approval(
+                approval_id, status=status.value, decided_by=by, decided_at=now
+            )
+            if approve and effect is not None:
+                self._store.enqueue_effect(effect)
+            if not approve:
+                self._fail_running_assignment(current.assignment_id, now)
+        return current.model_copy(update={"status": status, "decided_by": by, "decided_at": now})
+```
+
+`stableagent/supervisor/service.py`：
+
+顶部 `orchestration.model` import 增加 `EffectState`，并在 control 侧新增：
+
+```python
+from stableagent.control.approval import ApprovalService
+```
+
+`__init__` 增加可选依赖：
+
+```python
+    def __init__(
+        self,
+        store: SupervisorStore,
+        policy: StaticPolicy,
+        router: RouterService,
+        *,
+        clock: Clock,
+        ids: IdFactory,
+        audit: AuditWriter | None = None,
+        approvals: ApprovalService | None = None,
+    ) -> None:
+        self._store = store
+        self._policy = policy
+        self._router = router
+        self._clock = clock
+        self._ids = ids
+        self._audit = audit
+        self._approvals = approvals
+```
+
+`stop` 在 `ticket = self._require_ticket(ticket_id)` 之后、`if ticket.status is
+TicketStatus.CANCELLED` 之前插入：
+
+```python
+            if self._approvals is not None:
+                self._approvals.revoke_pending(ticket_id)
+```
+
+在 `reevaluate` 之前追加：
+
+```python
+    def retry_effect(self, effect_id: str, *, actor: str) -> Effect:
+        """只把 FAILED effect 改回 PENDING；原幂等键与 payload 不变（at-least-once）。"""
+        self._require_operator(actor)
+        effect = self._store.get_effect(effect_id)
+        if effect is None:
+            raise RouterNotFoundError(f"effect 不存在：{effect_id}")
+        if effect.state is not EffectState.FAILED:
+            raise RouterStateError(f"retry_effect 只接受 FAILED：{effect.state.value}")
+        now = self._clock.now_ms()
+        updated = effect.model_copy(
+            update={
+                "state": EffectState.PENDING,
+                "attempts": 0,
+                "due_at": now,
+                "last_error": None,
+            }
+        )
+        with self._store.transaction():
+            self._store.update_effect(updated)
+        return updated
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_approval_service.py \
+  tests/unit/test_supervisor_service.py > /tmp/p6-m5-t5-green.txt 2>&1
+tail -5 /tmp/p6-m5-t5-green.txt
+.venv/bin/ruff check stableagent/control/approval.py \
+  stableagent/supervisor/service.py tests/unit/test_approval_service.py \
+  tests/unit/test_supervisor_service.py
+.venv/bin/ruff format --check stableagent/control/approval.py \
+  stableagent/supervisor/service.py tests/unit/test_approval_service.py \
+  tests/unit/test_supervisor_service.py
+```
+
+Expected：两文件全部通过，新增 5 例（审批 3、service 2），0 failed。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/control/approval.py stableagent/supervisor/service.py \
+  tests/unit/test_approval_service.py tests/unit/test_supervisor_service.py
+git commit -m "feat: approve notifications atomically and retry failed effects"
+```
+
+---
+
+### Task 6：Runtime 草拟接线与暂停恢复补路由（M5-6）
+
+**Files:**
+- Modify: `stableagent/supervisor/runtime.py`
+- Test: `tests/unit/test_supervisor_runtime.py`
+- Create: `tests/integration/test_superagent_notifications.py`
+
+**Interfaces:**
+- Consumes: Task 4 的 `NotificationConfig` / `NotificationDrafter`；Task 5 的
+  `ApprovalService`；既有 `Runtime.start/step/resume`。
+- Produces:
+  - `read_runtime_status(store: SupervisorStore, clock: Clock) -> RuntimeStatus`
+  - `RuntimeConfig.notifications: NotificationConfig | None = None`
+  - `RuntimeStep.drafted: int = 0`
+  - `Runtime(..., drafter: NotificationDrafter | None = None)`
+  - `build_runtime` 在配置存在时装配 approvals + drafter。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_supervisor_runtime.py` 顶部 import 扩写为：
+
+```python
+from stableagent.supervisor.notifications import NotificationConfig
+```
+
+`env` fixture 中的 `StaticPolicyConfig` 与 `RouterConfig` 改为：
+
+```python
+    policy = StaticPolicy(
+        StaticPolicyConfig(
+            repository="o/r",
+            actors=frozenset({"alice"}),
+            grantable_actions=frozenset(
+                {Action.READ_REPOSITORY, Action.COMMENT_ISSUE}
+            ),
+            default_validity_ms=60_000,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+```
+
+```python
+        config=RuntimeConfig(
+            router=RouterConfig(
+                repository="o/r",
+                operators=frozenset({"alice"}),
+                actions=("read_repository", "comment_issue"),
+            ),
+            owner="test-runtime",
+            lock_ttl_ms=1_000,
+            stop_grace_ms=10,
+            step_interval_ms=0,
+            notifications=NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+        ),
+```
+
+文件末尾追加：
+
+```python
+async def test_step_drafts_one_notification_approval(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+
+    step = await bundle.runtime.step()
+
+    assert step.drafted == 1
+    pending = store.list_pending_approvals()
+    assert [(row["ticket_id"], row["reason"]) for row in pending] == [
+        (store.list_tickets()[0].id, "notification:accepted")
+    ]
+
+
+async def test_paused_step_does_not_draft(env) -> None:
+    bundle, store, clock, source, _ = env
+    store.set_runtime_paused(True, actor="alice", now=clock.now_ms(), reason="maint")
+    bundle.runtime.start()
+    source.feed(_event())
+
+    step = await bundle.runtime.step()
+
+    assert step.paused is True and step.drafted == 0
+    assert store.list_pending_approvals() == []
+
+
+async def test_external_resume_routes_pending_then_drafts(env) -> None:
+    bundle, store, clock, source, _ = env
+    store.set_runtime_paused(True, actor="alice", now=clock.now_ms(), reason="maint")
+    bundle.runtime.start()
+    source.feed(_event())
+    assert (await bundle.runtime.step()).drafted == 0
+    store.set_runtime_paused(False, actor="alice", now=clock.now_ms())
+
+    step = await bundle.runtime.step()
+
+    assert (step.paused, step.routed, step.drafted) == (False, 1, 1)
+    assert len(store.list_tickets()) == 1
+
+
+async def test_drafted_counts_only_new_approvals(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    assert (await bundle.runtime.step()).drafted == 1
+
+    assert (await bundle.runtime.step()).drafted == 0
+    assert len(store.list_pending_approvals()) == 1
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py \
+  > /tmp/p6-m5-t6-red.txt 2>&1; tail -20 /tmp/p6-m5-t6-red.txt
+```
+
+Expected：`ValidationError: Extra inputs are not permitted`（`notifications` 尚未进
+`RuntimeConfig`）或 `AttributeError: ... drafted`。
+
+- [ ] **Step 3: 接线 Runtime 与组成根**
+
+`stableagent/supervisor/runtime.py` 顶部 import 增加：
+
+```python
+from stableagent.control.approval import ApprovalService
+from stableagent.supervisor.notifications import NotificationConfig, NotificationDrafter
+```
+
+`RuntimeConfig` 增加尾字段：
+
+```python
+    notifications: NotificationConfig | None = None
+```
+
+`RuntimeStep` 增加尾字段（必须在 `source_error` 之后，保持默认值顺序）：
+
+```python
+    source_error: str | None = None
+    drafted: int = 0
+```
+
+`Runtime.__init__` 增加参数与状态：
+
+```python
+    def __init__(
+        self,
+        *,
+        store: SupervisorStore,
+        source: Source,
+        router: RouterService,
+        orchestration: OrchestrationService,
+        scheduler: Scheduler,
+        effects: EffectDispatcher,
+        config: RuntimeConfig,
+        clock: Clock,
+        drafter: NotificationDrafter | None = None,
+    ) -> None:
+        self._store = store
+        self._source = source
+        self._router = router
+        self._orchestration = orchestration
+        self._scheduler = scheduler
+        self._effects = effects
+        self._config = config
+        self._clock = clock
+        self._drafter = drafter
+        self._started = False
+        self._stop_requested = False
+        self._was_paused = False
+```
+
+`start()` 在读取 `control` 后记录暂停位：
+
+```python
+        control = self._store.get_runtime_control()
+        routed = 0 if control.paused else self._route_pending()
+        self._was_paused = control.paused
+        self._started = True
+```
+
+`step()` 的暂停分支与路由段替换为：
+
+```python
+        control = self._store.get_runtime_control()
+        if control.paused:
+            self._was_paused = True
+            return RuntimeStep(
+                paused=True,
+                received=len(batch.events),
+                routed=0,
+                duplicates=batch.duplicates,
+                enqueued=0,
+                dispatched=0,
+                external=0,
+                running=len(self._scheduler.running_assignments()),
+                source_error=source_error,
+                drafted=0,
+            )
+        self._renew_lock()
+        routed = 0
+        if self._was_paused:
+            routed += self._route_pending()
+            self._was_paused = False
+        duplicates = 0
+        for event in batch.events:
+            reception = self._router.receive(event.trigger)
+            if reception.duplicate:
+                duplicates += 1
+            else:
+                routed += 1
+        tick = await self._scheduler.tick()
+        drafted = 0
+        if self._drafter is not None:
+            drafted = self._drafter.draft_due()
+        external = await self._effects.dispatch_due()
+        return RuntimeStep(
+            paused=False,
+            received=len(batch.events),
+            routed=routed,
+            duplicates=duplicates + batch.duplicates,
+            enqueued=tick.enqueued,
+            dispatched=tick.dispatched,
+            external=external,
+            running=tick.running,
+            source_error=source_error,
+            drafted=drafted,
+        )
+```
+
+`status()` 替换为委托：
+
+```python
+    def status(self) -> RuntimeStatus:
+        return read_runtime_status(self._store, self._clock)
+```
+
+`resume()` 在返回前清掉暂停位：
+
+```python
+    def resume(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        control = self._store.set_runtime_paused(
+            False, actor=actor, now=self._clock.now_ms(), reason=reason
+        )
+        if self._started:
+            self._renew_lock()
+            self._route_pending()
+        self._was_paused = False
+        return control
+```
+
+在 `Runtime` 类之前新增自由函数：
+
+```python
+def read_runtime_status(store: SupervisorStore, clock: Clock) -> RuntimeStatus:
+    now = clock.now_ms()
+    lock = store.get_runtime_lock()
+    control = store.get_runtime_control()
+    started = lock is not None and lock.expires_at > now
+    return RuntimeStatus(
+        started=started,
+        paused=control.paused,
+        owner=lock.owner if started and lock is not None else None,
+        paused_at=control.changed_at if control.paused else None,
+        paused_by=control.actor if control.paused else None,
+        reason=control.reason if control.paused else None,
+        source_health=tuple(store.list_source_cursors()),
+        queued_tickets=store.count_tickets(status=TicketStatus.QUEUED),
+        running_assignments=store.count_assignments(status=AssignmentStatus.RUNNING),
+        due_effects=store.count_due_effects(now),
+        failed_effects=len(store.list_failed_effects()),
+        pending_approvals=len(store.list_pending_approvals()),
+    )
+```
+
+`build_runtime` 中在构造 `RouterService` 之后新增：
+
+```python
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+```
+
+`SupervisorService` 构造增加 `approvals=approvals`；`Runtime` 构造前新增：
+
+```python
+    drafter = None
+    if config.notifications is not None:
+        drafter = NotificationDrafter(
+            store,
+            approvals,
+            config.notifications,
+            repository=config.router.repository,
+            clock=clock,
+        )
+```
+
+`Runtime` 构造增加 `drafter=drafter`。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py \
+  > /tmp/p6-m5-t6-green.txt 2>&1; tail -5 /tmp/p6-m5-t6-green.txt
+.venv/bin/ruff check stableagent/supervisor/runtime.py \
+  tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff format --check stableagent/supervisor/runtime.py \
+  tests/unit/test_supervisor_runtime.py
+```
+
+Expected：`20 passed`（M4 的 16 例 + 新增 4 例）。
+
+- [ ] **Step 5: 写并跑集成证据**
+
+新建 `tests/integration/test_superagent_notifications.py`：
+
+```python
+"""WP-6.5 第 6 条：通知只在批准后写一次，拒绝静默，stop 撤销旧草稿。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from stableagent.control.approval import ApprovalService
+from stableagent.control.errors import ApprovalDecidedError
+from stableagent.control.model import Action, ApprovalStatus
+from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
+from stableagent.integrations.github import (
+    FakeGitHubReadClient,
+    GitHubReadItem,
+    GitHubReadKind,
+)
+from stableagent.orchestration.model import (
+    Assignment,
+    EffectKind,
+    Mandate,
+    Ticket,
+    TicketStatus,
+)
+from stableagent.supervisor.model import (
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+)
+from stableagent.supervisor.notifications import (
+    NotificationConfig,
+    NotificationDrafter,
+    notification_effect,
+)
+from stableagent.supervisor.router import RouterConfig
+from stableagent.supervisor.runtime import RuntimeConfig, build_runtime
+from stableagent.supervisor.source import GitHubSource
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
+
+
+def _issue_item(number: int = 1) -> GitHubReadItem:
+    return GitHubReadItem(
+        kind=GitHubReadKind.ISSUE,
+        occurred_at=1,
+        resource={
+            "number": number,
+            "user": {"login": "alice"},
+            "body": "@agent please add rate limiter",
+        },
+    )
+
+
+class RecordingExecutor:
+    def __init__(self) -> None:
+        self.launched: list[str] = []
+
+    async def launch(self, assignment, ticket, inputs) -> None:
+        self.launched.append(assignment.id)
+
+    async def deliver(self, assignment, ticket, inputs) -> None:
+        return None
+
+    async def cancel(self, assignment) -> None:
+        return None
+
+    async def recover(self, assignment, ticket) -> None:
+        return None
+
+
+def _build(
+    *,
+    store: SupervisorStore,
+    client: FakeGitHubReadClient,
+    handlers,
+    clock: FixedClock,
+    ids: SequenceIds,
+    owner: str,
+):
+    policy = StaticPolicy(
+        StaticPolicyConfig(
+            repository="o/r",
+            actors=frozenset({"alice"}),
+            grantable_actions=frozenset({Action.READ_REPOSITORY, Action.COMMENT_ISSUE}),
+            default_validity_ms=60_000,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    source = GitHubSource(store, client, repository="o/r", bot_login="agent", clock=clock)
+    return build_runtime(
+        store=store,
+        policy=policy,
+        source=source,
+        executor=RecordingExecutor(),
+        effect_handlers=handlers,
+        config=RuntimeConfig(
+            router=RouterConfig(
+                repository="o/r",
+                operators=frozenset({"alice"}),
+                actions=("read_repository", "comment_issue"),
+            ),
+            owner=owner,
+            lock_ttl_ms=1_000,
+            stop_grace_ms=10,
+            step_interval_ms=0,
+            notifications=NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+        ),
+        clock=clock,
+        ids=ids,
+    )
+
+
+def _seed_ticket(store: SupervisorStore, *, ticket_id: str, status: TicketStatus) -> Ticket:
+    suffix = ticket_id.removeprefix("tk-")
+    mandate_id = f"md-{suffix}"
+    store.insert_mandate(
+        Mandate(
+            id=mandate_id,
+            origin_kind="github",
+            scope="github:o/r:issue:1",
+            granted_at=1,
+            repository="o/r",
+            actions=["comment_issue"],
+        )
+    )
+    ticket = Ticket(
+        id=ticket_id,
+        title="Fix parser",
+        task="SECRET-TASK",
+        created_at=1,
+        status=status,
+        mandate_id=mandate_id,
+    )
+    store.insert_ticket(ticket)
+    store.insert_assignment(Assignment(id=f"as-{suffix}", ticket_id=ticket_id, attempt=1))
+    store.upsert_thread(
+        Thread(
+            key="issue:o/r#1",
+            repository="o/r",
+            kind=ThreadKind.ISSUE,
+            external_ref="#1",
+            last_trigger_at=1,
+        )
+    )
+    store.insert_subscription(
+        Subscription(
+            id=f"sb-{suffix}",
+            ticket_id=ticket_id,
+            thread_key="issue:o/r#1",
+            mode=SubscriptionMode.OWN,
+            created_at=1,
+        )
+    )
+    return ticket
+
+
+@pytest.fixture
+def env(tmp_path: Path):
+    clock, ids = FixedClock(), SequenceIds()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    try:
+        yield store, clock, ids
+    finally:
+        store.close()
+
+
+async def test_draft_approve_dispatch_once_across_restart(env) -> None:
+    store, clock, ids = env
+    client = FakeGitHubReadClient([_issue_item()])
+    calls: list[str] = []
+
+    async def comment_handler(effect) -> None:
+        calls.append(effect.id)
+
+    handlers = {EffectKind.GITHUB_COMMENT: comment_handler}
+    first = _build(
+        store=store, client=client, handlers=handlers, clock=clock, ids=ids, owner="runtime-a"
+    )
+    first.runtime.start()
+    assert (await first.runtime.step()).drafted == 1
+
+    ticket = store.list_tickets()[0]
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    pending = approvals.for_ticket(ticket.id, status=ApprovalStatus.PENDING)
+    assert [row.reason for row in pending] == ["notification:accepted"]
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+        repository="o/r",
+        clock=clock,
+    )
+    draft = drafter.build(ticket.id)
+    assert draft is not None
+    effect = notification_effect(draft, effect_id="ef-comment-1", now=clock.now_ms())
+    assert effect.idempotency_key == f"notify:{ticket.id}:accepted"
+
+    approvals.decide(pending[0].id, True, "alice", effect=effect)
+
+    assert (await first.runtime.step()).external == 1
+    assert calls == ["ef-comment-1"]
+
+    await first.runtime.stop()
+    restarted = _build(
+        store=store, client=client, handlers=handlers, clock=clock, ids=ids, owner="runtime-b"
+    )
+    restarted.runtime.start()
+    await restarted.runtime.step()
+
+    assert calls == ["ef-comment-1"]
+
+
+async def test_deny_silences_and_stop_revokes_old_draft(env) -> None:
+    store, clock, ids = env
+    _seed_ticket(store, ticket_id="tk-1", status=TicketStatus.RUNNING)
+    _seed_ticket(store, ticket_id="tk-2", status=TicketStatus.RUNNING)
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    bundle = _build(
+        store=store,
+        client=FakeGitHubReadClient([]),
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-a",
+    )
+    bundle.runtime.start()
+
+    assert (await bundle.runtime.step()).drafted == 2
+
+    denied = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    approvals.decide(denied.id, False, "alice")
+    assert (await bundle.runtime.step()).drafted == 0
+    assert approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING) == []
+
+    revoked = approvals.for_ticket("tk-2", status=ApprovalStatus.PENDING)[0]
+    bundle.service.stop("tk-2", actor="alice")
+    assert approvals.for_ticket("tk-2", status=ApprovalStatus.PENDING) == []
+    with pytest.raises(ApprovalDecidedError):
+        approvals.decide(revoked.id, True, "alice")
+
+    await bundle.runtime.stop()
+
+
+def test_each_status_drafts_at_most_once(env) -> None:
+    store, clock, ids = env
+    for ticket_id, status in (
+        ("tk-1", TicketStatus.WAITING),
+        ("tk-2", TicketStatus.READY),
+        ("tk-3", TicketStatus.FAILED),
+    ):
+        _seed_ticket(store, ticket_id=ticket_id, status=status)
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+        repository="o/r",
+        clock=clock,
+    )
+
+    assert drafter.draft_due() == 3
+    assert drafter.draft_due() == 0
+    reasons = {
+        approval.reason
+        for ticket_id in ("tk-1", "tk-2", "tk-3")
+        for approval in approvals.for_ticket(ticket_id)
+    }
+    assert reasons == {
+        "notification:attention",
+        "notification:result",
+        "notification:failure",
+    }
+```
+
+```bash
+.venv/bin/pytest -q --no-cov tests/integration/test_superagent_notifications.py \
+  > /tmp/p6-m5-t6-integration.txt 2>&1; tail -5 /tmp/p6-m5-t6-integration.txt
+.venv/bin/ruff check tests/integration/test_superagent_notifications.py
+.venv/bin/ruff format --check tests/integration/test_superagent_notifications.py
+```
+
+Expected：`3 passed`。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/runtime.py tests/unit/test_supervisor_runtime.py \
+  tests/integration/test_superagent_notifications.py
+git commit -m "feat: draft notifications between tick and external dispatch"
+```
+
+---
+
+### Task 7：Console 命令面与 stdlib CLI（M5-7）
+
+**Files:**
+- Create: `stableagent/supervisor/console.py`
+- Create: `stableagent/supervisor/cli.py`
+- Modify: `stableagent/supervisor/router.py`
+- Modify: `stableagent/supervisor/service.py`
+- Modify: `stableagent/supervisor/runtime.py`
+- Test: `tests/unit/test_supervisor_console.py`
+
+**Interfaces:**
+- Consumes: Task 1~6 的视图、草拟器、`ApprovalService.decide(effect=...)`、
+  `SupervisorService.retry_effect/stop/reevaluate`、`OrchestrationService.retry_ticket`、
+  `read_runtime_status`。
+- Produces:
+  - `require_operator(operators: frozenset[str], actor: str) -> None`
+  - `CliError(code: int, message: str)`
+  - `ConsoleConfig(repository, operators, actors, actions, allowed_*, network_profile,
+    base_ref, requires_approval, default_validity_ms, policy_version, notifications)`
+  - `StatusView(sections, runtime)`
+  - `Console(store, *, clock, ids, config, audit=None)`，方法
+    `status/ticket/thread/approve/deny/stop/retry/reevaluate/pause/resume`
+  - `render_status/render_ticket/render_thread`
+  - `main(argv: Sequence[str] | None = None) -> int`
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/unit/test_supervisor_console.py`：
+
+```python
+"""WP-6.5：CLI 只做 operator 门禁、--confirm、退出码与渲染；业务写复用既有服务。"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from stableagent.control.approval import ApprovalService
+from stableagent.control.model import Action, ApprovalStatus
+from stableagent.orchestration.model import (
+    Assignment,
+    Effect,
+    EffectKind,
+    EffectState,
+    Mandate,
+    Report,
+    ReportKind,
+    Ticket,
+    TicketStatus,
+)
+from stableagent.supervisor.cli import main
+from stableagent.supervisor.console import (
+    CliError,
+    Console,
+    ConsoleConfig,
+    render_thread,
+)
+from stableagent.supervisor.model import (
+    SourceCursor,
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.notifications import NotificationConfig, NotificationDrafter
+from stableagent.supervisor.router import RouterPermissionError
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
+
+
+def _config(**overrides):
+    data = {
+        "repository": "o/r",
+        "operators": frozenset({"alice"}),
+        "actors": frozenset({"alice"}),
+        "actions": ("read_repository", "comment_issue"),
+        "default_validity_ms": 60_000,
+        "notifications": NotificationConfig(enabled=True, max_chars=400),
+    }
+    data.update(overrides)
+    return ConsoleConfig(**data)
+
+
+def _seed_ticket(
+    store: SupervisorStore,
+    *,
+    ticket_id: str = "tk-1",
+    status: TicketStatus = TicketStatus.RUNNING,
+) -> Ticket:
+    suffix = ticket_id.removeprefix("tk-")
+    mandate_id = f"md-{suffix}"
+    store.insert_mandate(
+        Mandate(
+            id=mandate_id,
+            origin_kind="github",
+            scope="github:o/r:issue:1",
+            granted_at=1,
+            repository="o/r",
+            actions=["comment_issue"],
+        )
+    )
+    ticket = Ticket(
+        id=ticket_id,
+        title="Fix parser",
+        task="SECRET-TASK",
+        created_at=1,
+        status=status,
+        mandate_id=mandate_id,
+    )
+    store.insert_ticket(ticket)
+    store.insert_assignment(Assignment(id=f"as-{suffix}", ticket_id=ticket_id, attempt=1))
+    store.upsert_thread(
+        Thread(
+            key="issue:o/r#1",
+            repository="o/r",
+            kind=ThreadKind.ISSUE,
+            external_ref="#1",
+            last_trigger_at=1,
+        )
+    )
+    store.insert_subscription(
+        Subscription(
+            id=f"sb-{suffix}",
+            ticket_id=ticket_id,
+            thread_key="issue:o/r#1",
+            mode=SubscriptionMode.OWN,
+            created_at=1,
+        )
+    )
+    return ticket
+
+
+@pytest.fixture
+def env(tmp_path: Path):
+    clock = FixedClock()
+    ids = SequenceIds()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    return store, approvals, clock, ids
+
+
+def _console(store, clock, ids, **overrides) -> Console:
+    return Console(store, clock=clock, ids=ids, config=_config(**overrides))
+
+
+def _draft(store, approvals, clock) -> None:
+    drafter = NotificationDrafter(
+        store,
+        approvals,
+        NotificationConfig(enabled=True, max_chars=400),
+        repository="o/r",
+        clock=clock,
+    )
+    assert drafter.draft_due() == 1
+
+
+def test_non_operator_is_rejected_before_confirm(env) -> None:
+    store, approvals, clock, ids = env
+    _seed_ticket(store)
+    _draft(store, approvals, clock)
+    approval = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    console = _console(store, clock, ids)
+
+    with pytest.raises(RouterPermissionError):
+        console.approve(approval.id, actor="mallory", confirm="wrong")
+
+    assert approvals.get(approval.id).status is ApprovalStatus.PENDING
+
+
+def test_confirm_mismatch_writes_nothing(env) -> None:
+    store, approvals, clock, ids = env
+    _seed_ticket(store)
+    _draft(store, approvals, clock)
+    approval = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    console = _console(store, clock, ids)
+
+    with pytest.raises(CliError) as captured:
+        console.approve(approval.id, actor="alice", confirm="ap-other")
+
+    assert captured.value.code == 2
+    assert approvals.get(approval.id).status is ApprovalStatus.PENDING
+
+
+def test_approve_notification_enqueues_matching_effect(env) -> None:
+    store, approvals, clock, ids = env
+    _seed_ticket(store)
+    _draft(store, approvals, clock)
+    approval = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    console = _console(store, clock, ids)
+
+    decided = console.approve(approval.id, actor="alice", confirm=approval.id)
+
+    assert decided.status is ApprovalStatus.APPROVED
+    effects = [
+        effect
+        for effect in store.due_effects(clock.now_ms())
+        if effect.kind is EffectKind.GITHUB_COMMENT
+    ]
+    assert [effect.idempotency_key for effect in effects] == ["notify:tk-1:accepted"]
+    assert effects[0].payload["body"].startswith("[Accepted] Fix parser")
+
+
+def test_approve_rejects_a_changed_draft_without_writing(env) -> None:
+    store, approvals, clock, ids = env
+    ticket = _seed_ticket(store)
+    _draft(store, approvals, clock)
+    approval = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    store.update_ticket(ticket.model_copy(update={"title": "changed"}))
+    console = _console(store, clock, ids)
+
+    with pytest.raises(CliError) as captured:
+        console.approve(approval.id, actor="alice", confirm=approval.id)
+
+    assert captured.value.code == 3
+    assert approvals.get(approval.id).status is ApprovalStatus.PENDING
+    assert store.due_effects(clock.now_ms()) == []
+
+
+def test_generic_approval_flips_without_draft_recompute(env) -> None:
+    store, approvals, clock, ids = env
+    _seed_ticket(store)
+    approval = approvals.submit("tk-1", Action.COMMENT_ISSUE, "legacy", "high_risk")
+    console = _console(store, clock, ids)
+
+    decided = console.approve(approval.id, actor="alice", confirm=approval.id)
+
+    assert decided.status is ApprovalStatus.APPROVED
+    assert store.due_effects(clock.now_ms()) == []
+
+
+def test_deny_silences_future_notifications(env) -> None:
+    store, approvals, clock, ids = env
+    _seed_ticket(store)
+    _draft(store, approvals, clock)
+    approval = approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING)[0]
+    console = _console(store, clock, ids)
+
+    console.deny(approval.id, actor="alice", confirm=approval.id)
+
+    drafter = NotificationDrafter(
+        store, approvals, NotificationConfig(), repository="o/r", clock=clock
+    )
+    assert drafter.draft_due() == 0
+
+
+def test_stop_revokes_pending_approvals_and_cancels(env) -> None:
+    store, approvals, clock, ids = env
+    _seed_ticket(store)
+    _draft(store, approvals, clock)
+    console = _console(store, clock, ids)
+
+    stopped = console.stop("tk-1", actor="alice", confirm="tk-1")
+
+    assert stopped.status is TicketStatus.CANCELLED
+    assert approvals.for_ticket("tk-1", status=ApprovalStatus.PENDING) == []
+
+
+def test_retry_dispatches_failed_effect_then_failed_ticket(env) -> None:
+    store, approvals, clock, ids = env
+    _seed_ticket(store)
+    store.enqueue_effect(
+        Effect(
+            id="ef-1",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="notify:tk-1:accepted",
+            payload={"ticket_id": "tk-1"},
+            state=EffectState.FAILED,
+            attempts=3,
+            due_at=1,
+            last_error="boom",
+        )
+    )
+    _seed_ticket(store, ticket_id="tk-2", status=TicketStatus.FAILED)
+    console = _console(store, clock, ids)
+
+    effect = console.retry("ef-1", actor="alice", confirm="ef-1")
+    assignment = console.retry("tk-2", actor="alice", confirm="tk-2")
+
+    assert effect.state is EffectState.PENDING
+    assert assignment.attempt == 2
+    assert store.get_ticket("tk-2").status is TicketStatus.QUEUED
+    with pytest.raises(CliError) as captured:
+        console.retry("missing", actor="alice", confirm="missing")
+    assert captured.value.code == 1
+
+
+def test_pause_and_resume_require_literal_confirm(env) -> None:
+    store, _, clock, ids = env
+    console = _console(store, clock, ids)
+
+    assert console.pause(actor="alice", confirm="pause").paused is True
+    assert console.resume(actor="alice", confirm="resume").paused is False
+    with pytest.raises(CliError) as captured:
+        console.resume(actor="alice", confirm="pause")
+    assert captured.value.code == 2
+
+
+def test_cli_main_status_and_exit_codes(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "p6.db"
+    config_path = tmp_path / "console.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "repository": "o/r",
+                "operators": ["alice"],
+                "actors": ["alice"],
+                "actions": ["read_repository", "comment_issue"],
+                "default_validity_ms": 60000,
+                "notifications": {"enabled": True, "max_chars": 400, "since_ms": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SupervisorStore(db, clock=FixedClock())
+    _seed_ticket(store, status=TicketStatus.READY)
+    store.close()
+    base = ["--db", str(db), "--config", str(config_path), "--operator", "alice"]
+
+    assert main([*base, "status"]) == 0
+    output = capsys.readouterr().out
+    assert "attention" in output and "ready_ticket" in output
+    assert main([*base, "stop", "tk-1"]) == 2
+    assert main([*base[:5], "mallory", "stop", "tk-1", "--confirm", "tk-1"]) == 4
+    assert main([*base, "ticket", "tk-missing"]) == 1
+
+
+def test_cli_main_covers_ticket_thread_retry_and_controls(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "p6.db"
+    config_path = tmp_path / "console.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "repository": "o/r",
+                "operators": ["alice"],
+                "actors": ["alice"],
+                "actions": ["read_repository", "comment_issue"],
+                "default_validity_ms": 60000,
+                "notifications": {"enabled": True, "max_chars": 400, "since_ms": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SupervisorStore(db, clock=FixedClock())
+    _seed_ticket(store, status=TicketStatus.READY)
+    store.insert_report(
+        Report(
+            id="rp-1",
+            ticket_id="tk-1",
+            assignment_id="as-1",
+            kind=ReportKind.READY,
+            summary="ready for review",
+            created_at=2,
+        )
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-1",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="k-1",
+            payload={"ticket_id": "tk-1"},
+            state=EffectState.FAILED,
+            due_at=1,
+        )
+    )
+    store.insert_trigger(
+        Trigger(
+            id="tg-1",
+            external_id="issue:1",
+            kind=TriggerKind.ISSUE,
+            actor="alice",
+            thread_keys=["issue:o/r#1"],
+            occurred_at=1,
+            received_at=1,
+            payload={"request": {"text": "task", "mentioned": True}},
+        )
+    )
+    store.insert_approval(
+        id="ap-1",
+        ticket_id="tk-1",
+        action="comment_issue",
+        resource_digest="legacy",
+        reason="high_risk",
+        requested_at=1,
+    )
+    store.insert_approval(
+        id="ap-2",
+        ticket_id="tk-1",
+        action="comment_issue",
+        resource_digest="legacy-2",
+        reason="high_risk",
+        requested_at=1,
+    )
+    store.put_source_cursor(SourceCursor(source="github", cursor="9"))
+    store.close()
+    base = ["--db", str(db), "--config", str(config_path), "--operator", "alice"]
+
+    assert main([*base, "ticket", "tk-1"]) == 0
+    ticket_output = capsys.readouterr().out
+    assert "assignment as-1" in ticket_output
+    assert "timeline 2 report rp-1" in ticket_output
+    assert main([*base, "thread", "issue:o/r#1"]) == 0
+    assert "trigger" in capsys.readouterr().out
+    assert main([*base, "approve", "ap-1", "--confirm", "ap-1"]) == 0
+    assert main([*base, "deny", "ap-2", "--confirm", "ap-2"]) == 0
+    assert main([*base, "approve", "ap-missing", "--confirm", "ap-missing"]) == 1
+    assert render_thread([]) == "thread empty"
+    assert main([*base, "retry", "ef-1", "--confirm", "ef-1"]) == 0
+    assert main([*base, "reevaluate", "tg-1", "--confirm", "tg-1"]) == 0
+    assert main([*base, "pause", "--confirm", "pause"]) == 0
+    assert main([*base, "resume", "--confirm", "resume"]) == 0
+
+    missing = tmp_path / "missing.json"
+    assert (
+        main(["--db", str(db), "--config", str(missing), "--operator", "alice", "status"])
+        == 1
+    )
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"repository": "o/r", "bogus": 1}), encoding="utf-8")
+    assert (
+        main(["--db", str(db), "--config", str(bad), "--operator", "alice", "status"]) == 1
+    )
+    bad_action = tmp_path / "bad-action.json"
+    bad_action.write_text(
+        json.dumps({"repository": "o/r", "operators": ["alice"], "actions": ["merge"]}),
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "--config",
+                str(bad_action),
+                "--operator",
+                "alice",
+                "status",
+            ]
+        )
+        == 1
+    )
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_console.py \
+  > /tmp/p6-m5-t7-red.txt 2>&1; tail -20 /tmp/p6-m5-t7-red.txt
+```
+
+Expected：`ModuleNotFoundError: No module named 'stableagent.supervisor.cli'`。
+
+- [ ] **Step 3: 共享 operator 门禁并实现 console.py**
+
+`stableagent/supervisor/router.py` 在 `RouterConfig` 之后追加：
+
+```python
+def require_operator(operators: frozenset[str], actor: str) -> None:
+    allowed = {name.casefold() for name in operators}
+    if actor.casefold() not in allowed:
+        raise RouterPermissionError(f"actor 不是 operator：{actor}")
+```
+
+`stableagent/supervisor/service.py` 的 `_require_operator` 替换为：
+
+```python
+    def _require_operator(self, actor: str) -> None:
+        require_operator(self._router.config.operators, actor)
+```
+
+并在既有 router import 中补 `require_operator`。
+
+`stableagent/supervisor/runtime.py` 的 `RuntimeController._require_operator` 替换为：
+
+```python
+    def _require_operator(self, actor: str) -> None:
+        require_operator(self._runtime.config.router.operators, actor)
+```
+
+并在既有 router import 中补 `require_operator`。
+
+新建 `stableagent/supervisor/console.py`：
+
+```python
+"""CLI 监管控制台：门禁、--confirm 与渲染；业务规则在既有服务层（规格 WP-6.5）。"""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from stableagent.control.approval import ApprovalService
+from stableagent.control.audit import AuditWriter
+from stableagent.control.errors import ApprovalDecidedError, UnknownApprovalError
+from stableagent.control.model import Action, ApprovalRequest, ApprovalStatus
+from stableagent.control.policy import P5_POLICY_VERSION, StaticPolicy, StaticPolicyConfig
+from stableagent.orchestration.errors import UnknownTicketError
+from stableagent.orchestration.model import (
+    Assignment,
+    Clock,
+    Effect,
+    IdFactory,
+    Ticket,
+    TicketStatus,
+)
+from stableagent.orchestration.service import OrchestrationService
+from stableagent.supervisor.assessor import ObserveOnlyAssessor
+from stableagent.supervisor.model import Decision, RuntimeControl
+from stableagent.supervisor.notifications import (
+    NotificationConfig,
+    NotificationDrafter,
+    NotificationDraft,
+    notification_effect,
+)
+from stableagent.supervisor.router import (
+    RouterConfig,
+    RouterError,
+    RouterPermissionError,
+    RouterService,
+    require_operator,
+)
+from stableagent.supervisor.runtime import RuntimeStatus, read_runtime_status
+from stableagent.supervisor.service import SupervisorService
+from stableagent.supervisor.store import SupervisorStore
+from stableagent.supervisor.views import (
+    StatusSections,
+    SupervisorViews,
+    TicketDetail,
+    TimelineEvent,
+)
+
+
+class CliError(Exception):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(f"[{code}] {message}")
+        self.code = code
+        self.detail = message
+
+
+class ConsoleConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    repository: str
+    operators: frozenset[str] = frozenset()
+    actors: frozenset[str] = frozenset()
+    actions: tuple[str, ...] = ()
+    allowed_paths: tuple[str, ...] = ()
+    allowed_commands: tuple[str, ...] = ()
+    allowed_mcp: tuple[str, ...] = ()
+    network_profile: str | None = None
+    base_ref: str | None = None
+    requires_approval: bool = False
+    default_validity_ms: int = Field(default=86_400_000, ge=1)
+    policy_version: str = P5_POLICY_VERSION
+    notifications: NotificationConfig | None = None
+
+
+class StatusView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    sections: StatusSections
+    runtime: RuntimeStatus
+
+
+class Console:
+    def __init__(
+        self,
+        store: SupervisorStore,
+        *,
+        clock: Clock,
+        ids: IdFactory,
+        config: ConsoleConfig,
+        audit: AuditWriter | None = None,
+    ) -> None:
+        self._store = store
+        self._clock = clock
+        self._ids = ids
+        self._config = config
+        try:
+            grantable = frozenset(Action(item) for item in config.actions)
+        except ValueError as error:
+            raise CliError(1, f"未知 action：{error}") from error
+        policy = StaticPolicy(
+            StaticPolicyConfig(
+                repository=config.repository,
+                actors=config.actors,
+                grantable_actions=grantable,
+                allowed_commands=list(config.allowed_commands),
+                allowed_mcp=list(config.allowed_mcp),
+                default_validity_ms=config.default_validity_ms,
+                policy_version=config.policy_version,
+            ),
+            clock=clock,
+            ids=ids,
+        )
+        router = RouterService(
+            store,
+            policy,
+            ObserveOnlyAssessor(),
+            RouterConfig(
+                repository=config.repository,
+                operators=config.operators,
+                actions=config.actions,
+                allowed_paths=config.allowed_paths,
+                allowed_commands=config.allowed_commands,
+                allowed_mcp=config.allowed_mcp,
+                network_profile=config.network_profile,
+                base_ref=config.base_ref,
+                requires_approval=config.requires_approval,
+            ),
+            clock=clock,
+            ids=ids,
+            audit=audit,
+        )
+        self._approvals = ApprovalService(store, clock=clock, ids=ids)
+        self._service = SupervisorService(
+            store,
+            policy,
+            router,
+            clock=clock,
+            ids=ids,
+            audit=audit,
+            approvals=self._approvals,
+        )
+        self._orchestration = OrchestrationService(store, clock=clock, ids=ids)
+        self._views = SupervisorViews(store, clock=clock)
+        self._drafter = (
+            None
+            if config.notifications is None
+            else NotificationDrafter(
+                store,
+                self._approvals,
+                config.notifications,
+                repository=config.repository,
+                clock=clock,
+            )
+        )
+
+    def status(self) -> StatusView:
+        return StatusView(
+            sections=self._views.status_sections(),
+            runtime=read_runtime_status(self._store, self._clock),
+        )
+
+    def ticket(self, ticket_id: str) -> TicketDetail:
+        return self._views.ticket_detail(ticket_id)
+
+    def thread(self, thread_key: str) -> list[TimelineEvent]:
+        return self._views.thread_timeline(thread_key)
+
+    def approve(self, approval_id: str, *, actor: str, confirm: str) -> ApprovalRequest:
+        self._require_operator(actor)
+        self._confirm(confirm, approval_id)
+        approval = self._existing_approval(approval_id)
+        effect = None
+        if approval.reason.startswith("notification:"):
+            draft = self._build_notification(approval.ticket_id)
+            if draft is None or draft.digest != approval.resource_digest:
+                raise CliError(3, "通知草稿已变化，请重新 status 后再批准")
+            effect = notification_effect(
+                draft, effect_id=self._ids.new_id("ef"), now=self._clock.now_ms()
+            )
+        return self._approvals.decide(approval_id, True, actor, effect=effect)
+
+    def deny(self, approval_id: str, *, actor: str, confirm: str) -> ApprovalRequest:
+        self._require_operator(actor)
+        self._confirm(confirm, approval_id)
+        self._existing_approval(approval_id)
+        return self._approvals.decide(approval_id, False, actor)
+
+    def stop(
+        self,
+        ticket_id: str,
+        *,
+        actor: str,
+        confirm: str,
+        reason: str | None = None,
+    ) -> Ticket:
+        self._require_operator(actor)
+        self._confirm(confirm, ticket_id)
+        return self._service.stop(ticket_id, actor=actor, reason=reason)
+
+    def retry(self, target_id: str, *, actor: str, confirm: str) -> Effect | Assignment:
+        self._require_operator(actor)
+        self._confirm(confirm, target_id)
+        if self._store.get_effect(target_id) is not None:
+            return self._service.retry_effect(target_id, actor=actor)
+        ticket = self._store.get_ticket(target_id)
+        if ticket is None:
+            raise CliError(1, f"未知 effect 或 ticket：{target_id}")
+        if ticket.status is not TicketStatus.FAILED:
+            raise CliError(1, f"ticket 不是 FAILED：{ticket.status.value}")
+        return self._orchestration.retry_ticket(target_id)
+
+    def reevaluate(self, trigger_id: str, *, actor: str, confirm: str) -> Decision:
+        self._require_operator(actor)
+        self._confirm(confirm, trigger_id)
+        return self._service.reevaluate(trigger_id, actor=actor)
+
+    def pause(
+        self, *, actor: str, confirm: str, reason: str | None = None
+    ) -> RuntimeControl:
+        self._require_operator(actor)
+        self._confirm(confirm, "pause")
+        return self._store.set_runtime_paused(
+            True, actor=actor, now=self._clock.now_ms(), reason=reason
+        )
+
+    def resume(
+        self, *, actor: str, confirm: str, reason: str | None = None
+    ) -> RuntimeControl:
+        self._require_operator(actor)
+        self._confirm(confirm, "resume")
+        return self._store.set_runtime_paused(
+            False, actor=actor, now=self._clock.now_ms(), reason=reason
+        )
+
+    def _require_operator(self, actor: str) -> None:
+        require_operator(self._config.operators, actor)
+
+    @staticmethod
+    def _confirm(actual: str, expected: str) -> None:
+        if actual != expected:
+            raise CliError(2, f"--confirm 必须等于 {expected}")
+
+    def _existing_approval(self, approval_id: str) -> ApprovalRequest:
+        approval = self._approvals.get(approval_id)
+        if approval is None:
+            raise UnknownApprovalError(approval_id)
+        if approval.status is not ApprovalStatus.PENDING:
+            raise ApprovalDecidedError(approval_id, approval.status.value)
+        return approval
+
+    def _build_notification(self, ticket_id: str) -> NotificationDraft | None:
+        if self._drafter is None:
+            return None
+        return self._drafter.build(ticket_id)
+
+
+def render_status(view: StatusView) -> str:
+    runtime = view.runtime
+    lines = [
+        f"runtime started={runtime.started} paused={runtime.paused}"
+        f" owner={runtime.owner or '-'}",
+        "queue"
+        f" queued_tickets={view.sections.queue.queued_tickets}"
+        f" running_assignments={view.sections.queue.running_assignments}"
+        f" due_effects={view.sections.queue.due_effects}"
+        f" failed_effects={view.sections.queue.failed_effects}"
+        f" pending_approvals={view.sections.queue.pending_approvals}",
+    ]
+    for cursor in view.sections.source_health:
+        lines.append(
+            f"source {cursor.source} health={cursor.health.value}"
+            f" cursor={cursor.cursor or '-'} failures={cursor.consecutive_failures}"
+        )
+    if not view.sections.attention:
+        lines.append("attention none")
+    for item in view.sections.attention:
+        lines.append(
+            f"attention {item.priority} {item.source} target={item.target_id}"
+            f" ticket={item.ticket_id or '-'} — {item.detail}"
+            f" [{'/'.join(item.actions)}]"
+        )
+        if item.ticket_link:
+            lines.append(f"  link {item.ticket_link}")
+    return "\n".join(lines)
+
+
+def render_ticket(detail: TicketDetail) -> str:
+    ticket = detail.ticket
+    lines = [
+        f"ticket {ticket.id} status={ticket.status.value} title={ticket.title}",
+        f"mandate {detail.mandate_id}",
+    ]
+    if detail.ticket_link:
+        lines.append(f"link {detail.ticket_link}")
+    for assignment in detail.assignments:
+        lines.append(
+            f"assignment {assignment.id} attempt={assignment.attempt}"
+            f" status={assignment.status.value} failure={assignment.failure or '-'}"
+        )
+    for subscription in detail.subscriptions:
+        lines.append(
+            f"subscription {subscription.id} thread={subscription.thread_key}"
+            f" mode={subscription.mode.value} ended_at={subscription.ended_at or '-'}"
+        )
+    for event in detail.timeline:
+        lines.append(
+            f"timeline {event.at} {event.kind} {event.object_id or '-'} {event.summary}"
+        )
+    return "\n".join(lines)
+
+
+def render_thread(events: list[TimelineEvent]) -> str:
+    if not events:
+        return "thread empty"
+    return "\n".join(
+        f"timeline {event.at} {event.kind} {event.object_id or '-'} {event.summary}"
+        for event in events
+    )
+
+
+def render_approval(approval: ApprovalRequest, *, approved: bool) -> str:
+    verb = "approved" if approved else "denied"
+    return f"{verb} {approval.id} ticket={approval.ticket_id}"
+
+
+def render_retry(result: Effect | Assignment) -> str:
+    if isinstance(result, Effect):
+        return f"retried effect {result.id} state={result.state.value}"
+    return f"retried ticket {result.ticket_id} assignment={result.id}"
+
+
+def render_decision(decision: Decision) -> str:
+    return f"reevaluated {decision.id} outcome={decision.outcome.value}"
+
+
+def render_control(control: RuntimeControl) -> str:
+    return "paused" if control.paused else "resumed"
+```
+
+- [ ] **Step 4: 实现 cli.py**
+
+新建 `stableagent/supervisor/cli.py`：
+
+```python
+"""stdlib CLI 入口：只解析参数、调用 Console、映射退出码（规格 WP-6.5）。"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from stableagent.control.errors import ApprovalDecidedError, UnknownApprovalError
+from stableagent.orchestration.errors import UnknownTicketError
+from stableagent.orchestration.model import SystemClock, Uuid4Id
+from stableagent.supervisor.console import (
+    CliError,
+    Console,
+    ConsoleConfig,
+    render_approval,
+    render_control,
+    render_decision,
+    render_retry,
+    render_status,
+    render_thread,
+    render_ticket,
+)
+from stableagent.supervisor.router import RouterError, RouterPermissionError
+from stableagent.supervisor.store import SupervisorStore
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m stableagent.supervisor.cli",
+        description="Supervisor 监管控制台（只读首屏 + 显式确认写命令）",
+    )
+    parser.add_argument("--db", required=True, help="SQLite 路径")
+    parser.add_argument("--config", required=True, help="JSON 配置路径")
+    parser.add_argument("--operator", required=True, help="执行人（大小写不敏感）")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("status", help="首屏：注意力、Source 健康、队列与运行态")
+    ticket = commands.add_parser("ticket", help="Ticket 详情与完整时间线")
+    ticket.add_argument("ticket_id")
+    thread = commands.add_parser("thread", help="Thread 时间线")
+    thread.add_argument("thread_key")
+
+    approve = commands.add_parser("approve", help="批准一条待审事项")
+    approve.add_argument("approval_id")
+    approve.add_argument("--confirm", required=True)
+    deny = commands.add_parser("deny", help="拒绝一条待审事项")
+    deny.add_argument("approval_id")
+    deny.add_argument("--confirm", required=True)
+    stop = commands.add_parser("stop", help="停止一个 Ticket")
+    stop.add_argument("ticket_id")
+    stop.add_argument("--confirm", required=True)
+    stop.add_argument("--reason")
+    retry = commands.add_parser("retry", help="重试失败 effect 或 FAILED Ticket")
+    retry.add_argument("target_id")
+    retry.add_argument("--confirm", required=True)
+    reevaluate = commands.add_parser("reevaluate", help="重评估一条 Trigger")
+    reevaluate.add_argument("trigger_id")
+    reevaluate.add_argument("--confirm", required=True)
+    pause = commands.add_parser("pause", help="暂停处理")
+    pause.add_argument("--confirm", required=True)
+    pause.add_argument("--reason")
+    resume = commands.add_parser("resume", help="恢复处理")
+    resume.add_argument("--confirm", required=True)
+    resume.add_argument("--reason")
+    return parser
+
+
+def _load_config(path: str) -> ConsoleConfig:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CliError(1, f"配置读取失败：{error}") from error
+    if not isinstance(raw, dict):
+        raise CliError(1, "配置必须是 JSON 对象")
+    try:
+        return ConsoleConfig.model_validate(raw)
+    except ValidationError as error:
+        raise CliError(1, f"配置无效：{error}") from error
+
+
+def _run(console: Console, args: argparse.Namespace) -> str:
+    if args.command == "status":
+        return render_status(console.status())
+    if args.command == "ticket":
+        return render_ticket(console.ticket(args.ticket_id))
+    if args.command == "thread":
+        return render_thread(console.thread(args.thread_key))
+    if args.command == "approve":
+        return render_approval(
+            console.approve(args.approval_id, actor=args.operator, confirm=args.confirm),
+            approved=True,
+        )
+    if args.command == "deny":
+        return render_approval(
+            console.deny(args.approval_id, actor=args.operator, confirm=args.confirm),
+            approved=False,
+        )
+    if args.command == "stop":
+        ticket = console.stop(
+            args.ticket_id,
+            actor=args.operator,
+            confirm=args.confirm,
+            reason=args.reason,
+        )
+        return f"stopped {ticket.id} status={ticket.status.value}"
+    if args.command == "retry":
+        return render_retry(console.retry(args.target_id, actor=args.operator, confirm=args.confirm))
+    if args.command == "reevaluate":
+        return render_decision(
+            console.reevaluate(args.trigger_id, actor=args.operator, confirm=args.confirm)
+        )
+    if args.command == "pause":
+        return render_control(
+            console.pause(actor=args.operator, confirm=args.confirm, reason=args.reason)
+        )
+    if args.command == "resume":
+        return render_control(
+            console.resume(actor=args.operator, confirm=args.confirm, reason=args.reason)
+        )
+    raise CliError(1, f"未知命令：{args.command}")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        args = _parser().parse_args(argv)
+    except SystemExit as exit_error:
+        return int(exit_error.code or 0)
+    clock = SystemClock()
+    store: SupervisorStore | None = None
+    try:
+        config = _load_config(args.config)
+        store = SupervisorStore(args.db, clock=clock)
+        console = Console(store, clock=clock, ids=Uuid4Id(), config=config)
+        output = _run(console, args)
+    except RouterPermissionError as error:
+        print(f"[4] {error.detail}", file=sys.stderr)
+        return 4
+    except CliError as error:
+        print(str(error), file=sys.stderr)
+        return error.code
+    except (
+        RouterError,
+        UnknownApprovalError,
+        ApprovalDecidedError,
+        UnknownTicketError,
+        KeyError,
+    ) as error:
+        print(f"[1] {error}", file=sys.stderr)
+        return 1
+    finally:
+        if store is not None:
+            store.close()
+    print(output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 5: 运行测试确认通过**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_console.py \
+  > /tmp/p6-m5-t7-green.txt 2>&1; tail -5 /tmp/p6-m5-t7-green.txt
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_service.py \
+  tests/unit/test_supervisor_runtime.py > /tmp/p6-m5-t7-regress.txt 2>&1
+tail -5 /tmp/p6-m5-t7-regress.txt
+.venv/bin/ruff check stableagent/supervisor/console.py stableagent/supervisor/cli.py \
+  stableagent/supervisor/router.py stableagent/supervisor/service.py \
+  stableagent/supervisor/runtime.py tests/unit/test_supervisor_console.py
+.venv/bin/ruff format --check stableagent/supervisor/console.py \
+  stableagent/supervisor/cli.py stableagent/supervisor/router.py \
+  stableagent/supervisor/service.py stableagent/supervisor/runtime.py \
+  tests/unit/test_supervisor_console.py
+```
+
+Expected：console `11 passed`；service + runtime 既有用例 0 failed。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/console.py stableagent/supervisor/cli.py \
+  stableagent/supervisor/router.py stableagent/supervisor/service.py \
+  stableagent/supervisor/runtime.py tests/unit/test_supervisor_console.py
+git commit -m "feat: add supervisor console and confirmed cli"
+```
+
+---
+
+### Task 8：CI FOCUS 35、控制台指南与 M5 出口（M5-8）
+
+**Files:**
+- Modify: `tests/unit/test_ci_focus_gate.py`
+- Modify: `.github/workflows/ci.yml`
+- Create: `docs/guides/supervisor-console.md`
+- Modify: `docs/acceptance/p6-supervisor-beta.md`
+- Modify: `README.md` / `docs/README.md` / `docs/acceptance/README.md` /
+  `docs/Roadmap.md` / `CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: Task 1~7 的全部产物。
+- Produces: 35 文件心脏覆盖率闸门、控制台运维指南、M5-1~M5-8 账本与出口读数。
+
+- [ ] **Step 1: 写失败测试（FOCUS 契约）**
+
+`tests/unit/test_ci_focus_gate.py`：
+
+- 在 `FOCUS_FILES` 末尾追加两项：
+
+```python
+    "supervisor/notifications.py",
+    "supervisor/console.py",
+```
+
+- 测试函数与断言改为：
+
+```python
+def test_focus_covers_the_thirty_five_cardiac_files() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert all(f'"{name}"' in text for name in FOCUS_FILES)
+    assert len(FOCUS_FILES) == 35
+    assert "35 文件" in text  # 步骤名与注释同步
+    assert text.count('".py"') == 0  # 不许用通配兜底
+```
+
+- [ ] **Step 2: 运行测试确认失败，再改 CI**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py \
+  > /tmp/p6-m5-t8-red.txt 2>&1; tail -10 /tmp/p6-m5-t8-red.txt
+```
+
+Expected：`assert 33 == 35` 或 `"35 文件" not in text`。
+
+`.github/workflows/ci.yml`：
+
+- 步骤名改为
+  `心脏模块覆盖率闸门（35 文件：loop/checkpoint/errors/context/evidence/orchestration/control/execution/integrations/supervisor 各 ≥90%）`。
+- `FOCUS` 元组在 `"supervisor/runtime.py"` 之后追加：
+
+```python
+              "supervisor/notifications.py",
+              "supervisor/console.py",
+```
+
+再次运行：
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py \
+  > /tmp/p6-m5-t8-green.txt 2>&1; tail -5 /tmp/p6-m5-t8-green.txt
+```
+
+Expected：`1 passed`。
+
+- [ ] **Step 3: 写控制台指南**
+
+新建 `docs/guides/supervisor-console.md`：
+
+```markdown
+# Supervisor 监管控制台（M5）
+
+## 定位
+
+`python -m stableagent.supervisor.cli` 是单仓库 Beta 的最小人工监管面：只读首屏优先
+展示待人工事项，写命令必须显式确认。它不发起任何外部网络请求，也不读取凭据。
+
+## 启动
+
+```bash
+python -m stableagent.supervisor.cli \
+  --db state.db --config console.json --operator alice status
+```
+
+## 配置
+
+```json
+{
+  "repository": "owner/repo",
+  "operators": ["alice"],
+  "actors": ["alice"],
+  "actions": ["read_repository", "comment_issue"],
+  "default_validity_ms": 86400000,
+  "notifications": {"enabled": true, "max_chars": 400, "since_ms": 0}
+}
+```
+
+`operators` 是能执行写命令的人；`actors` 是 GitHub 上允许显式请求的人；两者可以不同。
+`notifications` 必须与 Runtime 的 `NotificationConfig` 一致，否则 `approve` 重算的
+digest 不同，会按退出码 3 拒绝。配置 `extra="forbid"`，不要写入 token。
+
+## 只读命令
+
+| 命令 | 作用 |
+|---|---|
+| `status` | 注意力（审批 → 失败 effect → waiting → ready）、Source 健康、队列与运行态 |
+| `ticket <id>` | Ticket 状态、Mandate、Assignment、订阅与完整时间线 |
+| `thread <key>` | Thread 的 Trigger / Decision 时间线（`object_id` 可作 `reevaluate` 目标） |
+
+## 写命令与确认
+
+| 命令 | `--confirm` 必须等于 |
+|---|---|
+| `approve <approval-id>` | approval id |
+| `deny <approval-id>` | approval id |
+| `stop <ticket-id>` | ticket id |
+| `retry <effect-or-ticket-id>` | 同一个 id |
+| `reevaluate <trigger-id>` | trigger id |
+| `pause` | 字面量 `pause` |
+| `resume` | 字面量 `resume` |
+
+退出码：`0` 成功；`1` 未知对象或状态不允许；`2` 确认缺失或不匹配；`3` 通知草稿已
+变化；`4` 非 operator。operator 校验先于确认校验。
+
+## 通知生命周期
+
+1. Runtime 在每轮 tick 后、外部 effect 派发前，按 Ticket 状态草拟
+   accepted / attention / result / failure 四类通知，只写 pending 审批，不发消息。
+2. 人工 `approve` 时 CLI 重算正文与 digest；一致才在**同一事务**内批准并入队
+   `GITHUB_COMMENT` effect。下一步由 outbox 经 `ApprovalGate` 发送。
+3. `deny` 后该 Ticket 的所有后续通知都不再草拟（拒绝即静默）；要停止任务请用 `stop`，
+   它会在同一事务里撤销该 Ticket 的 pending 审批。
+
+## retry 的 at-least-once
+
+`retry <effect-id>` 只把 `FAILED` effect 改回 `PENDING`，沿用原幂等键与 payload。
+如果失败发生在 GitHub 已收到评论但本地未记成功之后，重试可能重复一条评论；这是
+M5 明确接受的 at-least-once 语义。`retry <ticket-id>` 只接受 `FAILED` Ticket。
+
+## 安全边界
+
+- 不读凭据；配置无 token 字段。
+- 不发起网络请求；发送只经 Runtime 的 effect 与审批门。
+- 首屏与详情不返回 `task`、`Trigger.payload`、`TicketInput.payload` 或日志正文。
+- 所有写命令校验 operator；`--confirm` 防止误触。
+```
+
+- [ ] **Step 4: 回填账本与状态面**
+
+`docs/acceptance/p6-supervisor-beta.md`：
+
+- §1 的 `### M5：最小监管面与注意力协议（规格 WP-6.5；待 M4 收口后展开）` 改为收口
+  状态行，并按 M1~M4 的格式补齐 `- [x] **M5-1**` ~ `- [x] **M5-8**` 八条（每条写
+  对应提交与实测用例数）。
+- §3 的 views 行改为：
+
+```bash
+.venv/bin/pytest -q tests/unit/test_supervisor_views.py \
+  tests/unit/test_supervisor_notifications.py tests/unit/test_supervisor_console.py \
+  tests/unit/test_ci_focus_gate.py
+```
+
+- §4 追加 M5 的 Task/Step 计数（以实际 `- [ ] **Step` 条数为准）。
+- 把 §12 末尾既有的 `### M5 自检记录（writing-plans）` 与
+  `### M5 出口读数（2026-11-09，落盘 /tmp/p6-m5-*.txt 后读回）` 回填：记录全量/
+  三解释器/覆盖率/静态/边界四零/计划偏差，全部以读回文件为准，不新增重复小节。
+
+状态面：
+
+```markdown
+| P6 | Single-repository Super-Agent Beta | 🟡 active — M5 done (8/8); milestones 5/6 |
+```
+
+`docs/README.md` 与 `docs/acceptance/README.md` 的 P6 状态行同步为
+`P6 进行中（M5 完成，8/8；里程碑 5/6）`；`docs/README.md` 的状态表与指南索引改为
+M5 完成口径并链接 `guides/supervisor-console.md`；`docs/Roadmap.md` 的"当前进度"改为
+M1~M5 完成，`下一步：M6 Beta 演练与发布门禁（规格 WP-6.6）`；`CHANGELOG.md` 在
+`## [Unreleased]` 下新增 `### 实现（P6 M5 Console，2026-11-09）`，写首屏/详情/
+通知草拟/确认写命令/FOCUS 35 与门禁读数。
+
+- [ ] **Step 5: 全量门禁**
+
+```bash
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p6-m5-full.txt 2>&1
+tail -5 /tmp/p6-m5-full.txt
+env -u NO_PROXY -u no_proxy .venv/bin/ruff check stableagent tests examples benchmarks \
+  > /tmp/p6-m5-ruff.txt 2>&1; cat /tmp/p6-m5-ruff.txt
+env -u NO_PROXY -u no_proxy .venv/bin/ruff format --check stableagent tests examples benchmarks \
+  > /tmp/p6-m5-format.txt 2>&1; tail -3 /tmp/p6-m5-format.txt
+env -u NO_PROXY -u no_proxy .venv/bin/mypy > /tmp/p6-m5-mypy.txt 2>&1
+tail -3 /tmp/p6-m5-mypy.txt
+git diff 234f620..HEAD --stat -- stableagent/core/ > /tmp/p6-m5-l1.txt; cat /tmp/p6-m5-l1.txt
+git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py \
+  > /tmp/p6-m5-c1.txt; cat /tmp/p6-m5-c1.txt
+grep -rn "stableagent.supervisor" stableagent/core stableagent/orchestration \
+  stableagent/control stableagent/execution stableagent/integrations \
+  > /tmp/p6-m5-reverse.txt; cat /tmp/p6-m5-reverse.txt
+git diff --check > /tmp/p6-m5-diffcheck.txt; cat /tmp/p6-m5-diffcheck.txt
+.venv/bin/python -m stableagent.supervisor.cli --help > /tmp/p6-m5-help.txt 2>&1
+head -3 /tmp/p6-m5-help.txt
+```
+
+Expected：全量全绿；`notifications.py` 与 `console.py` 行覆盖率 ≥90%；L1/C1/reverse/
+diffcheck 四个文件均为空；`--help` 输出 usage 且退出 0。
+
+- [ ] **Step 6: 三解释器与覆盖率读数**
+
+```bash
+env -u NO_PROXY -u no_proxy .matrix/py311/bin/pytest -q > /tmp/p6-m5-py311.txt 2>&1
+tail -3 /tmp/p6-m5-py311.txt
+env -u NO_PROXY -u no_proxy .matrix/py312/bin/pytest -q > /tmp/p6-m5-py312.txt 2>&1
+tail -3 /tmp/p6-m5-py312.txt
+grep -E "supervisor/(notifications|console)\.py" /tmp/p6-m5-full.txt
+```
+
+Expected：3.11 / 3.12 与 3.10 同为 `passed, skipped`；两个新文件覆盖率 ≥90%。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add tests/unit/test_ci_focus_gate.py .github/workflows/ci.yml \
+  docs/guides/supervisor-console.md docs/acceptance/p6-supervisor-beta.md \
+  docs/specs/p6-single-repository-super-agent-beta.md \
+  README.md docs/README.md docs/acceptance/README.md docs/Roadmap.md CHANGELOG.md
+git commit -m "docs: close p6 m5 with console and attention evidence"
+```
+
+---
+
+### M5 自检记录（writing-plans）
+
+- **规格覆盖：** WP-6.5 首屏/详情 → Task 1/2；通知模板与限长 → Task 3；草拟、digest、
+  去重与静默 → Task 4；批准 + effect 同事务、失败 effect retry、stop 撤销 → Task 5；
+  Runtime 接线、跨进程 resume 与集成证据 → Task 6；CLI 命令面、确认与退出码 → Task 7；
+  FOCUS 35、指南与账本 → Task 8。
+- **类型一致性：** `NotificationConfig` / `NotificationKind` / `NotificationDraft` /
+  `NotificationDrafter` 只在 Task 3/4 定义；`QueueCounts` / `StatusSections` /
+  `ticket_links` / `thread_url` 只在 Task 1 定义，Task 2/4 只追加消费；
+  `ConsoleConfig` / `CliError` / `Console` / `StatusView` 只在 Task 7 定义。
+  `RuntimeStep.drafted` 与 `RuntimeConfig.notifications` 在 Task 6 一次加齐。
+- **无占位符：** 每个实现步骤给出完整代码；出口读数与用例总数在实测后回填，不预填。
+- **自检修正：** 通知只对 `origin_kind="github"` 且 `mandate.actions` 含 `comment_issue`
+  的 Ticket 草拟（与 spec 对齐）；`Review` 的展示链接按 spec 回落仓库 URL，但评论 URL
+  独立回落其 PR；`retry` 先查 effect 再查 Ticket，两条路径都要求 `FAILED`；CLI 对非
+  `notification:` 审批不重算 digest，避免 P5 既有审批被 M5 误伤。复审另修：两类测试
+  种子按 ticket id 派生 mandate/assignment/subscription id，避免双 Ticket 主键冲突；
+  CLI 非 operator 用例的 `--operator mallory` 参数切片修正；Task 7 增加命令矩阵用例，
+  使 `console.py` 的渲染器与全部 `_run` 分支进入 FOCUS 90% 覆盖；Task 6 补齐 WP-6.5
+  第 6 条要求的集成证据（批准后只派发一次且跨重启不重放、拒绝静默、每个状态至多草拟
+  一次），Step 总数随之修正为 44。
+- **边界：** `notifications.py` 只 import `github_effects.github_resource` 纯函数，不
+  import client/handler；`console.py` 不 import `source` / `execution` / `integrations`；
+  `cli.py` 不做网络；所有事务在 Store 方法或 `ApprovalService` 内（L3）；外部正文不进
+  授权（L4）；不新增 `EffectKind`（L6）；配置与输出不含凭据（L7）。
+
+### M5 出口读数（2026-11-09，落盘 `/tmp/p6-m5-*.txt` 后读回）
+
+- 全量 / 三解释器 / 覆盖率 / 静态 / 边界四零 / 计划偏差：执行 Task 8 时按读回文件回填。
