@@ -73,6 +73,14 @@ class SourceHealth(str, Enum):
     FAILED = "failed"
 
 
+class AutonomyMode(str, Enum):
+    """分级自治：Beta 只允许 off/observe；auto 仅保留接口（规格 2.3）。"""
+
+    OFF = "off"
+    OBSERVE = "observe"
+    AUTO = "auto"
+
+
 class Trigger(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
