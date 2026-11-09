@@ -101,7 +101,7 @@ async def _noop(effect) -> None:
 
 
 @pytest.fixture
-def env(tmp_path: Path):
+async def env(tmp_path: Path):
     clock, ids = FixedClock(), SequenceIds()
     store = SupervisorStore(tmp_path / "runtime.db", clock=clock)
     policy = StaticPolicy(
@@ -139,6 +139,8 @@ def env(tmp_path: Path):
     try:
         yield bundle, store, clock, source, executor
     finally:
+        executor.gate.set()
+        await bundle.runtime.stop()
         store.close()
 
 
@@ -265,3 +267,46 @@ async def test_control_commands_are_operator_gated_case_insensitively(env) -> No
     assert control.paused is True and control.actor == "ALICE"
     with pytest.raises(RouterPermissionError):
         bundle.controller.resume_processing(actor="mallory")
+
+
+async def test_stop_waits_for_the_worker_without_cancelling_it(env) -> None:
+    bundle, store, _, source, executor = env
+    executor.gate.clear()
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    await asyncio.sleep(0)
+    assert executor.launched
+
+    stopping = asyncio.create_task(bundle.runtime.stop())
+    await asyncio.sleep(0)
+    assert stopping.done() is False  # 宽限期内不硬杀
+    assert executor.cancelled == []
+
+    executor.gate.set()
+    result = await stopping
+    assert result.drained is True and result.running_assignments == 0
+    assert store.get_runtime_lock() is None
+
+
+async def test_stop_is_idempotent_and_releases_the_lock(env) -> None:
+    bundle, store, _, _, _ = env
+    bundle.runtime.start()
+
+    first = await bundle.runtime.stop()
+    second = await bundle.runtime.stop()
+
+    assert first.drained is True and second.drained is True
+    assert store.get_runtime_lock() is None
+
+
+async def test_serve_runs_bounded_steps_then_stops(env) -> None:
+    bundle, store, _, source, executor = env
+    source.feed(_event())
+    bundle.runtime.start()
+
+    steps = await bundle.runtime.serve(max_steps=2)
+
+    assert steps == 2
+    assert len(executor.launched) == 1
+    assert store.get_runtime_lock() is None

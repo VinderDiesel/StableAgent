@@ -71,6 +71,14 @@ class Scheduler:
     def running_assignments(self) -> set[str]:
         return {key for key, task in self._tasks.items() if not task.done()}
 
+    async def wait_idle(self, *, timeout_ms: int) -> bool:
+        """只等待进行中的 Worker 结束；宽限期到点返回 False，绝不取消任务。"""
+        tasks = [task for task in self._tasks.values() if not task.done()]
+        if not tasks:
+            return True
+        _, pending = await asyncio.wait(tasks, timeout=max(timeout_ms / 1000.0, 0.0))
+        return not pending
+
     def _gate_launch(self, effect: Effect) -> bool:
         live = self.running_assignments()
         if effect.payload.get("assignment_id") in live:

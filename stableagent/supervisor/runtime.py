@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -131,6 +132,7 @@ class Runtime:
         self._config = config
         self._clock = clock
         self._started = False
+        self._stop_requested = False
 
     @property
     def config(self) -> RuntimeConfig:
@@ -230,6 +232,31 @@ class Runtime:
             self._renew_lock()
             self._route_pending()
         return control
+
+    async def serve(self, *, max_steps: int | None = None) -> int:
+        """常驻循环；max_steps 只给测试/演练用，正常部署不传。"""
+        steps = 0
+        try:
+            while not self._stop_requested and (max_steps is None or steps < max_steps):
+                await self.step()
+                steps += 1
+                if self._stop_requested or (max_steps is not None and steps >= max_steps):
+                    break
+                await asyncio.sleep(self._config.step_interval_ms / 1000.0)
+        finally:
+            await self.stop()
+        return steps
+
+    async def stop(self) -> RuntimeStop:
+        """先停 intake（不再 step），再等宽限期；不取消 Worker、不删任何历史。"""
+        self._stop_requested = True
+        if not self._started:
+            return RuntimeStop(drained=True, running_assignments=0)
+        drained = await self._scheduler.wait_idle(timeout_ms=self._config.stop_grace_ms)
+        running = len(self._scheduler.running_assignments())
+        self._store.release_runtime_lock(self._config.owner)
+        self._started = False
+        return RuntimeStop(drained=drained, running_assignments=running)
 
     def _renew_lock(self) -> None:
         if not self._store.heartbeat_runtime_lock(

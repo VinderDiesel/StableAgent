@@ -659,3 +659,24 @@ async def test_launch_effect_for_blocked_ticket_is_voided(env) -> None:
         if effect.kind is EffectKind.LAUNCH_ASSIGNMENT and effect.payload["ticket_id"] == ticket.id
     ]
     assert leftover == []  # 领掉空转：不留永久 due 垃圾
+
+
+async def test_wait_idle_returns_immediately_when_idle(env) -> None:
+    _, _, _, scheduler, _ = env
+    assert await scheduler.wait_idle(timeout_ms=0) is True
+
+
+async def test_wait_idle_times_out_without_cancelling_the_worker(env) -> None:
+    _, service, executor, scheduler, _ = env
+    executor.gate.clear()
+    _queued(service, "运行中")
+    await scheduler.tick()
+    await asyncio.sleep(0)
+    assert scheduler.running_assignments()
+
+    assert await scheduler.wait_idle(timeout_ms=1) is False
+    assert scheduler.running_assignments()  # 只等待，绝不取消
+    assert executor.cancelled == []
+
+    executor.gate.set()
+    assert await scheduler.wait_idle(timeout_ms=1_000) is True
