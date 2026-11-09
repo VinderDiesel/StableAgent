@@ -11,7 +11,12 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from stableagent.orchestration.model import Clock
+from stableagent.orchestration.model import (
+    AssignmentStatus,
+    Clock,
+    EffectState,
+    TicketStatus,
+)
 from stableagent.orchestration.store import Store
 from stableagent.supervisor import SUPERVISOR_SCHEMA_VERSION
 from stableagent.supervisor.model import (
@@ -20,6 +25,8 @@ from stableagent.supervisor.model import (
     Decision,
     DecisionOutcome,
     DecisionStrength,
+    RuntimeControl,
+    RuntimeLock,
     SourceCursor,
     SourceHealth,
     Subscription,
@@ -76,6 +83,18 @@ _SUPERVISOR_SCHEMA: dict[str, str] = {
         " source TEXT PRIMARY KEY, cursor TEXT, last_success_at INTEGER,"
         " consecutive_failures INTEGER NOT NULL DEFAULT 0,"
         " health TEXT NOT NULL DEFAULT 'ok')"
+    ),
+    "runtime_lock": (
+        "CREATE TABLE IF NOT EXISTS runtime_lock ("
+        " id INTEGER PRIMARY KEY CHECK (id = 1),"
+        " owner TEXT NOT NULL, acquired_at INTEGER NOT NULL,"
+        " heartbeat_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)"
+    ),
+    "runtime_control": (
+        "CREATE TABLE IF NOT EXISTS runtime_control ("
+        " id INTEGER PRIMARY KEY CHECK (id = 1),"
+        " paused INTEGER NOT NULL DEFAULT 0, reason TEXT, actor TEXT,"
+        " changed_at INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0)"
     ),
 }
 
@@ -148,6 +167,25 @@ def _row_to_source_cursor(row: sqlite3.Row) -> SourceCursor:
     )
 
 
+def _row_to_runtime_lock(row: sqlite3.Row) -> RuntimeLock:
+    return RuntimeLock(
+        owner=row["owner"],
+        acquired_at=row["acquired_at"],
+        heartbeat_at=row["heartbeat_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def _row_to_runtime_control(row: sqlite3.Row) -> RuntimeControl:
+    return RuntimeControl(
+        paused=bool(row["paused"]),
+        reason=row["reason"],
+        actor=row["actor"],
+        changed_at=row["changed_at"],
+        generation=row["generation"],
+    )
+
+
 class SupervisorStore(Store):
     """P4 Store 的增量扩展：同一连接、同一事务、只加表。"""
 
@@ -158,6 +196,11 @@ class SupervisorStore(Store):
                 self._conn.execute(ddl)
             for ddl in _SUPERVISOR_INDEXES:
                 self._conn.execute(ddl)
+            self._conn.execute(
+                "INSERT OR IGNORE INTO runtime_control"
+                " (id, paused, reason, actor, changed_at, generation)"
+                " VALUES (1, 0, NULL, NULL, 0, 0)"
+            )
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (SUPERVISOR_SCHEMA_VERSION, self._clock.now_ms()),
@@ -431,3 +474,88 @@ class SupervisorStore(Store):
             " WHERE e.state = 'failed' ORDER BY e.due_at ASC, e.id ASC"
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------ runtime lock
+    def get_runtime_lock(self) -> RuntimeLock | None:
+        row = self._conn.execute("SELECT * FROM runtime_lock WHERE id = 1").fetchone()
+        return _row_to_runtime_lock(row) if row else None
+
+    def acquire_runtime_lock(self, owner: str, *, now: int, ttl_ms: int) -> bool:
+        """单例行：无行则插入；其他 owner 未过期时拒绝；同 owner 可重入刷新租约。"""
+        with self.transaction():
+            self._conn.execute(
+                "INSERT OR IGNORE INTO runtime_lock"
+                " (id, owner, acquired_at, heartbeat_at, expires_at) VALUES (1, ?, ?, ?, ?)",
+                (owner, now, now, now + ttl_ms),
+            )
+            cursor = self._conn.execute(
+                "UPDATE runtime_lock SET owner = ?, acquired_at = ?, heartbeat_at = ?,"
+                " expires_at = ? WHERE id = 1 AND (owner = ? OR expires_at <= ?)",
+                (owner, now, now, now + ttl_ms, owner, now),
+            )
+            return int(cursor.rowcount) == 1
+
+    def heartbeat_runtime_lock(self, owner: str, *, now: int, ttl_ms: int) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE runtime_lock SET heartbeat_at = ?, expires_at = ? WHERE id = 1 AND owner = ?",
+            (now, now + ttl_ms, owner),
+        )
+        return int(cursor.rowcount) == 1
+
+    def release_runtime_lock(self, owner: str) -> bool:
+        cursor = self._conn.execute("DELETE FROM runtime_lock WHERE id = 1 AND owner = ?", (owner,))
+        return int(cursor.rowcount) == 1
+
+    # ---------------------------------------------------------- runtime control
+    def get_runtime_control(self) -> RuntimeControl:
+        row = self._conn.execute("SELECT * FROM runtime_control WHERE id = 1").fetchone()
+        if row is None:  # pragma: no cover - 构造函数必种子
+            return RuntimeControl()
+        return _row_to_runtime_control(row)
+
+    def set_runtime_paused(
+        self,
+        paused: bool,
+        *,
+        actor: str,
+        now: int,
+        reason: str | None = None,
+    ) -> RuntimeControl:
+        self._conn.execute(
+            "UPDATE runtime_control SET paused = ?, reason = ?, actor = ?,"
+            " changed_at = ?, generation = generation + 1 WHERE id = 1",
+            (int(paused), reason, actor, now),
+        )
+        return self.get_runtime_control()
+
+    # -------------------------------------------------------- 启动补路由与计数
+    def list_unrouted_triggers(self, *, limit: int = 100) -> list[Trigger]:
+        """已持久化但没有任何 Decision 的 Trigger：Source 落库后、Router 路由前崩溃的窗口。"""
+        rows = self._conn.execute(
+            "SELECT t.* FROM triggers t"
+            " WHERE NOT EXISTS ("
+            "   SELECT 1 FROM decision_triggers dt WHERE dt.trigger_id = t.id"
+            " )"
+            " ORDER BY t.received_at ASC, t.id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_trigger(row) for row in rows]
+
+    def count_tickets(self, *, status: TicketStatus) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM tickets WHERE status = ?", (status.value,)
+        ).fetchone()
+        return int(row[0])
+
+    def count_assignments(self, *, status: AssignmentStatus) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM assignments WHERE status = ?", (status.value,)
+        ).fetchone()
+        return int(row[0])
+
+    def count_due_effects(self, now_ms: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM effects WHERE due_at <= ? AND state IN (?, ?)",
+            (now_ms, EffectState.PENDING.value, EffectState.RETRY_WAIT.value),
+        ).fetchone()
+        return int(row[0])

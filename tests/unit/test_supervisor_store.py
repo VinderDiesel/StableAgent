@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from stableagent.orchestration.model import Mandate, Ticket
+from stableagent.orchestration.model import AssignmentStatus, Mandate, Ticket, TicketStatus
+from stableagent.orchestration.service import OrchestrationService
 from stableagent.orchestration.store import Store
 from stableagent.supervisor import SUPERVISOR_SCHEMA_VERSION
 from stableagent.supervisor.model import (
@@ -16,6 +17,8 @@ from stableagent.supervisor.model import (
     Decision,
     DecisionOutcome,
     DecisionStrength,
+    RuntimeControl,
+    RuntimeLock,
     SourceCursor,
     SourceHealth,
     Subscription,
@@ -27,7 +30,7 @@ from stableagent.supervisor.model import (
     TriggerKind,
 )
 from stableagent.supervisor.store import SupervisorStore
-from tests.support import FixedClock
+from tests.support import FixedClock, SequenceIds
 
 
 def _trigger(external_id: str = "issue:1", *, id: str = "tg-0001") -> Trigger:
@@ -309,3 +312,89 @@ def test_find_accepted_decision_skips_observe_rows(store: SupervisorStore) -> No
     assert found is not None
     assert found.id == "dc-2"
     assert store.find_accepted_decision("digest-missing") is None
+
+
+def test_schema_v2_seeds_runtime_control_and_no_lock(store: SupervisorStore) -> None:
+    assert SUPERVISOR_SCHEMA_VERSION == "p6-supervisor-v2"
+    assert store.schema_version() == "p6-supervisor-v2"
+    assert store.get_runtime_lock() is None
+    assert store.get_runtime_control() == RuntimeControl()
+
+
+def test_runtime_lock_is_single_owner_until_ttl_expires(store: SupervisorStore) -> None:
+    assert store.acquire_runtime_lock("a", now=100, ttl_ms=50) is True
+    assert store.acquire_runtime_lock("b", now=149, ttl_ms=50) is False
+    assert store.acquire_runtime_lock("a", now=150, ttl_ms=50) is True  # 同 owner 重入
+    assert store.get_runtime_lock() == RuntimeLock(
+        owner="a", acquired_at=150, heartbeat_at=150, expires_at=200
+    )
+    assert store.acquire_runtime_lock("b", now=200, ttl_ms=50) is True  # 过期可接管
+    assert store.release_runtime_lock("a") is False
+    assert store.release_runtime_lock("b") is True
+    assert store.get_runtime_lock() is None
+
+
+def test_heartbeat_extends_lease_only_for_the_owner(store: SupervisorStore) -> None:
+    assert store.acquire_runtime_lock("a", now=0, ttl_ms=10) is True
+    assert store.heartbeat_runtime_lock("b", now=5, ttl_ms=10) is False
+    assert store.heartbeat_runtime_lock("a", now=5, ttl_ms=10) is True
+    lock = store.get_runtime_lock()
+    assert lock is not None
+    assert (lock.heartbeat_at, lock.expires_at) == (5, 15)
+
+
+def test_pause_control_survives_reopen(tmp_path: Path) -> None:
+    clock = FixedClock()
+    path = tmp_path / "p6.db"
+    store = SupervisorStore(path, clock=clock)
+    try:
+        paused = store.set_runtime_paused(True, actor="alice", now=100, reason="maintenance")
+        assert paused.paused is True and paused.generation == 1
+    finally:
+        store.close()
+    reopened = SupervisorStore(path, clock=clock)
+    try:
+        control = reopened.get_runtime_control()
+        assert (control.paused, control.actor, control.reason) == (True, "alice", "maintenance")
+        resumed = reopened.set_runtime_paused(False, actor="alice", now=200)
+        assert resumed.paused is False and resumed.generation == 2
+    finally:
+        reopened.close()
+
+
+def test_unrouted_triggers_are_exactly_the_ones_without_decisions(
+    store: SupervisorStore,
+) -> None:
+    routed = _trigger("issue:1", id="tg-1")
+    pending = _trigger("issue:2", id="tg-2")
+    store.insert_trigger(routed)
+    store.insert_trigger(pending)
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=[routed.id],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=["inferred_candidate"],
+            policy_version="p5-v1",
+            request_digest="d-1",
+            created_at=1,
+        )
+    )
+    assert [trigger.id for trigger in store.list_unrouted_triggers()] == [pending.id]
+
+
+def test_runtime_counts_read_only_facts(tmp_path: Path) -> None:
+    clock, ids = FixedClock(), SequenceIds()
+    store = SupervisorStore(tmp_path / "counts.db", clock=clock)
+    try:
+        service = OrchestrationService(store, clock=clock, ids=ids)
+        # queue_ticket 一次落：QUEUED 票 + PENDING Assignment + due launch effect
+        service.queue_ticket(service.create_ticket("计数").id)
+        now = clock.now_ms()
+        assert store.count_tickets(status=TicketStatus.QUEUED) == 1
+        assert store.count_assignments(status=AssignmentStatus.PENDING) == 1
+        assert store.count_due_effects(now) == 1
+        assert store.count_due_effects(now - 1) == 0
+    finally:
+        store.close()

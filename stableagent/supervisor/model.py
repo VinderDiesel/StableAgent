@@ -165,3 +165,26 @@ class SourceCursor(BaseModel):
     last_success_at: int | None = None
     consecutive_failures: int = Field(default=0, ge=0)
     health: SourceHealth = SourceHealth.OK
+
+
+class RuntimeLock(BaseModel):
+    """单实例锁行：随库走，进程崩溃后按 expires_at 过期，不依赖 OS 文件锁。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    owner: str
+    acquired_at: int
+    heartbeat_at: int
+    expires_at: int
+
+
+class RuntimeControl(BaseModel):
+    """运行控制行：pause 跨重启保留；generation 让每次状态变更可审计。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    paused: bool = False
+    reason: str | None = None
+    actor: str | None = None
+    changed_at: int = 0
+    generation: int = 0
