@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### 实现（P6 M4 Runtime，2026-11-09）
+- `stableagent/supervisor/store.py`：schema v2 新增 `runtime_lock` 与 `runtime_control`
+  单例行；锁获取/心跳/释放、暂停位与递增 generation、未路由 Trigger 查询与队列计数
+  （均在单个 `BEGIN IMMEDIATE` 事务内）
+- `stableagent/supervisor/runtime.py`：`Runtime.start/step/status/serve/stop`——启动固定为
+  锁 → `recover()` → 读暂停 → 补路由；每轮为心跳 → poll → 路由 → `Scheduler.tick` →
+  外部 `EffectDispatcher.dispatch_due`；`SourceError` 只空转本轮；`RuntimeController`
+  提供 status/pause/resume/retry/stop_ticket/reevaluate，全部校验 operator
+- `stableagent/orchestration/scheduler.py`：`wait_idle()` 只等待进行中的 Worker，宽限期
+  到点返回 False，绝不取消任务
+- 暂停跨重启保留；恢复时立即补路由暂停期间记录的 Trigger；优雅停止不删除 worktree、
+  Ticket、Effect、Input、Report 或 checkpoint
+- 新增 [Runtime 运维指南](docs/guides/supervisor-runtime.md)：单实例锁、启动顺序、每轮
+  推进、暂停语义、优雅停止、五个崩溃恢复窗口与命令安全边界
+- 五个崩溃窗口集成证明（`tests/integration/test_superagent_recovery.py` 5 passed）：
+  Trigger 未路由、Ticket 已提交未派发、comment effect 不丢不重放、Worker 中断走 recover、
+  cursor 失败整批回滚
+- CI 心脏覆盖率闸门 32→33（新增 `supervisor/runtime.py`）；全量 `833 passed, 6 skipped`，
+  覆盖 98.80%，`runtime.py` 99%，3.10/3.11/3.12 一致；L1 与 `orchestration/service.py`
+  零 diff
+
 ### 实现（P6 M3 Router Intake，2026-11-09）
 - `stableagent/supervisor/model.py`：新增 `AutonomyMode`（`off`/`observe`/`auto`）；
   `auto` 在 `RouterService` 构造期拒绝（P6 Beta 锁定 `observe`）

@@ -145,7 +145,33 @@ supervisor。
 - [x] **M3-8** CI FOCUS 29→32、`docs/guides/supervisor-router.md`、全量门禁与账本回填。
       `tests/unit/test_ci_focus_gate.py` 1 passed（32 文件、无通配兜底）；出口读数见 §9。
 
-### M4：常驻调度、恢复与运行控制（规格 WP-6.4；待 M3 收口后展开）
+### M4：常驻调度、恢复与运行控制（规格 WP-6.4）
+
+> **状态：M4 收口（Task 1~7 全部完成）。** 单实例锁、启动恢复、暂停与优雅停止都落在
+> SQLite 单库内；每轮 `step()` 固定为心跳 → poll → 路由 → tick → 外部 effect。
+> 任务级计划见 §11，出口读数见 §11 末尾。
+
+- [x] **M4-1** `runtime_lock` / `runtime_control` 单例行与 schema v2 种子；锁获取/心跳/
+      释放、暂停位与 generation、未路由查询、队列计数。`tests/unit/test_supervisor_store.py`
+      23 passed（新增 6 例：schema 种子、租约过期、心跳、暂停跨重开、未路由、计数）；
+      提交 `e525674`。
+- [x] **M4-2** `Runtime.start()/step()`：锁失败不恢复、`recover()` 先行、按暂停位补路由、
+      每轮心跳与 Source 错误空转；`build_runtime` 组成根。`tests/unit/test_supervisor_runtime.py`
+      前 7 例（启动路由与锁、第二 owner 拒绝、step 派发、暂停 step、租约丢失、Source 错误、
+      status）；提交 `329d622`。
+- [x] **M4-3** 暂停/恢复与 `RuntimeController`：`pause_processing`/`resume_processing` 落库，
+      恢复时补路由；operator 大小写不敏感。同文件 10 passed；提交 `798ae81`。
+- [x] **M4-4** 优雅停止与 `serve`：`Scheduler.wait_idle` 只等待不取消，宽限期后释放锁并
+      返回未完成 Assignment 数；`serve` 退出时调用 `stop()`。同文件 13 passed，
+      `tests/unit/test_scheduler.py` 34 passed（新增 2 例）；提交 `40d146b`。
+- [x] **M4-5** `retry_ticket`（仅 FAILED）/ `stop_ticket` / `reevaluate` 三条命令全部过
+      operator 门禁；同文件 16 passed；提交 `f2ba104`。
+- [x] **M4-6** 五个崩溃窗口集成证明：Trigger 未路由、Ticket 已提交未派发、comment effect
+      不丢不重放、Worker 中断走 recover、cursor 失败整批回滚。
+      `tests/integration/test_superagent_recovery.py` 5 passed；提交 `eec5fc0`。
+- [x] **M4-7** CI FOCUS 32→33（`supervisor/runtime.py`）、`docs/guides/supervisor-runtime.md`、
+      全量门禁与账本回填。`tests/unit/test_ci_focus_gate.py` 1 passed（33 文件、无通配兜底）；
+      出口读数见 §11。
 
 ### M5：最小监管面与注意力协议（规格 WP-6.5；待 M4 收口后展开）
 
@@ -170,6 +196,8 @@ supervisor。
 .venv/bin/pytest -q tests/unit/test_supervisor_views.py tests/unit/test_ci_focus_gate.py
 .venv/bin/pytest -q tests/unit/test_supervisor_assessor.py tests/unit/test_supervisor_router.py \
   tests/unit/test_supervisor_service.py
+.venv/bin/pytest -q tests/unit/test_supervisor_runtime.py \
+  tests/integration/test_superagent_recovery.py
 .venv/bin/ruff check stableagent tests examples benchmarks
 .venv/bin/ruff format --check stableagent tests examples benchmarks
 .venv/bin/mypy
@@ -181,8 +209,8 @@ git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py   # 必须
 ## 4. 任务级实施计划说明
 
 M1 展开为 **8 个 Task / 47 个 Step**，M2 展开为 **7 个 Task / 43 个 Step**，M3 展开为
-**7 个 Task / 38 个 Step**。每个 Task 独立可验收、独立提交；Task 之间的接口在各自
-`Interfaces` 块写清。任务级 Step 不计入里程碑步骤。
+**7 个 Task / 38 个 Step**，M4 展开为 **7 个 Task / 39 个 Step**。每个 Task 独立可验收、
+独立提交；Task 之间的接口在各自 `Interfaces` 块写清。任务级 Step 不计入里程碑步骤。
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-08）
 
@@ -6669,3 +6697,2117 @@ git commit -m "docs: close p6 m3 with router intake evidence"
   仍在 M2 包内）；`receive` / 命令各只开一个事务（L3）；外部正文只进 digest/Input（L4）；
   `resume` 的 `when="launch"` 与审计行是 L5 的唯一新增复检点；`auto` 构造期拒绝与
   `forbidden merge` 保持 L6。
+
+## 11. M4 任务级实施计划（writing-plans 产出，2026-11-09）
+
+**Goal：** 让 Runtime 常驻地把 Source、Router、Scheduler 与 Outbox 串成一轮可恢复的
+poll → route → tick → effect；单实例锁、暂停与优雅停止都落库，崩溃后不丢 Trigger、
+不重复外部写入。
+
+**Architecture：** 单实例锁与暂停控制复用 `SupervisorStore` 同库同事务，落在
+`runtime_lock` / `runtime_control` 两张单例行；`supervisor/runtime.py` 只做编排与生命周期，
+业务规则仍在 Router / SupervisorService / OrchestrationService。启动顺序固定为
+"锁 → P4 恢复 → 读暂停位 → 补路由未路由 Trigger"，任何 effect/worker 派发都留到 `step()`。
+停止只等 `Scheduler.wait_idle` 的宽限期，不取消 Worker、不删 Ticket/Effect/checkpoint。
+
+**Spec：** [P6 实施规格](../specs/p6-single-repository-super-agent-beta.md) §2.4 与 WP-6.4；
+运行控制口径依赖 [ADR-06](../design-decisions/06-super-agent-router.md)。
+
+**边界裁定（维护者确认）：**
+
+- 单实例锁用库内 `runtime` 行（`runtime_lock` 单例 + owner/TTL/心跳），随库走、可审计，
+  不引入 `fcntl` 跨平台差异。
+- `pause_processing` 落库内控制行（`runtime_control` 单例），重启后仍暂停；Source 仍可
+  记录 Trigger，但 Router/Scheduler/外部 effect 全部停摆。
+- `status` 只给运行态摘要（锁、暂停、Source 健康、队列、effect/审批计数）；待人工首屏的
+  注意力排序留给 M5，不在 M4 抢跑。
+
+**Global Constraints（每个 Task 都隐含遵守）：**
+
+- L1：`stableagent/core/` 对 `234f620` 零 diff；约束 1：`orchestration/service.py` 零字符改动。
+- L2：方向锁 `supervisor → integrations → execution → control → orchestration → core`；
+  `runtime.py` 只 import supervisor 既有组件与 orchestration 公开入口，不 import
+  `execution` / `integrations`。
+- L3：`Store.transaction()` 体内不得出现 `await`；Runtime 的事务边界都在 Store 方法内部。
+- L4：外部正文只进 digest/Input/Report，不参与锁、暂停或命令授权判定。
+- L6：不新增 `merge` / `enable_auto_merge` 路径；`EffectKind` 不加成员。
+- L7：运行控制命令只认 `RouterConfig.operators`（大小写不敏感）；锁 owner 只是进程标识。
+- L8：全部用例离线（Fake GitHub / 确定性时钟）；定向测试加 `--no-cov`。
+
+---
+
+### Task 1：Runtime 锁/控制行与未路由查询（M4-1）
+
+**Files:**
+- Modify: `stableagent/supervisor/model.py`
+- Modify: `stableagent/supervisor/__init__.py`
+- Modify: `stableagent/supervisor/store.py`
+- Test: `tests/unit/test_supervisor_store.py`
+
+**Interfaces:**
+- Consumes: `SupervisorStore(Store)`、`Clock`、既有 `triggers` / `decision_triggers` /
+  `tickets` / `assignments` / `effects` 表。
+- Produces:
+  - `SUPERVISOR_SCHEMA_VERSION == "p6-supervisor-v2"`
+  - `RuntimeLock(owner, acquired_at, heartbeat_at, expires_at)`、
+    `RuntimeControl(paused, reason, actor, changed_at, generation)`
+  - `SupervisorStore.get_runtime_lock() -> RuntimeLock | None`
+  - `acquire_runtime_lock(owner, *, now, ttl_ms) -> bool`
+  - `heartbeat_runtime_lock(owner, *, now, ttl_ms) -> bool`
+  - `release_runtime_lock(owner) -> bool`
+  - `get_runtime_control() -> RuntimeControl`
+  - `set_runtime_paused(paused, *, actor, now, reason=None) -> RuntimeControl`
+  - `list_unrouted_triggers(*, limit=100) -> list[Trigger]`
+  - `count_tickets(*, status) -> int`、`count_assignments(*, status) -> int`、
+    `count_due_effects(now_ms) -> int`
+
+- [ ] **Step 1: 写失败测试**
+
+把 `tests/unit/test_supervisor_store.py` 顶部已有 import 扩写为（ruff `I` 规则启用，
+同一模块不得拆成两条 import）：
+
+```python
+from stableagent.orchestration.model import AssignmentStatus, Mandate, Ticket, TicketStatus
+from stableagent.orchestration.service import OrchestrationService
+from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    Decision,
+    DecisionOutcome,
+    DecisionStrength,
+    RuntimeControl,
+    RuntimeLock,
+    SourceCursor,
+    SourceHealth,
+    Subscription,
+    SubscriptionMode,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+from tests.support import FixedClock, SequenceIds
+```
+
+在文件末尾追加：
+
+```python
+def test_schema_v2_seeds_runtime_control_and_no_lock(store: SupervisorStore) -> None:
+    assert SUPERVISOR_SCHEMA_VERSION == "p6-supervisor-v2"
+    assert store.schema_version() == "p6-supervisor-v2"
+    assert store.get_runtime_lock() is None
+    assert store.get_runtime_control() == RuntimeControl()
+
+
+def test_runtime_lock_is_single_owner_until_ttl_expires(store: SupervisorStore) -> None:
+    assert store.acquire_runtime_lock("a", now=100, ttl_ms=50) is True
+    assert store.acquire_runtime_lock("b", now=149, ttl_ms=50) is False
+    assert store.acquire_runtime_lock("a", now=150, ttl_ms=50) is True  # 同 owner 重入
+    assert store.get_runtime_lock() == RuntimeLock(
+        owner="a", acquired_at=150, heartbeat_at=150, expires_at=200
+    )
+    assert store.acquire_runtime_lock("b", now=200, ttl_ms=50) is True  # 过期可接管
+    assert store.release_runtime_lock("a") is False
+    assert store.release_runtime_lock("b") is True
+    assert store.get_runtime_lock() is None
+
+
+def test_heartbeat_extends_lease_only_for_the_owner(store: SupervisorStore) -> None:
+    assert store.acquire_runtime_lock("a", now=0, ttl_ms=10) is True
+    assert store.heartbeat_runtime_lock("b", now=5, ttl_ms=10) is False
+    assert store.heartbeat_runtime_lock("a", now=5, ttl_ms=10) is True
+    lock = store.get_runtime_lock()
+    assert lock is not None
+    assert (lock.heartbeat_at, lock.expires_at) == (5, 15)
+
+
+def test_pause_control_survives_reopen(tmp_path: Path) -> None:
+    clock = FixedClock()
+    path = tmp_path / "p6.db"
+    store = SupervisorStore(path, clock=clock)
+    try:
+        paused = store.set_runtime_paused(True, actor="alice", now=100, reason="maintenance")
+        assert paused.paused is True and paused.generation == 1
+    finally:
+        store.close()
+    reopened = SupervisorStore(path, clock=clock)
+    try:
+        control = reopened.get_runtime_control()
+        assert (control.paused, control.actor, control.reason) == (True, "alice", "maintenance")
+        resumed = reopened.set_runtime_paused(False, actor="alice", now=200)
+        assert resumed.paused is False and resumed.generation == 2
+    finally:
+        reopened.close()
+
+
+def test_unrouted_triggers_are_exactly_the_ones_without_decisions(
+    store: SupervisorStore,
+) -> None:
+    routed = _trigger("issue:1", id="tg-1")
+    pending = _trigger("issue:2", id="tg-2")
+    store.insert_trigger(routed)
+    store.insert_trigger(pending)
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=[routed.id],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=["inferred_candidate"],
+            policy_version="p5-v1",
+            request_digest="d-1",
+            created_at=1,
+        )
+    )
+    assert [trigger.id for trigger in store.list_unrouted_triggers()] == [pending.id]
+
+
+def test_runtime_counts_read_only_facts(tmp_path: Path) -> None:
+    clock, ids = FixedClock(), SequenceIds()
+    store = SupervisorStore(tmp_path / "counts.db", clock=clock)
+    try:
+        service = OrchestrationService(store, clock=clock, ids=ids)
+        # queue_ticket 一次落：QUEUED 票 + PENDING Assignment + due launch effect
+        service.queue_ticket(service.create_ticket("计数").id)
+        now = clock.now_ms()
+        assert store.count_tickets(status=TicketStatus.QUEUED) == 1
+        assert store.count_assignments(status=AssignmentStatus.PENDING) == 1
+        assert store.count_due_effects(now) == 1
+        assert store.count_due_effects(now - 1) == 0
+    finally:
+        store.close()
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_store.py
+```
+
+Expected：`ImportError: cannot import name 'RuntimeControl'`（或
+`AttributeError: 'SupervisorStore' object has no attribute 'get_runtime_lock'`）。
+
+- [ ] **Step 3: 模型与 schema 版本**
+
+`stableagent/supervisor/model.py` 末尾追加：
+
+```python
+class RuntimeLock(BaseModel):
+    """单实例锁行：随库走，进程崩溃后按 expires_at 过期，不依赖 OS 文件锁。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    owner: str
+    acquired_at: int
+    heartbeat_at: int
+    expires_at: int
+
+
+class RuntimeControl(BaseModel):
+    """运行控制行：pause 跨重启保留；generation 让每次状态变更可审计。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    paused: bool = False
+    reason: str | None = None
+    actor: str | None = None
+    changed_at: int = 0
+    generation: int = 0
+```
+
+`stableagent/supervisor/__init__.py` 改：
+
+```python
+SUPERVISOR_SCHEMA_VERSION = "p6-supervisor-v2"
+```
+
+- [ ] **Step 4: Store 表、种子与查询**
+
+`stableagent/supervisor/store.py`。
+
+顶部 import 改为：
+
+```python
+from stableagent.orchestration.model import (
+    AssignmentStatus,
+    Clock,
+    EffectState,
+    TicketStatus,
+)
+```
+
+`from stableagent.supervisor.model import (...)` 追加 `RuntimeControl, RuntimeLock`。
+
+`_SUPERVISOR_SCHEMA` 末尾追加：
+
+```python
+    "runtime_lock": (
+        "CREATE TABLE IF NOT EXISTS runtime_lock ("
+        " id INTEGER PRIMARY KEY CHECK (id = 1),"
+        " owner TEXT NOT NULL, acquired_at INTEGER NOT NULL,"
+        " heartbeat_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)"
+    ),
+    "runtime_control": (
+        "CREATE TABLE IF NOT EXISTS runtime_control ("
+        " id INTEGER PRIMARY KEY CHECK (id = 1),"
+        " paused INTEGER NOT NULL DEFAULT 0, reason TEXT, actor TEXT,"
+        " changed_at INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0)"
+    ),
+```
+
+`__init__` 里 `schema_migrations` 的 `INSERT OR IGNORE` 之前追加：
+
+```python
+            self._conn.execute(
+                "INSERT OR IGNORE INTO runtime_control"
+                " (id, paused, reason, actor, changed_at, generation)"
+                " VALUES (1, 0, NULL, NULL, 0, 0)"
+            )
+```
+
+模块级追加两个行转换器：
+
+```python
+def _row_to_runtime_lock(row: sqlite3.Row) -> RuntimeLock:
+    return RuntimeLock(
+        owner=row["owner"],
+        acquired_at=row["acquired_at"],
+        heartbeat_at=row["heartbeat_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def _row_to_runtime_control(row: sqlite3.Row) -> RuntimeControl:
+    return RuntimeControl(
+        paused=bool(row["paused"]),
+        reason=row["reason"],
+        actor=row["actor"],
+        changed_at=row["changed_at"],
+        generation=row["generation"],
+    )
+```
+
+`SupervisorStore` 类末尾追加：
+
+```python
+    # ------------------------------------------------------------ runtime lock
+    def get_runtime_lock(self) -> RuntimeLock | None:
+        row = self._conn.execute("SELECT * FROM runtime_lock WHERE id = 1").fetchone()
+        return _row_to_runtime_lock(row) if row else None
+
+    def acquire_runtime_lock(self, owner: str, *, now: int, ttl_ms: int) -> bool:
+        """单例行：无行则插入；其他 owner 未过期时拒绝；同 owner 可重入刷新租约。"""
+        with self.transaction():
+            self._conn.execute(
+                "INSERT OR IGNORE INTO runtime_lock"
+                " (id, owner, acquired_at, heartbeat_at, expires_at) VALUES (1, ?, ?, ?, ?)",
+                (owner, now, now, now + ttl_ms),
+            )
+            cursor = self._conn.execute(
+                "UPDATE runtime_lock SET owner = ?, acquired_at = ?, heartbeat_at = ?,"
+                " expires_at = ? WHERE id = 1 AND (owner = ? OR expires_at <= ?)",
+                (owner, now, now, now + ttl_ms, owner, now),
+            )
+            return int(cursor.rowcount) == 1
+
+    def heartbeat_runtime_lock(self, owner: str, *, now: int, ttl_ms: int) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE runtime_lock SET heartbeat_at = ?, expires_at = ?"
+            " WHERE id = 1 AND owner = ?",
+            (now, now + ttl_ms, owner),
+        )
+        return int(cursor.rowcount) == 1
+
+    def release_runtime_lock(self, owner: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM runtime_lock WHERE id = 1 AND owner = ?", (owner,)
+        )
+        return int(cursor.rowcount) == 1
+
+    # ---------------------------------------------------------- runtime control
+    def get_runtime_control(self) -> RuntimeControl:
+        row = self._conn.execute("SELECT * FROM runtime_control WHERE id = 1").fetchone()
+        if row is None:  # pragma: no cover - 构造函数必种子
+            return RuntimeControl()
+        return _row_to_runtime_control(row)
+
+    def set_runtime_paused(
+        self,
+        paused: bool,
+        *,
+        actor: str,
+        now: int,
+        reason: str | None = None,
+    ) -> RuntimeControl:
+        self._conn.execute(
+            "UPDATE runtime_control SET paused = ?, reason = ?, actor = ?,"
+            " changed_at = ?, generation = generation + 1 WHERE id = 1",
+            (int(paused), reason, actor, now),
+        )
+        return self.get_runtime_control()
+
+    # -------------------------------------------------------- 启动补路由与计数
+    def list_unrouted_triggers(self, *, limit: int = 100) -> list[Trigger]:
+        """已持久化但没有任何 Decision 的 Trigger：Source 落库后、Router 路由前崩溃的窗口。"""
+        rows = self._conn.execute(
+            "SELECT t.* FROM triggers t"
+            " WHERE NOT EXISTS ("
+            "   SELECT 1 FROM decision_triggers dt WHERE dt.trigger_id = t.id"
+            " )"
+            " ORDER BY t.received_at ASC, t.id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_trigger(row) for row in rows]
+
+    def count_tickets(self, *, status: TicketStatus) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM tickets WHERE status = ?", (status.value,)
+        ).fetchone()
+        return int(row[0])
+
+    def count_assignments(self, *, status: AssignmentStatus) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM assignments WHERE status = ?", (status.value,)
+        ).fetchone()
+        return int(row[0])
+
+    def count_due_effects(self, now_ms: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM effects WHERE due_at <= ? AND state IN (?, ?)",
+            (now_ms, EffectState.PENDING.value, EffectState.RETRY_WAIT.value),
+        ).fetchone()
+        return int(row[0])
+```
+
+- [ ] **Step 5: 跑绿与静态检查**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_store.py
+.venv/bin/ruff check stableagent/supervisor tests/unit/test_supervisor_store.py
+.venv/bin/ruff format --check stableagent/supervisor tests/unit/test_supervisor_store.py
+```
+
+Expected：全文件通过（Task 1 追加 6 例）；ruff 两项均无输出。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/model.py stableagent/supervisor/__init__.py \
+  stableagent/supervisor/store.py tests/unit/test_supervisor_store.py
+git commit -m "feat: persist supervisor runtime lock and pause control"
+```
+
+---
+
+### Task 2：Runtime 核心、启动恢复与状态摘要（M4-2）
+
+**Files:**
+- Create: `stableagent/supervisor/runtime.py`
+- Test: `tests/unit/test_supervisor_runtime.py`
+
+**Interfaces:**
+- Consumes: Task 1 的锁/控制/未路由/计数方法；`RouterService.receive`、
+  `OrchestrationService.recover`、`Scheduler.tick`、`EffectDispatcher.dispatch_due`、
+  `Source.poll`、`SourceError`。
+- Produces:
+  - `RuntimeConfig(router, owner, poll_limit, lock_ttl_ms, stop_grace_ms, step_interval_ms)`
+  - `RuntimeStart(recovery: RecoverySummary, routed: int, paused: bool)`
+  - `RuntimeStep(paused, received, routed, duplicates, enqueued, dispatched, external,
+    running, source_error: str | None = None)`
+  - `RuntimeStop(drained: bool, running_assignments: int)`
+  - `RuntimeStatus`（冻结 pydantic：started/paused/owner/paused_at/paused_by/reason/
+    source_health/queued_tickets/running_assignments/due_effects/failed_effects/
+    pending_approvals）
+  - `RuntimeLockError`、`RuntimeStateError`
+  - `Runtime.start() -> RuntimeStart`、`async step() -> RuntimeStep`、
+    `status() -> RuntimeStatus`
+  - `RuntimeBundle`、`build_runtime(...) -> RuntimeBundle`
+  - Task 3 只追加 `pause/resume`、`RuntimeController` 与 bundle 的 `controller` 字段。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_supervisor_runtime.py` 全文：
+
+```python
+"""WP-6.4：单实例锁、启动恢复与每轮 poll/route/tick 推进。"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from stableagent.control.model import Action
+from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
+from stableagent.orchestration.model import EffectKind
+from stableagent.supervisor.model import Thread, ThreadKind, Trigger, TriggerKind
+from stableagent.supervisor.router import RouterConfig
+from stableagent.supervisor.runtime import (
+    RuntimeConfig,
+    RuntimeLockError,
+    build_runtime,
+)
+from stableagent.supervisor.source import PollBatch, SourceEvent, SourceTransientError
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
+
+
+def _event(number: int = 1) -> SourceEvent:
+    key = f"issue:o/r#{number}"
+    thread = Thread(
+        key=key,
+        repository="o/r",
+        kind=ThreadKind.ISSUE,
+        external_ref=f"#{number}",
+        last_trigger_at=1,
+    )
+    trigger = Trigger(
+        id=f"tg-{number}",
+        external_id=f"github:o/r:issue:{number}",
+        kind=TriggerKind.ISSUE,
+        actor="alice",
+        thread_keys=[key],
+        occurred_at=1,
+        received_at=1,
+        payload={
+            "resource": {"number": number, "user": {"login": "alice"}},
+            "deleted": False,
+            "request": {"text": f"task {number}", "mentioned": True, "url": None},
+        },
+    )
+    return SourceEvent(trigger=trigger, thread=thread)
+
+
+class ScriptedSource:
+    def __init__(self, store: SupervisorStore) -> None:
+        self._store = store
+        self.events: list[SourceEvent] = []
+        self.fail_next: Exception | None = None
+        self.calls = 0
+
+    def feed(self, event: SourceEvent) -> None:
+        self.events.append(event)
+
+    async def poll(self, *, limit: int = 100) -> PollBatch:
+        self.calls += 1
+        failure, self.fail_next = self.fail_next, None
+        if failure is not None:
+            raise failure
+        batch, self.events = self.events[:limit], self.events[limit:]
+        with self._store.transaction():
+            for event in batch:
+                self._store.insert_trigger(event.trigger)
+                self._store.upsert_thread(event.thread)
+                if event.channel is not None:
+                    self._store.insert_channel(event.channel)
+        return PollBatch(events=batch)
+
+
+class RecordingExecutor:
+    def __init__(self) -> None:
+        self.launched: list[str] = []
+        self.recovered: list[str] = []
+        self.delivered: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def launch(self, assignment, ticket, inputs) -> None:
+        self.launched.append(assignment.id)
+        await self.gate.wait()
+
+    async def deliver(self, assignment, ticket, inputs) -> None:
+        self.delivered.extend((ticket.id, item.payload) for item in inputs)
+
+    async def cancel(self, assignment) -> None:
+        self.cancelled.append(assignment.id)
+
+    async def recover(self, assignment, ticket) -> None:
+        self.recovered.append(assignment.id)
+
+
+async def _noop(effect) -> None:
+    return None
+
+
+@pytest.fixture
+def env(tmp_path: Path):
+    clock, ids = FixedClock(), SequenceIds()
+    store = SupervisorStore(tmp_path / "runtime.db", clock=clock)
+    policy = StaticPolicy(
+        StaticPolicyConfig(
+            repository="o/r",
+            actors=frozenset({"alice"}),
+            grantable_actions=frozenset({Action.READ_REPOSITORY}),
+            default_validity_ms=60_000,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    executor = RecordingExecutor()
+    source = ScriptedSource(store)
+    bundle = build_runtime(
+        store=store,
+        policy=policy,
+        source=source,
+        executor=executor,
+        effect_handlers={EffectKind.GITHUB_COMMENT: _noop},
+        config=RuntimeConfig(
+            router=RouterConfig(
+                repository="o/r",
+                operators=frozenset({"alice"}),
+                actions=("read_repository",),
+            ),
+            owner="test-runtime",
+            lock_ttl_ms=1_000,
+            stop_grace_ms=10,
+            step_interval_ms=0,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    try:
+        yield bundle, store, clock, source, executor
+    finally:
+        store.close()
+
+
+async def test_start_routes_persisted_triggers_and_acquires_lock(env) -> None:
+    bundle, store, _, _, _ = env
+    event = _event()
+    with store.transaction():
+        store.insert_trigger(event.trigger)
+        store.upsert_thread(event.thread)
+
+    started = bundle.runtime.start()
+
+    assert started.routed == 1 and started.paused is False
+    lock = store.get_runtime_lock()
+    assert lock is not None and lock.owner == "test-runtime"
+    assert store.list_unrouted_triggers() == []
+    assert len(store.list_decisions()) == 1
+
+
+async def test_start_refuses_second_owner_without_recovery(env) -> None:
+    bundle, store, clock, _, _ = env
+    assert store.acquire_runtime_lock("other", now=clock.now_ms(), ttl_ms=60_000) is True
+
+    with pytest.raises(RuntimeLockError):
+        bundle.runtime.start()
+
+    assert store.get_runtime_lock().owner == "other"  # 没有抢占，也没有写恢复记录
+
+
+async def test_step_polls_routes_and_dispatches_launch(env) -> None:
+    bundle, store, _, source, executor = env
+    source.feed(_event())
+    bundle.runtime.start()
+
+    step = await bundle.runtime.step()
+    await asyncio.sleep(0)  # create_task 的 launch 在下一轮事件循环记录
+
+    assert (step.received, step.routed, step.dispatched) == (1, 1, 1)
+    assert len(store.list_tickets()) == 1
+    assert len(executor.launched) == 1
+    assert store.get_ticket(store.list_tickets()[0].id).status.value == "running"
+
+
+async def test_step_while_paused_records_triggers_without_routing(env) -> None:
+    bundle, store, clock, source, _ = env
+    store.set_runtime_paused(True, actor="alice", now=clock.now_ms(), reason="maintenance")
+    bundle.runtime.start()
+    source.feed(_event())
+
+    step = await bundle.runtime.step()
+
+    assert step.paused is True and step.received == 1 and step.routed == 0
+    assert step.dispatched == 0
+    assert store.list_decisions() == []
+    assert len(store.list_unrouted_triggers()) == 1
+
+
+async def test_step_fails_when_lease_is_lost(env) -> None:
+    bundle, store, clock, _, _ = env
+    bundle.runtime.start()
+    clock.advance(1_001)  # 租约过期后另一进程接管
+    assert store.acquire_runtime_lock("other", now=clock.now_ms(), ttl_ms=60_000) is True
+
+    with pytest.raises(RuntimeLockError):
+        await bundle.runtime.step()
+
+
+async def test_source_error_does_not_stop_effect_dispatch(env) -> None:
+    bundle, _, clock, source, _ = env
+    bundle.orchestration.queue_ticket(bundle.orchestration.create_ticket("排队").id)
+    source.fail_next = SourceTransientError("503")
+    bundle.runtime.start()
+
+    step = await bundle.runtime.step()
+
+    assert step.source_error == "source.transient"
+    assert step.dispatched == 1  # Source 失败不阻断已有 effect
+
+
+async def test_status_reports_runtime_facts_without_start(env) -> None:
+    bundle, _, _, _, _ = env
+    offline = bundle.runtime.status()
+    assert offline.started is False and offline.owner is None
+    assert offline.paused is False
+
+    bundle.runtime.start()
+    online = bundle.runtime.status()
+    assert online.started is True and online.owner == "test-runtime"
+    assert online.queued_tickets == 0 and online.source_health == ()
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py
+```
+
+Expected：`ModuleNotFoundError: No module named 'stableagent.supervisor.runtime'`。
+
+- [ ] **Step 3: 写 Runtime 与组成根**
+
+`stableagent/supervisor/runtime.py` 全文：
+
+```python
+"""常驻运行面：单实例锁、启动恢复与 poll/route/tick 推进（规格 WP-6.4）。
+
+方向锁：只依赖 supervisor 既有组件与 orchestration 公开入口，不 import execution/integrations。
+组成根只注入依赖，不存业务规则（WP-6.4 第 1 条）。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
+
+from stableagent.control.audit import AuditWriter
+from stableagent.control.policy import StaticPolicy
+from stableagent.orchestration.executor import WorkerExecutor
+from stableagent.orchestration.model import (
+    AssignmentStatus,
+    Clock,
+    EffectKind,
+    IdFactory,
+    TicketStatus,
+)
+from stableagent.orchestration.outbox import EffectDispatcher, EffectHandler
+from stableagent.orchestration.scheduler import Scheduler
+from stableagent.orchestration.service import OrchestrationService, RecoverySummary
+from stableagent.supervisor.assessor import ObserveOnlyAssessor
+from stableagent.supervisor.model import SourceCursor
+from stableagent.supervisor.router import RouterConfig, RouterService
+from stableagent.supervisor.service import SupervisorService
+from stableagent.supervisor.source import PollBatch, Source, SourceError
+from stableagent.supervisor.store import SupervisorStore
+
+
+class RuntimeLockError(RuntimeError):
+    """单实例锁被占用或中途丢失：调用方不得继续写库。"""
+
+
+class RuntimeStateError(RuntimeError):
+    """Runtime 生命周期被打乱（未 start 就 step），不是可重试的外部错误。"""
+
+
+class RuntimeConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    router: RouterConfig
+    owner: str = "supervisor-runtime"
+    poll_limit: int = 100
+    lock_ttl_ms: int = 30_000
+    stop_grace_ms: int = 5_000
+    step_interval_ms: int = 1_000
+
+
+@dataclass(frozen=True)
+class RuntimeStart:
+    recovery: RecoverySummary
+    routed: int
+    paused: bool
+
+
+@dataclass(frozen=True)
+class RuntimeStep:
+    paused: bool
+    received: int
+    routed: int
+    duplicates: int
+    enqueued: int
+    dispatched: int
+    external: int
+    running: int
+    source_error: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeStop:
+    drained: bool
+    running_assignments: int
+
+
+class RuntimeStatus(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    started: bool
+    paused: bool
+    owner: str | None
+    paused_at: int | None
+    paused_by: str | None
+    reason: str | None
+    source_health: tuple[SourceCursor, ...]
+    queued_tickets: int
+    running_assignments: int
+    due_effects: int
+    failed_effects: int
+    pending_approvals: int
+
+
+@dataclass(frozen=True)
+class RuntimeBundle:
+    runtime: "Runtime"
+    router: RouterService
+    service: SupervisorService
+    orchestration: OrchestrationService
+    scheduler: Scheduler
+    effects: EffectDispatcher
+
+
+class Runtime:
+    def __init__(
+        self,
+        *,
+        store: SupervisorStore,
+        source: Source,
+        router: RouterService,
+        orchestration: OrchestrationService,
+        scheduler: Scheduler,
+        effects: EffectDispatcher,
+        config: RuntimeConfig,
+        clock: Clock,
+    ) -> None:
+        self._store = store
+        self._source = source
+        self._router = router
+        self._orchestration = orchestration
+        self._scheduler = scheduler
+        self._effects = effects
+        self._config = config
+        self._clock = clock
+        self._started = False
+
+    @property
+    def config(self) -> RuntimeConfig:
+        return self._config
+
+    def start(self) -> RuntimeStart:
+        """先锁、再恢复、后补路由；任何 effect/worker 派发都留到 step()。"""
+        now = self._clock.now_ms()
+        if not self._store.acquire_runtime_lock(
+            self._config.owner, now=now, ttl_ms=self._config.lock_ttl_ms
+        ):
+            lock = self._store.get_runtime_lock()
+            raise RuntimeLockError(f"运行锁被占用：owner={lock.owner if lock else '?'}")
+        # 锁已在手 = 上一进程确定死亡：RUNNING 收成 INTERRUPTED，并重置在途 effect。
+        recovery = self._orchestration.recover()
+        control = self._store.get_runtime_control()
+        routed = 0 if control.paused else self._route_pending()
+        self._started = True
+        return RuntimeStart(recovery=recovery, routed=routed, paused=control.paused)
+
+    async def step(self) -> RuntimeStep:
+        if not self._started:
+            raise RuntimeStateError("Runtime 未 start：step 不得写库")
+        self._renew_lock()
+        source_error: str | None = None
+        try:
+            batch = await self._source.poll(limit=self._config.poll_limit)
+        except SourceError as error:
+            # Source 失败已由 Source 记进 source_health；Runtime 只让本轮空转，不杀调度。
+            batch = PollBatch()
+            source_error = error.code
+        control = self._store.get_runtime_control()
+        if control.paused:
+            return RuntimeStep(
+                paused=True,
+                received=len(batch.events),
+                routed=0,
+                duplicates=batch.duplicates,
+                enqueued=0,
+                dispatched=0,
+                external=0,
+                running=len(self._scheduler.running_assignments()),
+                source_error=source_error,
+            )
+        self._renew_lock()
+        routed = duplicates = 0
+        for event in batch.events:
+            reception = self._router.receive(event.trigger)
+            if reception.duplicate:
+                duplicates += 1
+            else:
+                routed += 1
+        tick = await self._scheduler.tick()
+        external = await self._effects.dispatch_due()
+        return RuntimeStep(
+            paused=False,
+            received=len(batch.events),
+            routed=routed,
+            duplicates=duplicates + batch.duplicates,
+            enqueued=tick.enqueued,
+            dispatched=tick.dispatched,
+            external=external,
+            running=tick.running,
+            source_error=source_error,
+        )
+
+    def status(self) -> RuntimeStatus:
+        now = self._clock.now_ms()
+        lock = self._store.get_runtime_lock()
+        control = self._store.get_runtime_control()
+        started = lock is not None and lock.expires_at > now
+        return RuntimeStatus(
+            started=started,
+            paused=control.paused,
+            owner=lock.owner if started and lock is not None else None,
+            paused_at=control.changed_at if control.paused else None,
+            paused_by=control.actor if control.paused else None,
+            reason=control.reason if control.paused else None,
+            source_health=tuple(self._store.list_source_cursors()),
+            queued_tickets=self._store.count_tickets(status=TicketStatus.QUEUED),
+            running_assignments=self._store.count_assignments(status=AssignmentStatus.RUNNING),
+            due_effects=self._store.count_due_effects(now),
+            failed_effects=len(self._store.list_failed_effects()),
+            pending_approvals=len(self._store.list_pending_approvals()),
+        )
+
+    def _renew_lock(self) -> None:
+        if not self._store.heartbeat_runtime_lock(
+            self._config.owner, now=self._clock.now_ms(), ttl_ms=self._config.lock_ttl_ms
+        ):
+            self._started = False
+            raise RuntimeLockError("运行锁已丢失：owner 变更或租约过期")
+
+    def _route_pending(self) -> int:
+        routed = 0
+        for trigger in self._store.list_unrouted_triggers(limit=self._config.poll_limit):
+            if not self._router.receive(trigger).duplicate:
+                routed += 1
+        return routed
+
+
+def build_runtime(
+    *,
+    store: SupervisorStore,
+    policy: StaticPolicy,
+    source: Source,
+    executor: WorkerExecutor,
+    effect_handlers: Mapping[EffectKind, EffectHandler],
+    config: RuntimeConfig,
+    clock: Clock,
+    ids: IdFactory,
+    scheduler_max_concurrency: int = 1,
+    audit: AuditWriter | None = None,
+) -> RuntimeBundle:
+    """组成根：只注入依赖；observe 评估器与 P4 服务在此装配。"""
+    router = RouterService(
+        store,
+        policy,
+        ObserveOnlyAssessor(),
+        config.router,
+        clock=clock,
+        ids=ids,
+        audit=audit,
+    )
+    service = SupervisorService(store, policy, router, clock=clock, ids=ids, audit=audit)
+    orchestration = OrchestrationService(store, clock=clock, ids=ids)
+    scheduler = Scheduler(
+        store=store,
+        service=orchestration,
+        executor=executor,
+        clock=clock,
+        max_concurrency=scheduler_max_concurrency,
+    )
+    effects = EffectDispatcher(store, effect_handlers, clock=clock)
+    runtime = Runtime(
+        store=store,
+        source=source,
+        router=router,
+        orchestration=orchestration,
+        scheduler=scheduler,
+        effects=effects,
+        config=config,
+        clock=clock,
+    )
+    return RuntimeBundle(
+        runtime=runtime,
+        router=router,
+        service=service,
+        orchestration=orchestration,
+        scheduler=scheduler,
+        effects=effects,
+    )
+```
+
+- [ ] **Step 4: 跑绿**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py
+```
+
+Expected：`7 passed`。
+
+- [ ] **Step 5: 静态与提交**
+
+```bash
+.venv/bin/ruff check stableagent/supervisor/runtime.py tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff format --check stableagent/supervisor/runtime.py \
+  tests/unit/test_supervisor_runtime.py
+.venv/bin/mypy
+git add stableagent/supervisor/runtime.py tests/unit/test_supervisor_runtime.py
+git commit -m "feat: add supervisor runtime start, step and status"
+```
+
+---
+
+### Task 3：暂停/恢复与运行控制面（M4-3）
+
+**Files:**
+- Modify: `stableagent/supervisor/runtime.py`
+- Modify: `tests/unit/test_supervisor_runtime.py`
+
+**Interfaces:**
+- Consumes: Task 1 的 `set_runtime_paused` / `get_runtime_control`；`RouterConfig.operators`。
+- Produces:
+  - `Runtime.pause(*, actor, reason=None) -> RuntimeControl`
+  - `Runtime.resume(*, actor, reason=None) -> RuntimeControl`（started 时立即补路由）
+  - `RuntimeController(runtime, supervisor, orchestration)` 的
+    `status()` / `pause_processing()` / `resume_processing()`
+  - `RuntimeBundle.controller`
+
+- [ ] **Step 1: 写失败测试**
+
+把文件顶部已有的 `from stableagent.supervisor.router import RouterConfig` 扩写为：
+
+```python
+from stableagent.supervisor.router import RouterConfig, RouterPermissionError
+```
+
+文件末尾追加：
+
+```python
+async def test_pause_persists_and_resume_routes_pending_triggers(env) -> None:
+    bundle, store, _, source, _ = env
+    bundle.runtime.start()
+    control = bundle.controller.pause_processing(actor="alice", reason="maintenance")
+    assert control.paused is True
+    assert store.get_runtime_control().reason == "maintenance"
+    source.feed(_event())
+
+    paused_step = await bundle.runtime.step()
+    assert paused_step.received == 1 and store.list_decisions() == []
+
+    resumed = bundle.controller.resume_processing(actor="alice")
+    assert resumed.paused is False
+    assert len(store.list_decisions()) == 1  # 暂停期间记录的 Trigger 立即补路由
+
+
+async def test_pause_control_is_visible_in_status(env) -> None:
+    bundle, _, _, _, _ = env
+    bundle.controller.pause_processing(actor="alice", reason="maintenance")
+
+    status = bundle.controller.status()
+
+    assert status.paused is True
+    assert status.paused_by == "alice" and status.reason == "maintenance"
+    assert status.paused_at is not None
+
+
+async def test_control_commands_are_operator_gated_case_insensitively(env) -> None:
+    bundle, _, _, _, _ = env
+    with pytest.raises(RouterPermissionError):
+        bundle.controller.pause_processing(actor="mallory")
+    control = bundle.controller.pause_processing(actor="ALICE")
+    assert control.paused is True and control.actor == "ALICE"
+    with pytest.raises(RouterPermissionError):
+        bundle.controller.resume_processing(actor="mallory")
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py
+```
+
+Expected：`AttributeError: 'RuntimeBundle' object has no attribute 'controller'`。
+
+- [ ] **Step 3: 实现 pause/resume 与控制器**
+
+`stableagent/supervisor/runtime.py`。
+
+把两条已有 import 扩写为（`RouterStateError` 留到 Task 5 再引入，避免本 Task 的
+`F401`）：
+
+```python
+from stableagent.supervisor.model import RuntimeControl, SourceCursor
+from stableagent.supervisor.router import (
+    RouterConfig,
+    RouterPermissionError,
+    RouterService,
+)
+```
+
+`RuntimeBundle` 追加字段：
+
+```python
+    controller: "RuntimeController"
+```
+
+`Runtime` 追加方法（放在 `status()` 之后）：
+
+```python
+    def pause(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        return self._store.set_runtime_paused(
+            True, actor=actor, now=self._clock.now_ms(), reason=reason
+        )
+
+    def resume(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        control = self._store.set_runtime_paused(
+            False, actor=actor, now=self._clock.now_ms(), reason=reason
+        )
+        if self._started:
+            self._renew_lock()
+            self._route_pending()
+        return control
+```
+
+`build_runtime` 里构造并注入控制器：
+
+```python
+    controller = RuntimeController(runtime, service, orchestration)
+    return RuntimeBundle(
+        runtime=runtime,
+        controller=controller,
+        router=router,
+        service=service,
+        orchestration=orchestration,
+        scheduler=scheduler,
+        effects=effects,
+    )
+```
+
+文件末尾追加：
+
+```python
+class RuntimeController:
+    """运行控制命令面：只做 operator 校验与委托，业务规则仍在既有服务层。"""
+
+    def __init__(
+        self,
+        runtime: Runtime,
+        supervisor: SupervisorService,
+        orchestration: OrchestrationService,
+    ) -> None:
+        self._runtime = runtime
+        self._supervisor = supervisor
+        self._orchestration = orchestration
+
+    def status(self) -> RuntimeStatus:
+        return self._runtime.status()
+
+    def pause_processing(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        self._require_operator(actor)
+        return self._runtime.pause(actor=actor, reason=reason)
+
+    def resume_processing(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
+        self._require_operator(actor)
+        return self._runtime.resume(actor=actor, reason=reason)
+
+    def _require_operator(self, actor: str) -> None:
+        allowed = {name.casefold() for name in self._runtime.config.router.operators}
+        if actor.casefold() not in allowed:
+            raise RouterPermissionError(f"actor 不是 operator：{actor}")
+```
+
+> `RuntimeStateError` 在本 Task 仍未使用；它由 Task 2 的 `step()` 抛出，保留导出。
+
+- [ ] **Step 4: 跑绿与静态**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff check stableagent/supervisor/runtime.py tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff format --check stableagent/supervisor/runtime.py \
+  tests/unit/test_supervisor_runtime.py
+```
+
+Expected：`10 passed`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/runtime.py tests/unit/test_supervisor_runtime.py
+git commit -m "feat: add supervisor pause, resume and runtime controller"
+```
+
+---
+
+### Task 4：优雅停止与常驻循环（M4-4）
+
+**Files:**
+- Modify: `stableagent/orchestration/scheduler.py`
+- Modify: `stableagent/supervisor/runtime.py`
+- Modify: `tests/unit/test_scheduler.py`
+- Modify: `tests/unit/test_supervisor_runtime.py`
+
+**Interfaces:**
+- Consumes: `Scheduler.running_assignments()`。
+- Produces:
+  - `Scheduler.wait_idle(*, timeout_ms) -> bool`（只等待，绝不取消）
+  - `Runtime.stop() -> RuntimeStop`、`Runtime.serve(*, max_steps=None) -> int`
+  - `Runtime._stop_requested`
+
+- [ ] **Step 1: Scheduler 失败测试**
+
+`tests/unit/test_scheduler.py` 末尾追加：
+
+```python
+async def test_wait_idle_returns_immediately_when_idle(env) -> None:
+    _, _, _, scheduler, _ = env
+    assert await scheduler.wait_idle(timeout_ms=0) is True
+
+
+async def test_wait_idle_times_out_without_cancelling_the_worker(env) -> None:
+    _, service, executor, scheduler, _ = env
+    executor.gate.clear()
+    _queued(service, "运行中")
+    await scheduler.tick()
+    await asyncio.sleep(0)
+    assert scheduler.running_assignments()
+
+    assert await scheduler.wait_idle(timeout_ms=1) is False
+    assert scheduler.running_assignments()  # 只等待，绝不取消
+    assert executor.cancelled == []
+
+    executor.gate.set()
+    assert await scheduler.wait_idle(timeout_ms=1_000) is True
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_scheduler.py
+```
+
+Expected：`AttributeError: 'Scheduler' object has no attribute 'wait_idle'`。
+
+- [ ] **Step 3: 实现 wait_idle**
+
+`stableagent/orchestration/scheduler.py` 在 `running_assignments()` 之后追加：
+
+```python
+    async def wait_idle(self, *, timeout_ms: int) -> bool:
+        """只等待进行中的 Worker 结束；宽限期到点返回 False，绝不取消任务。"""
+        tasks = [task for task in self._tasks.values() if not task.done()]
+        if not tasks:
+            return True
+        _, pending = await asyncio.wait(tasks, timeout=max(timeout_ms / 1000.0, 0.0))
+        return not pending
+```
+
+- [ ] **Step 4: Runtime 停止测试**
+
+`tests/unit/test_supervisor_runtime.py` 的 fixture teardown 改为：
+
+```python
+    try:
+        yield bundle, store, clock, source, executor
+    finally:
+        executor.gate.set()
+        await bundle.runtime.stop()
+        store.close()
+```
+
+文件末尾追加：
+
+```python
+async def test_stop_waits_for_the_worker_without_cancelling_it(env) -> None:
+    bundle, store, _, source, executor = env
+    executor.gate.clear()
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    await asyncio.sleep(0)
+    assert executor.launched
+
+    stopping = asyncio.create_task(bundle.runtime.stop())
+    await asyncio.sleep(0)
+    assert stopping.done() is False  # 宽限期内不硬杀
+    assert executor.cancelled == []
+
+    executor.gate.set()
+    result = await stopping
+    assert result.drained is True and result.running_assignments == 0
+    assert store.get_runtime_lock() is None
+
+
+async def test_stop_is_idempotent_and_releases_the_lock(env) -> None:
+    bundle, store, _, _, _ = env
+    bundle.runtime.start()
+
+    first = await bundle.runtime.stop()
+    second = await bundle.runtime.stop()
+
+    assert first.drained is True and second.drained is True
+    assert store.get_runtime_lock() is None
+
+
+async def test_serve_runs_bounded_steps_then_stops(env) -> None:
+    bundle, store, _, source, executor = env
+    source.feed(_event())
+    bundle.runtime.start()
+
+    steps = await bundle.runtime.serve(max_steps=2)
+
+    assert steps == 2
+    assert len(executor.launched) == 1
+    assert store.get_runtime_lock() is None
+```
+
+- [ ] **Step 5: 实现 stop/serve**
+
+`stableagent/supervisor/runtime.py` 顶部追加：
+
+```python
+import asyncio
+```
+
+`Runtime.__init__` 末尾追加：
+
+```python
+        self._stop_requested = False
+```
+
+`Runtime` 追加方法（放在 `resume()` 之后）：
+
+```python
+    async def serve(self, *, max_steps: int | None = None) -> int:
+        """常驻循环；max_steps 只给测试/演练用，正常部署不传。"""
+        steps = 0
+        try:
+            while not self._stop_requested and (max_steps is None or steps < max_steps):
+                await self.step()
+                steps += 1
+                if self._stop_requested or (max_steps is not None and steps >= max_steps):
+                    break
+                await asyncio.sleep(self._config.step_interval_ms / 1000.0)
+        finally:
+            await self.stop()
+        return steps
+
+    async def stop(self) -> RuntimeStop:
+        """先停 intake（不再 step），再等宽限期；不取消 Worker、不删任何历史。"""
+        self._stop_requested = True
+        if not self._started:
+            return RuntimeStop(drained=True, running_assignments=0)
+        drained = await self._scheduler.wait_idle(timeout_ms=self._config.stop_grace_ms)
+        running = len(self._scheduler.running_assignments())
+        self._store.release_runtime_lock(self._config.owner)
+        self._started = False
+        return RuntimeStop(drained=drained, running_assignments=running)
+```
+
+- [ ] **Step 6: 跑绿、静态与提交**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_scheduler.py \
+  tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff check stableagent/orchestration/scheduler.py \
+  stableagent/supervisor/runtime.py tests/unit/test_scheduler.py \
+  tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff format --check stableagent/orchestration/scheduler.py \
+  stableagent/supervisor/runtime.py tests/unit/test_scheduler.py \
+  tests/unit/test_supervisor_runtime.py
+git add stableagent/orchestration/scheduler.py stableagent/supervisor/runtime.py \
+  tests/unit/test_scheduler.py tests/unit/test_supervisor_runtime.py
+git commit -m "feat: add graceful supervisor stop and bounded serve loop"
+```
+
+---
+
+### Task 5：retry_ticket / stop_ticket / reevaluate 控制命令（M4-5）
+
+**Files:**
+- Modify: `stableagent/supervisor/runtime.py`
+- Modify: `tests/unit/test_supervisor_runtime.py`
+
+**Interfaces:**
+- Consumes: `OrchestrationService.retry_ticket / get_ticket`、`SupervisorService.stop /
+  reevaluate`、`RouterStateError`。
+- Produces:
+  - `RuntimeController.retry_ticket(ticket_id, *, actor) -> Assignment`（仅 FAILED）
+  - `RuntimeController.stop_ticket(ticket_id, *, actor, reason=None) -> Ticket`
+  - `RuntimeController.reevaluate(trigger_id, *, actor) -> Decision`
+
+- [ ] **Step 1: 写失败测试**
+
+把 `tests/unit/test_supervisor_runtime.py` 顶部三处已有 import 分别扩写为（只新增
+`TicketAction` / `TicketStatus`、`DecisionOutcome`、`RouterStateError`，避免重复导入触发
+`F811`）：
+
+```python
+from stableagent.orchestration.model import EffectKind, TicketAction, TicketStatus
+from stableagent.supervisor.model import (
+    DecisionOutcome,
+    Thread,
+    ThreadKind,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.router import (
+    RouterConfig,
+    RouterPermissionError,
+    RouterStateError,
+)
+```
+
+文件末尾追加：
+
+```python
+async def test_retry_ticket_only_accepts_failed_and_is_operator_gated(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    ticket = store.list_tickets()[0]
+
+    with pytest.raises(RouterStateError):
+        bundle.controller.retry_ticket(ticket.id, actor="alice")
+    with pytest.raises(RouterPermissionError):
+        bundle.controller.retry_ticket(ticket.id, actor="mallory")
+
+    bundle.orchestration.transition_ticket(ticket.id, TicketAction.FAIL)
+    assignment = bundle.controller.retry_ticket(ticket.id, actor="alice")
+    assert assignment.attempt == 2
+    assert store.get_ticket(ticket.id).status is TicketStatus.QUEUED
+
+
+async def test_stop_ticket_cancels_and_records_a_stop_decision(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    ticket = store.list_tickets()[0]
+
+    stopped = bundle.controller.stop_ticket(ticket.id, actor="alice", reason="duplicate")
+
+    assert stopped.status is TicketStatus.CANCELLED
+    assert DecisionOutcome.STOP in [decision.outcome for decision in store.list_decisions()]
+
+
+async def test_reevaluate_appends_an_attempt_without_new_triggers(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    trigger = store.list_triggers()[0]
+    before = len(store.list_triggers())
+
+    decision = bundle.controller.reevaluate(trigger.id, actor="alice")
+
+    assert decision.attempt == 2
+    assert len(store.list_triggers()) == before
+```
+
+- [ ] **Step 2: 跑红**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py
+```
+
+Expected：`AttributeError: 'RuntimeController' object has no attribute 'retry_ticket'`。
+
+- [ ] **Step 3: 实现三条命令**
+
+`stableagent/supervisor/runtime.py` 的 orchestration import 追加 `Assignment`、`Ticket`：
+
+```python
+from stableagent.orchestration.model import (
+    Assignment,
+    AssignmentStatus,
+    Clock,
+    EffectKind,
+    IdFactory,
+    Ticket,
+    TicketStatus,
+)
+```
+
+`supervisor.model` import 追加 `Decision`：
+
+```python
+from stableagent.supervisor.model import Decision, RuntimeControl, SourceCursor
+```
+
+`RuntimeController` 追加方法（放在 `resume_processing` 之后）：
+
+```python
+    def retry_ticket(self, ticket_id: str, *, actor: str) -> Assignment:
+        self._require_operator(actor)
+        ticket = self._orchestration.get_ticket(ticket_id).ticket
+        if ticket.status is not TicketStatus.FAILED:
+            raise RouterStateError(
+                f"retry_ticket 只接受 FAILED：{ticket.status.value}"
+            )
+        return self._orchestration.retry_ticket(ticket_id)
+
+    def stop_ticket(
+        self, ticket_id: str, *, actor: str, reason: str | None = None
+    ) -> Ticket:
+        self._require_operator(actor)
+        return self._supervisor.stop(ticket_id, actor=actor, reason=reason)
+
+    def reevaluate(self, trigger_id: str, *, actor: str) -> Decision:
+        self._require_operator(actor)
+        return self._supervisor.reevaluate(trigger_id, actor=actor)
+```
+
+- [ ] **Step 4: 跑绿与静态**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff check stableagent/supervisor/runtime.py tests/unit/test_supervisor_runtime.py
+.venv/bin/ruff format --check stableagent/supervisor/runtime.py \
+  tests/unit/test_supervisor_runtime.py
+```
+
+Expected：`13 passed`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add stableagent/supervisor/runtime.py tests/unit/test_supervisor_runtime.py
+git commit -m "feat: add supervisor retry, stop and reevaluate commands"
+```
+
+---
+
+### Task 6：五个崩溃窗口的恢复证明（M4-6）
+
+**Files:**
+- Create: `tests/integration/test_superagent_recovery.py`
+
+**Interfaces:**
+- Consumes: Task 2~5 的 `build_runtime` / `Runtime.start/step`；真实 `GitHubSource` +
+  `FakeGitHubReadClient`；Task 1 的 `list_unrouted_triggers` 与锁过期语义。
+- Produces: WP-6.4 第 4 条要求的五个崩溃窗口证据；不新增生产代码。
+
+- [ ] **Step 1: 写集成测试**
+
+`tests/integration/test_superagent_recovery.py` 全文：
+
+```python
+"""WP-6.4 第 4 条：五个崩溃窗口在重启后不丢语义、不重复外部写入。"""
+
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from stableagent.control.model import Action
+from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
+from stableagent.integrations.github import (
+    FakeGitHubReadClient,
+    GitHubReadItem,
+    GitHubReadKind,
+)
+from stableagent.orchestration.model import (
+    AssignmentStatus,
+    Effect,
+    EffectKind,
+    IdFactory,
+)
+from stableagent.supervisor.router import RouterConfig
+from stableagent.supervisor.runtime import RuntimeConfig, build_runtime
+from stableagent.supervisor.source import GitHubSource
+from stableagent.supervisor.store import SupervisorStore
+from tests.support import FixedClock, SequenceIds
+
+
+def _issue_item(number: int = 1) -> GitHubReadItem:
+    return GitHubReadItem(
+        kind=GitHubReadKind.ISSUE,
+        occurred_at=1,
+        resource={
+            "number": number,
+            "user": {"login": "alice"},
+            "body": "@agent please add rate limiter",
+        },
+    )
+
+
+class RecordingExecutor:
+    def __init__(self) -> None:
+        self.launched: list[str] = []
+        self.recovered: list[str] = []
+        self.delivered: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+
+    async def launch(self, assignment, ticket, inputs) -> None:
+        self.launched.append(assignment.id)
+
+    async def deliver(self, assignment, ticket, inputs) -> None:
+        self.delivered.extend((ticket.id, item.payload) for item in inputs)
+
+    async def cancel(self, assignment) -> None:
+        self.cancelled.append(assignment.id)
+
+    async def recover(self, assignment, ticket) -> None:
+        self.recovered.append(assignment.id)
+
+
+def _build(
+    *,
+    store: SupervisorStore,
+    client: FakeGitHubReadClient,
+    executor: RecordingExecutor,
+    handlers,
+    clock: FixedClock,
+    ids: IdFactory,
+    owner: str,
+):
+    policy = StaticPolicy(
+        StaticPolicyConfig(
+            repository="o/r",
+            actors=frozenset({"alice"}),
+            grantable_actions=frozenset({Action.READ_REPOSITORY}),
+            default_validity_ms=60_000,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    source = GitHubSource(store, client, repository="o/r", bot_login="agent", clock=clock)
+    bundle = build_runtime(
+        store=store,
+        policy=policy,
+        source=source,
+        executor=executor,
+        effect_handlers=handlers,
+        config=RuntimeConfig(
+            router=RouterConfig(
+                repository="o/r",
+                operators=frozenset({"alice"}),
+                actions=("read_repository",),
+            ),
+            owner=owner,
+            lock_ttl_ms=1_000,
+            stop_grace_ms=10,
+            step_interval_ms=0,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    return bundle, source
+
+
+@pytest.fixture
+def env(tmp_path: Path):
+    clock, ids = FixedClock(), SequenceIds()
+    store = SupervisorStore(tmp_path / "p6.db", clock=clock)
+    client = FakeGitHubReadClient([_issue_item()])
+    try:
+        yield store, client, clock, ids
+    finally:
+        store.close()
+
+
+async def test_trigger_persisted_before_routing_is_routed_on_restart(env) -> None:
+    store, client, clock, ids = env
+    first, source = _build(
+        store=store,
+        client=client,
+        executor=RecordingExecutor(),
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-a",
+    )
+    first.runtime.start()
+    await source.poll(limit=10)  # Trigger/Thread/cursor 已落库，路由尚未发生
+    assert store.list_decisions() == []
+
+    clock.advance(2_000)  # 进程死亡：锁过期
+    restarted, _ = _build(
+        store=store,
+        client=client,
+        executor=RecordingExecutor(),
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-b",
+    )
+
+    started = restarted.runtime.start()
+
+    assert started.routed == 1
+    assert len(store.list_decisions()) == 1
+    assert store.list_unrouted_triggers() == []
+
+
+async def test_ticket_committed_before_dispatch_is_dispatched_after_restart(env) -> None:
+    store, client, clock, ids = env
+    first, source = _build(
+        store=store,
+        client=client,
+        executor=RecordingExecutor(),
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-a",
+    )
+    first.runtime.start()
+    batch = await source.poll(limit=10)
+    first.router.receive(batch.events[0].trigger)  # 五件原子写已提交，launch 尚未派发
+    assert len(store.list_tickets()) == 1
+
+    clock.advance(2_000)
+    executor = RecordingExecutor()
+    restarted, _ = _build(
+        store=store,
+        client=client,
+        executor=executor,
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-b",
+    )
+    restarted.runtime.start()
+
+    step = await restarted.runtime.step()
+    await asyncio.sleep(0)
+
+    assert step.dispatched == 1
+    assert len(store.list_tickets()) == 1
+    assert len(executor.launched) == 1
+
+
+async def test_github_comment_effect_is_neither_lost_nor_replayed(env) -> None:
+    store, client, clock, ids = env
+    calls: list[str] = []
+
+    async def comment_handler(effect) -> None:
+        calls.append(effect.id)
+
+    handlers = {EffectKind.GITHUB_COMMENT: comment_handler}
+    first, _ = _build(
+        store=store,
+        client=client,
+        executor=RecordingExecutor(),
+        handlers=handlers,
+        clock=clock,
+        ids=ids,
+        owner="runtime-a",
+    )
+    first.runtime.start()
+    store.enqueue_effect(
+        Effect(
+            id="ef-comment",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="comment:1",
+            payload={"repository": "o/r", "url": "https://example/1", "body": "done"},
+            due_at=clock.now_ms(),
+        )
+    )
+
+    clock.advance(2_000)
+    restarted, _ = _build(
+        store=store,
+        client=client,
+        executor=RecordingExecutor(),
+        handlers=handlers,
+        clock=clock,
+        ids=ids,
+        owner="runtime-b",
+    )
+    restarted.runtime.start()
+    await restarted.runtime.step()
+    assert calls == ["ef-comment"]
+
+    clock.advance(2_000)
+    third, _ = _build(
+        store=store,
+        client=client,
+        executor=RecordingExecutor(),
+        handlers=handlers,
+        clock=clock,
+        ids=ids,
+        owner="runtime-c",
+    )
+    third.runtime.start()
+    await third.runtime.step()
+    assert calls == ["ef-comment"]  # 已成功 effect 不重放
+
+
+async def test_worker_run_crash_becomes_interrupted_and_relaunched(env) -> None:
+    store, client, clock, ids = env
+    first_executor = RecordingExecutor()
+    first, _ = _build(
+        store=store,
+        client=client,
+        executor=first_executor,
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-a",
+    )
+    first.runtime.start()
+    await first.runtime.step()
+    await asyncio.sleep(0)
+    ticket = store.list_tickets()[0]
+    assignment = store.list_assignments(ticket.id)[0]
+    assert assignment.status is AssignmentStatus.RUNNING
+
+    clock.advance(2_000)
+    second_executor = RecordingExecutor()
+    restarted, _ = _build(
+        store=store,
+        client=client,
+        executor=second_executor,
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-b",
+    )
+
+    started = restarted.runtime.start()
+    assert started.recovery.interrupted_assignments == 1
+    assert started.recovery.relaunched == 1
+
+    await restarted.runtime.step()
+    await asyncio.sleep(0)
+    assert second_executor.recovered == [assignment.id]
+    assert second_executor.launched == []  # 走 recover，不冷启动
+
+
+async def test_cursor_update_failure_rolls_back_the_whole_poll(env, monkeypatch) -> None:
+    store, client, clock, ids = env
+    bundle, source = _build(
+        store=store,
+        client=client,
+        executor=RecordingExecutor(),
+        handlers={},
+        clock=clock,
+        ids=ids,
+        owner="runtime-a",
+    )
+    bundle.runtime.start()
+
+    def boom(cursor) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "put_source_cursor", boom)
+        with pytest.raises(sqlite3.OperationalError):
+            await bundle.runtime.step()
+
+    assert store.get_source_cursor("github") is None
+    assert store.list_triggers() == []  # Trigger/Thread 与 cursor 同批回滚
+
+    step = await bundle.runtime.step()
+    assert step.received == 1
+    assert len(store.list_triggers()) == 1
+    assert len(store.list_decisions()) == 1  # 游标未推进，下一次 poll 不丢事件
+```
+
+- [ ] **Step 2: 跑绿**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/integration/test_superagent_recovery.py
+```
+
+Expected：`5 passed`。若出现失败，按失败窗口修生产代码（只允许改
+`supervisor/runtime.py` 或 Task 1 的 Store 方法），不得改测试预期。
+
+- [ ] **Step 3: 与本轮前四个 Task 合跑**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_runtime.py \
+  tests/unit/test_scheduler.py tests/integration/test_superagent_recovery.py
+```
+
+Expected：全部通过。
+
+- [ ] **Step 4: 静态与提交**
+
+```bash
+.venv/bin/ruff check tests/integration/test_superagent_recovery.py
+.venv/bin/ruff format --check tests/integration/test_superagent_recovery.py
+git add tests/integration/test_superagent_recovery.py
+# 若 Step 2 修过生产代码，把对应文件一并 add
+git commit -m "test: cover five supervisor runtime crash windows"
+```
+
+---
+
+### Task 7：CI FOCUS 33、Runtime 指南与 M4 出口（M4-7）
+
+**Files:**
+- Modify: `tests/unit/test_ci_focus_gate.py`
+- Modify: `.github/workflows/ci.yml`
+- Create: `docs/guides/supervisor-runtime.md`
+- Modify: `docs/acceptance/p6-supervisor-beta.md`、`README.md`、`docs/README.md`、
+  `docs/acceptance/README.md`、`docs/Roadmap.md`、`CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: Task 1~6 的模块与测试。
+- Produces: 33 文件心脏闸门；Runtime 运维文档；M4 收口读数与状态面。
+
+- [ ] **Step 1: FOCUS 32 → 33（先写红）**
+
+`tests/unit/test_ci_focus_gate.py`：
+
+```python
+    "supervisor/service.py",
+    "supervisor/runtime.py",
+]
+
+
+def test_focus_covers_the_thirty_three_cardiac_files() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert all(f'"{name}"' in text for name in FOCUS_FILES)
+    assert len(FOCUS_FILES) == 33
+    assert "33 文件" in text  # 步骤名与注释同步
+    assert text.count('".py"') == 0  # 不许用通配兜底
+```
+
+`.github/workflows/ci.yml` 的步骤名改为
+`心脏模块覆盖率闸门（33 文件：loop/checkpoint/errors/context/evidence/orchestration/control/execution/integrations/supervisor 各 ≥90%）`，
+并在 `"supervisor/service.py",` 之后追加：
+
+```python
+              "supervisor/runtime.py",
+```
+
+- [ ] **Step 2: 跑红再跑绿**
+
+```bash
+.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py
+```
+
+Expected：只改测试时 `assert "33 文件" in text` 失败；补齐 workflow 后 `1 passed`。
+
+- [ ] **Step 3: 写 Runtime 运维指南**
+
+`docs/guides/supervisor-runtime.md` 全文：
+
+```markdown
+# Supervisor Runtime 运维指南（P6 Beta）
+
+本指南对应当前 Beta 的常驻运行面：单实例锁、启动恢复、暂停与优雅停止。Beta 仍锁定
+`observe`，Runtime 不执行任何推断任务。
+
+## 1. 单实例锁
+
+- 锁是 `runtime_lock` 单例行（`id = 1`），字段为 `owner` / `acquired_at` /
+  `heartbeat_at` / `expires_at`，随 SQLite 库走，可审计。
+- 启动时 `acquire_runtime_lock(owner, now, ttl_ms)`：无行则插入；其他 owner 未过期则
+  拒绝并抛 `RuntimeLockError`；同 owner 可重入刷新租约。
+- 每轮 `step()` 先心跳；心跳失败（owner 变更或租约过期）立即抛 `RuntimeLockError`，
+  不继续写库。正常情况下进程死亡只等 `expires_at` 到点即可被接管。
+- 不要手工删 `runtime_lock` 行来"解锁"：先确认旧进程已退出，或等租约自然过期。
+
+## 2. 启动顺序
+
+`Runtime.start()` 固定四步，任何 effect/worker 派发都不在此之前发生：
+
+1. 获取单实例锁（失败即退出，不做恢复）。
+2. `OrchestrationService.recover()`：RUNNING Assignment → INTERRUPTED，入队
+   `:relaunch` effect，并重置在途 effect。
+3. 读 `runtime_control.paused`；暂停则不补路由。
+4. 补路由 `list_unrouted_triggers()`：Trigger 已落库但没有 Decision 的崩溃窗口，
+   逐条 `RouterService.receive`（按其既有去重语义安全重放）。
+
+## 3. 每轮推进
+
+`Runtime.step()` 的顺序固定：
+
+1. 心跳续租。
+2. `Source.poll()`：Trigger/Thread/Channel/cursor 由 Source 在同一事务落库；
+   `SourceError` 只让本轮空转（健康已记入 `source_health`），不杀调度。
+3. 暂停检查：暂停时只记录 Trigger，不路由、不 tick、不派发外部 effect。
+4. 对每个新事件 `RouterService.receive`；duplicate 不重复建票。
+5. `Scheduler.tick()`：从 Store 派生可运行工作并派发 worker effect。
+6. 外部 `EffectDispatcher.dispatch_due()`：GitHub 写与其它 P5 effect。
+
+`Runtime.serve(max_steps=None)` 只是循环执行 `step()`；`max_steps` 仅供演练与测试。
+
+## 4. 暂停语义
+
+- `pause_processing` 把暂停位落进 `runtime_control`（`paused=1`），跨重启保留。
+- 暂停时：Source 仍记录 Trigger；新 Eval、Ticket dispatch、外部 reply effect 与超时推进
+  全部停止；不硬杀正在执行的 Worker。
+- `resume_processing` 清暂停位；Runtime 已启动时立即补路由暂停期间记录的 Trigger，
+  下一轮 `step()` 再派发。
+- 每次暂停/恢复写 `actor`、`reason`、`changed_at` 与递增的 `generation`。
+
+## 5. 优雅停止
+
+- `Runtime.stop()` 先置停标志（不再进入下一轮 step），再 `Scheduler.wait_idle(timeout_ms)`
+  等宽限期（默认 5s）。
+- 宽限期到点仍不取消 Worker：返回 `RuntimeStop(drained=False, running_assignments=N)`，
+  随后释放锁。重启后由 P4 `recover()` 接管中断的 Assignment。
+- 停止不删除 worktree、Ticket、Effect、Input、Report 或 checkpoint；历史全部保留。
+- `stop()` 幂等：未启动或重复调用都返回 `drained=True`。
+
+## 6. 崩溃恢复窗口
+
+| 窗口 | 重启后的行为 |
+|---|---|
+| Trigger 落库后、路由前 | `start()` 用 `list_unrouted_triggers` 补路由 |
+| Decision/Ticket 事务后、launch 派发前 | 事务内 launch effect 仍在 outbox，下一轮 tick 派发一次 |
+| GitHub comment effect 前 | effect 仍 PENDING，重启后只执行一次；已成功的不重放 |
+| Worker run 中 | `recover()` 把 RUNNING 收成 INTERRUPTED 并入队 `:relaunch`，走 `recover` 不冷启动 |
+| cursor 更新失败 | Trigger/Thread/cursor 同事务回滚；cursor 未推进，下一次 poll 重新取到事件 |
+
+## 7. 运行控制命令与安全边界
+
+`RuntimeController` 提供：`status`、`pause_processing`、`resume_processing`、
+`retry_ticket`（仅 FAILED）、`stop_ticket`、`reevaluate`。
+
+- 所有命令只认 `RouterConfig.operators`，大小写不敏感；非 operator 抛
+  `RouterPermissionError`。
+- `status` 只返回运行态摘要（锁/暂停/Source 健康/队列/effect/审批计数），不返回外部正文；
+  待人工首屏与注意力排序属于 M5。
+- `stop_ticket` / `reevaluate` 复用既有 `SupervisorService`；`retry_ticket` 复用
+  `OrchestrationService`，均不新开业务路径。
+- Runtime 不 import `execution` / `integrations`；GitHub 写只经 effect handler 注入。
+```
+
+- [ ] **Step 4: 全量门禁（先落盘再读回）**
+
+```bash
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p6-m4-full.txt 2>&1; tail -5 /tmp/p6-m4-full.txt
+env -u NO_PROXY -u no_proxy .venv/bin/ruff check stableagent tests examples benchmarks \
+  > /tmp/p6-m4-ruff.txt 2>&1; cat /tmp/p6-m4-ruff.txt
+env -u NO_PROXY -u no_proxy .venv/bin/ruff format --check stableagent tests examples benchmarks \
+  > /tmp/p6-m4-format.txt 2>&1; tail -3 /tmp/p6-m4-format.txt
+env -u NO_PROXY -u no_proxy .venv/bin/mypy > /tmp/p6-m4-mypy.txt 2>&1; tail -3 /tmp/p6-m4-mypy.txt
+git diff 234f620..HEAD --stat -- stableagent/core/ > /tmp/p6-m4-l1.txt; cat /tmp/p6-m4-l1.txt
+git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py \
+  > /tmp/p6-m4-c1.txt; cat /tmp/p6-m4-c1.txt
+grep -rn "stableagent.supervisor" stableagent/core stableagent/orchestration \
+  stableagent/control stableagent/execution stableagent/integrations \
+  > /tmp/p6-m4-reverse.txt; cat /tmp/p6-m4-reverse.txt
+git diff --check > /tmp/p6-m4-diffcheck.txt; cat /tmp/p6-m4-diffcheck.txt
+```
+
+Expected：全量全绿；`stableagent/supervisor/runtime.py` 行覆盖率 ≥90%（见全量输出的
+`runtime.py` 行）；L1/C1/reverse/diffcheck 四个文件均为空。
+
+- [ ] **Step 5: 三解释器与覆盖率读数**
+
+```bash
+env -u NO_PROXY -u no_proxy .matrix/py311/bin/pytest -q > /tmp/p6-m4-py311.txt 2>&1; tail -3 /tmp/p6-m4-py311.txt
+env -u NO_PROXY -u no_proxy .matrix/py312/bin/pytest -q > /tmp/p6-m4-py312.txt 2>&1; tail -3 /tmp/p6-m4-py312.txt
+grep "runtime.py" /tmp/p6-m4-full.txt
+```
+
+Expected：3.11 / 3.12 与 3.10 同为 `passed, skipped`；`runtime.py` 覆盖率 ≥90%。
+
+- [ ] **Step 6: 账本与状态面回填**
+
+`docs/acceptance/p6-supervisor-beta.md`：
+
+- §1 的 M4 小节：把 `### M4：常驻调度、恢复与运行控制（规格 WP-6.4；待 M3 收口后展开）`
+  改为收口状态行 `> **状态：M4 收口（Task 1~7 全部完成）。**`，并按 M1~M3 的账本格式
+  补齐 `- [x] **M4-1**` ~ `- [x] **M4-7**` 七条（每条写对应提交与实测用例数）。
+- §3 在 service 测试行之后追加：
+
+```bash
+.venv/bin/pytest -q tests/unit/test_supervisor_runtime.py \
+  tests/integration/test_superagent_recovery.py
+```
+
+- §4 追加 M4 的 Task/Step 计数（以实际 `- [ ] **Step` 条数为准）。
+- §11 末尾追加 `### M4 出口读数（2026-11-09，落盘 /tmp/p6-m4-*.txt 后读回）`，
+  记录全量/三解释器/覆盖率/静态/边界四零/计划偏差，全部以读回文件为准。
+
+状态面：
+
+```markdown
+| P6 | Single-repository Super-Agent Beta | 🟡 active — M4 done (7/7); milestones 4/6 |
+```
+
+`docs/README.md` 第 52 行、`docs/acceptance/README.md` 第 12 行同步为
+`P6 进行中（M4 完成，7/7；里程碑 4/6）`；`docs/Roadmap.md` 的"当前进度"改为
+M1~M4 完成，`下一步：M5 最小监管面与注意力协议（规格 WP-6.5）`；`CHANGELOG.md` 在
+`## [Unreleased]` 下新增 `### 实现（P6 M4 Runtime，2026-11-09）`，写锁/暂停/停止/
+恢复五窗口/FOCUS 33 与门禁读数。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add tests/unit/test_ci_focus_gate.py .github/workflows/ci.yml \
+  docs/guides/supervisor-runtime.md docs/acceptance/p6-supervisor-beta.md \
+  README.md docs/README.md docs/acceptance/README.md docs/Roadmap.md CHANGELOG.md
+git commit -m "docs: close p6 m4 with runtime recovery evidence"
+```
+
+---
+
+### M4 自检记录（writing-plans）
+
+- **规格覆盖：** WP-6.4 第 1 条 → Task 2（`build_runtime` 组成根只注入依赖）；
+  第 2 条 → Task 2（锁 → recover → 读暂停 → 补路由，派发留到 step）；
+  第 3 条 → Task 4（宽限期等待、不取消、不删历史、释放锁）；
+  第 4 条 → Task 6（五个崩溃窗口各有独立用例）；
+  第 5 条 → Task 3/5（pause/resume/status/retry/stop/reevaluate）；
+  §2.4 的"Source 仍可记录 Trigger" → Task 2 的暂停用例（received=1、routed=0）。
+- **类型一致性：** `RuntimeConfig` / `RuntimeStart` / `RuntimeStep` / `RuntimeStop` /
+  `RuntimeStatus` / `RuntimeLockError` / `RuntimeStateError` / `RuntimeBundle` 只在
+  Task 2 定义；Task 3 只追加 `controller` 字段与 `RuntimeController`；Task 4 只追加
+  `wait_idle` / `stop` / `serve`；Task 5 只追加三条命令。Store 方法名在 Task 1 一次定义，
+  后续 Task 不再改名。
+- **无占位符：** 每个实现步骤给出完整代码；出口读数与用例数在实测后回填，不预填数字。
+- **自检修正（落进 Task 正文）：** 测试 import 一律写"扩写既有语句"以免 `F811`/`I001`；
+  计数用例只依赖 `queue_ticket` 一次写入的真实事实（不再额外插 Assignment/Effect）；
+  "租约丢失"用例先让 `other` owner 在过期后接管，心跳才会失败；§1 的 M4 账本改为
+  新建 M4-1~M4-7 七条收口记录（原 §1 只有标题行）。
+- **边界：** `runtime.py` 不 import `execution` / `integrations`（GitHub 写只经注入的
+  effect handler）；所有事务边界在 Store 方法内部（L3）；暂停/锁/命令授权不读外部正文
+  （L4）；`EffectKind` 不加成员（L6）；`status` 不含 payload 或日志正文（I6）。
+
+### M4 出口读数（2026-11-09，落盘 `/tmp/p6-m4-*.txt` 后读回）
+
+- **全量（3.10）：** `/tmp/p6-m4-full.txt` → `833 passed, 6 skipped in 19.80s`，
+  `TOTAL 5004 60 99%`，`Required test coverage of 70.0% reached. Total coverage: 98.80%`。
+- **心脏覆盖率：** 同文件 `stableagent/supervisor/runtime.py 201 2 99% 161, 188`（≥90%）。
+- **静态：** `/tmp/p6-m4-ruff.txt` → `All checks passed!`；`/tmp/p6-m4-format.txt` →
+  `154 files already formatted`；`/tmp/p6-m4-mypy.txt` →
+  `Success: no issues found in 69 source files`。
+- **三解释器：** `/tmp/p6-m4-py311.txt` → `833 passed, 6 skipped`（3.11.16）；
+  `/tmp/p6-m4-py312.txt` → `833 passed, 6 skipped`（3.12.14）。
+- **边界四零：** `/tmp/p6-m4-l1.txt`（L1 `core/` 相对 `234f620`）、
+  `/tmp/p6-m4-c1.txt`（约束 1 `orchestration/service.py`）、
+  `/tmp/p6-m4-reverse.txt`（下层包 import supervisor）、
+  `/tmp/p6-m4-diffcheck.txt`（空白错误）四个文件均为 0 字节。
+- **计划偏差：**
+  1. §4 原写 M4 为 `7 个 Task / 38 个 Step`，实际 `- [ ] **Step` 计数为 39（Task 1 六步、
+     Task 4 六步、Task 7 八步），已按实际改为 39。
+  2. Task 5 的累计预期原写 `13 passed`，实测 `16 passed`——Task 4 新增的 3 个用例在
+     计划里未计入累计预期，实现无需改动。
+  3. ruff `UP037` 在 `from __future__ import annotations` 下要求去掉 `runtime: "Runtime"`
+     的引号；`ruff format` 把 `store.py` 中 heartbeat/release 的 SQL 折叠为单行，
+     两者均只影响排版。
+  4. Task 2 的"租约丢失"用例需先让另一 owner 在过期后接管，心跳才会因 owner 变更失败
+     （自检阶段已修正，实现未改）。
