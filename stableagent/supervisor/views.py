@@ -65,6 +65,40 @@ class TimelineEvent(BaseModel):
     at: int
     kind: Literal["trigger", "decision", "report", "input"]
     summary: str
+    object_id: str | None = None
+
+
+class AssignmentSummary(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    attempt: int
+    status: AssignmentStatus
+    started_at: int | None
+    ended_at: int | None
+    failure: str | None
+
+
+class SubscriptionView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    thread_key: str
+    mode: SubscriptionMode
+    created_at: int
+    ended_at: int | None
+
+
+class TicketDetail(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    ticket: TicketSummary
+    mandate_id: str
+    assignments: list[AssignmentSummary]
+    subscriptions: list[SubscriptionView]
+    ticket_link: str | None
+    thread_link: str | None
+    timeline: list[TimelineEvent]
 
 
 _OPEN_STATUSES = (
@@ -266,6 +300,7 @@ class SupervisorViews:
                     at=trigger.occurred_at,
                     kind="trigger",
                     summary=f"{trigger.kind.value}:{trigger.actor}",
+                    object_id=trigger.id,
                 )
             )
             for decision in self._store.list_decisions(trigger_id=trigger.id):
@@ -273,6 +308,7 @@ class SupervisorViews:
                     at=decision.created_at,
                     kind="decision",
                     summary=decision.outcome.value,
+                    object_id=decision.id,
                 )
         events.extend(decisions.values())
         return sorted(events, key=lambda event: (event.at, event.kind, event.summary))
@@ -282,7 +318,12 @@ class SupervisorViews:
         if ticket is None:
             raise KeyError(ticket_id)
         events = [
-            TimelineEvent(at=report.created_at, kind="report", summary=report.summary)
+            TimelineEvent(
+                at=report.created_at,
+                kind="report",
+                summary=report.summary,
+                object_id=report.id,
+            )
             for report in self._store.list_reports(ticket_id)
         ]
         events.extend(
@@ -290,11 +331,56 @@ class SupervisorViews:
                 at=ticket_input.created_at,
                 kind="input",
                 summary=f"{ticket_input.kind}:{ticket_input.state}",
+                object_id=ticket_input.id,
             )
             for ticket_input in self._store.list_inputs(ticket_id)
         )
         events.extend(
-            TimelineEvent(at=decision.created_at, kind="decision", summary=decision.outcome.value)
+            TimelineEvent(
+                at=decision.created_at,
+                kind="decision",
+                summary=decision.outcome.value,
+                object_id=decision.id,
+            )
             for decision in self._store.list_decisions(mandate_id=ticket.mandate_id)
         )
         return sorted(events, key=lambda event: (event.at, event.kind, event.summary))
+
+    def ticket_detail(self, ticket_id: str) -> TicketDetail:
+        ticket = self._store.get_ticket(ticket_id)
+        if ticket is None:
+            raise KeyError(ticket_id)
+        ticket_link, thread_link = ticket_links(self._store, ticket_id)
+        return TicketDetail(
+            ticket=TicketSummary(
+                id=ticket.id,
+                title=ticket.title,
+                status=ticket.status,
+                created_at=ticket.created_at,
+            ),
+            mandate_id=ticket.mandate_id,
+            assignments=[
+                AssignmentSummary(
+                    id=assignment.id,
+                    attempt=assignment.attempt,
+                    status=assignment.status,
+                    started_at=assignment.started_at,
+                    ended_at=assignment.ended_at,
+                    failure=assignment.failure,
+                )
+                for assignment in self._store.list_assignments(ticket_id)
+            ],
+            subscriptions=[
+                SubscriptionView(
+                    id=subscription.id,
+                    thread_key=subscription.thread_key,
+                    mode=subscription.mode,
+                    created_at=subscription.created_at,
+                    ended_at=subscription.ended_at,
+                )
+                for subscription in self._store.list_subscriptions(ticket_id=ticket_id)
+            ],
+            ticket_link=ticket_link,
+            thread_link=thread_link,
+            timeline=self.ticket_timeline(ticket_id),
+        )

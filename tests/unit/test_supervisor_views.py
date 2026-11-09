@@ -336,3 +336,87 @@ def test_thread_url_maps_issue_pull_request_review_and_repository() -> None:
         )
         == "https://github.com/o/r"
     )
+
+
+def test_ticket_detail_lists_assignments_subscriptions_and_timeline(
+    store: SupervisorStore,
+) -> None:
+    ticket = _ticket(store, "tk-1", TicketStatus.RUNNING)
+    store.insert_assignment(
+        Assignment(id="as-1", ticket_id=ticket.id, attempt=1, status=AssignmentStatus.RUNNING)
+    )
+    store.upsert_thread(
+        Thread(
+            key="issue:o/r#1",
+            repository="o/r",
+            kind=ThreadKind.ISSUE,
+            external_ref="#1",
+            last_trigger_at=1,
+        )
+    )
+    store.insert_subscription(
+        Subscription(
+            id="sb-1",
+            ticket_id=ticket.id,
+            thread_key="issue:o/r#1",
+            mode=SubscriptionMode.OWN,
+            created_at=1,
+        )
+    )
+    store.insert_report(
+        Report(
+            id="rp-1",
+            ticket_id=ticket.id,
+            assignment_id="as-1",
+            kind=ReportKind.PROGRESS,
+            summary="local-restricted exit=0",
+            created_at=20,
+        )
+    )
+
+    detail = SupervisorViews(store).ticket_detail(ticket.id)
+
+    assert detail.ticket.id == ticket.id
+    assert detail.mandate_id == ticket.mandate_id
+    assert [(item.id, item.attempt, item.status) for item in detail.assignments] == [
+        ("as-1", 1, AssignmentStatus.RUNNING)
+    ]
+    assert [item.thread_key for item in detail.subscriptions] == ["issue:o/r#1"]
+    assert detail.ticket_link == "https://github.com/o/r/issues/1"
+    assert [event.kind for event in detail.timeline] == ["report"]
+    assert detail.timeline[0].object_id == "rp-1"
+    assert "SECRET-TASK" not in json.dumps(detail.model_dump())
+
+
+def test_ticket_detail_unknown_ticket_raises_key_error(store: SupervisorStore) -> None:
+    with pytest.raises(KeyError):
+        SupervisorViews(store).ticket_detail("tk-missing")
+
+
+def test_thread_timeline_events_carry_object_ids(store: SupervisorStore) -> None:
+    trigger = Trigger(
+        id="tg-1",
+        external_id="issue:1",
+        kind=TriggerKind.ISSUE,
+        actor="alice",
+        thread_keys=["issue:acme/widgets#1"],
+        occurred_at=10,
+        received_at=11,
+        payload={"body": "DO-NOT-LEAK"},
+    )
+    store.insert_trigger(trigger)
+    store.insert_decision(
+        Decision(
+            id="dc-1",
+            trigger_ids=["tg-1"],
+            outcome=DecisionOutcome.OBSERVE,
+            strength=DecisionStrength.INFERRED,
+            policy_version="p6-v1",
+            request_digest="d-1",
+            created_at=12,
+        )
+    )
+
+    events = SupervisorViews(store).thread_timeline("issue:acme/widgets#1")
+
+    assert [event.object_id for event in events] == ["tg-1", "dc-1"]
