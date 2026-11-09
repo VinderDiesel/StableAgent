@@ -52,6 +52,9 @@ stableagent/supervisor/
   assessor.py       # CandidateAssessor 协议、确定性/LLM 实现适配
   service.py        # RouterService：唯一 domain mutation 入口
   views.py          # 人工监管的只读查询
+  notifications.py  # 四类消息模板、限长与通知草拟
+  console.py        # operator 命令面：读写共用、统一 operator 校验
+  cli.py            # stdlib argparse 入口（python -m stableagent.supervisor.cli）
   runtime.py        # 生命周期、单实例锁、poll/tick、恢复与停止
 ```
 
@@ -168,6 +171,127 @@ P6 Beta 的发布配置必须锁为 `observe`，并将 `auto` 接口标记为未
 3. 提供确认、结果、attention、失败消息的消息模板；单条文本限制，防止模型输出长报告淹没协作 Thread。
 4. 不制作过程事件瀑布流；完整 Event/Report 历史放在 Ticket detail 查询中。
 5. 所有写操作（stop、retry、approval、reevaluate）必须二次确认或明确命令参数，并走已有 service/Policy/Outbox。
+
+#### WP-6.5 设计决议（M5，2026-11-09）
+
+> 维护者已确认：监管入口只做 stdlib CLI；写命令用显式 `--confirm`；生命周期通知自动
+> 草拟、人工批准；拒绝一条通知即静默该 Ticket 后续通知；飞书/Slack/微信等 IM 渠道
+> 属于 P7 Source/Transport，M5 不引入任何出站网络或凭据配置。
+
+**范围与非目标**
+
+- 交付 `views.py` 首屏与详情、`notifications.py` 模板/限长/草拟、`console.py` 命令面、
+  `cli.py` 入口，以及 Runtime 的草拟接线。
+- 不新增 `EffectKind`，不自动发送外部消息，不绕过 `ApprovalGate`，不做 FastAPI、
+  过程事件瀑布流或双向 IM 操作；外部正文不参与授权（L4）。
+
+**首屏与详情**
+
+- `SupervisorViews.status_sections()` 返回冻结模型 `StatusSections`：`attention`
+  （沿用 M1 已收口的优先级 0~3：审批 → 失败 effect → waiting → ready）、
+  `source_health`、`queue`（queued/running/due/failed 计数）。CLI 把
+  `read_runtime_status(store, clock)` 的锁与暂停信息追加在末尾，该函数由现有
+  `Runtime.status()` 的读取逻辑抽出，视图层不 import runtime。
+- `AttentionItem` 保留既有字段，新增带默认值的 `target_id`、`needs`、`why`、
+  `actions`、`ticket_link`、`thread_link`。`target_id` 是该项的主目标：审批行用
+  approval id、失败 effect 用 effect id、其它用 ticket id。`--confirm` 必须与命令的
+  位置参数完全一致（`approve`/`deny` 用 approval id，`stop` 用 `ticket_id`，
+  `retry` 按 id 类型分派，`reevaluate` 用 trigger id）。
+  `actions` 是 CLI 命令名的静态映射（审批：approve/deny/stop；失败 effect：
+  retry/stop；waiting：stop；ready：stop），不从外部正文推导。
+- 稳定链接由 Ticket 的 live Subscription 找到 Thread，再按
+  `repository + kind + external_ref` 构造：Issue → `/issues/<n>`，PR → `/pull/<n>`，
+  Review/Repository → 仓库 URL；没有订阅时链接为空，不猜。
+- `TicketDetail` 复用 `ticket_timeline` 的 report/input/decision 摘要，附状态、Mandate
+  与链接；仍不返回 `task`、`payload` 或原始日志。方法是 `ticket_detail(ticket_id)`；
+  `thread <key>` 直接用既有 `thread_timeline(thread_key)`，不新增模型。规格第 4 条的
+  “完整历史”指条目不截断，不指暴露原文。
+- `TimelineEvent` 新增带默认值的 `object_id: str | None = None`（trigger / decision
+  各自的 id），使 `thread` 的输出能直接充当 `reevaluate <trigger-id>` 的目标；
+  既有字段与排序不变。
+
+**通知生命周期**
+
+- `NotificationConfig`：`enabled=True`、`max_chars=400`、`since_ms=0`。只有
+  `created_at >= since_ms`、Mandate `origin_kind="github"` 且 actions 含
+  `comment_issue` 的 Ticket 才草拟；默认 0 表示不过滤，升级部署时由 operator 把
+  `since_ms` 设为当刻，避免对历史 Ticket 补发。
+- 四类模板（accepted / result / attention / failure）是纯函数，正文只由 Ticket 标题、
+  对应种类的 Report `summary`（failure 取 FAILED、attention 取 WAITING_FOR_HUMAN、
+  result 取 READY；同种多条时按 `(created_at, id)` 取最新，取不到就省略该段）、稳定
+  链接拼成；超过 `max_chars` 时截断为 `前 max_chars-1 字符 + "…"`。绝不使用 `task`、
+  `Trigger.payload`、`TicketInput.payload` 或日志。
+- `NotificationDrafter.draft_due()` 在 Runtime 每轮执行：按 Ticket 状态映射
+  QUEUED/RUNNING → accepted、WAITING → attention、READY → result、FAILED → failure；
+  只调用 `ApprovalService.submit` 写 pending 审批行，reason 为
+  `notification:<kind>`，不写 effect。已有同 digest 的任意状态审批行则不重复；
+  该 Ticket 存在任何 DENIED 的 `COMMENT_ISSUE` 审批时整票静默。草拟前取该 Ticket
+  `list_assignments` 的最后一条（accept 必写 Assignment）；一条都没有则本轮跳过，
+  不猜 id。
+- 批准在**同一事务**内翻转审批并入队 effect：`ApprovalService.decide` 新增可选
+  `effect` 参数（既有调用语义不变），只在 approve 且有 effect 时追加
+  `Store.enqueue_effect`。CLI 先重算当前正文与 digest，与审批行不符则拒绝（不写任何
+  状态），相符才入队。这样不存在“已批准、未入队”的崩溃窗口。
+- effect 使用 `GITHUB_COMMENT`，幂等键 `notify:<ticket_id>:<kind>`，payload 为
+  `{ticket_id, assignment_id, stable_id, repository, url, body}`（`assignment_id`
+  取该 Ticket 最后一条 Assignment，`stable_id` 取 Mandate `scope`，与既有 handler
+  的必填字段一致，不改 `integrations/github_effects.py`）；发送仍由下一轮
+  `EffectDispatcher.dispatch_due()` 经 `ApprovalGate` 完成，CLI 不做网络调用。
+- 拒绝即静默：`ApprovalGate` 的 denied 粘性按 `(ticket, COMMENT_ISSUE)` 生效，M5 明确
+  将其作为产品语义，不修改审批门；要停止任务请用 `stop`。
+- `SupervisorService.stop` 在同一事务里追加 `ApprovalService.revoke_pending(ticket_id)`
+  （`ApprovalService` 无状态，可就地构造），避免停止后首屏仍挂着可批准的旧草稿；
+  M4 的 own 订阅保留语义不变。已 `REVOKED` 的行再批准会命中既有终态错误，CLI 按
+  退出码 1 拒绝。
+
+**失败 effect 的 retry**
+
+- 首屏上的 `retry` 只对失败 effect 出现，且不是新建 effect：新增
+  `SupervisorService.retry_effect(effect_id, *, actor)`，仅在行处于 `FAILED` 时把该行
+  改回 `PENDING`、`attempts=0`、`due_at=now`，原幂等键与 payload 不变。外部副作用
+  因此是 at-least-once（GitHub 评论可能重复一次）；指南与 `--confirm` 提示必须写明，
+  非 `FAILED` 一律拒绝。`retry <id>` 先按 effect id 查、再按 Ticket id 查：命中前者走
+  `retry_effect`，命中后者走 M4 的 `retry_ticket`（只接受 `FAILED` Ticket），两者
+  都不存在则退出码 1。
+
+**Runtime 接线**
+
+- `RuntimeConfig.notifications: NotificationConfig | None = None`；为 `None` 时行为与
+  M4 完全一致，`build_runtime` 仅在配置存在时注入 drafter。
+- `step()` 顺序保持心跳 → poll → 暂停检查 → 路由 → tick → 外部派发；未暂停时在 tick
+  与外部派发之间执行 `draft_due()`，`RuntimeStep` 末尾新增 `drafted: int = 0`，只计
+  本轮**新建**的审批行（去重命中不计）。
+- 为支持跨进程 CLI `resume`，Runtime 记录上一轮暂停位；检测到 `paused → unpaused`
+  时先补路由暂停期间落库的 Trigger，再继续本轮。暂停时不草拟通知。
+
+**CLI 与配置**
+
+- 入口 `python -m stableagent.supervisor.cli`，全局参数 `--db`、`--config`、
+  `--operator`。配置为 JSON，字段 `repository`、`operators`、`actions`、
+  `policy_version`（可选）、`notifications`（可选，形状同 `NotificationConfig`）；
+  pydantic `extra="forbid"`，不含任何凭据。`approve` 重算 digest 时使用这份
+  `notifications`，必须与 Runtime 的 `NotificationConfig` 一致；不一致会得到不同
+  digest，命令按退出码 3 拒绝而不写库。
+- 只读命令：`status`、`ticket <id>`、`thread <key>`。
+- 写命令：`approve`、`deny`、`stop`、`retry`、`reevaluate`、`pause`、`resume`；
+  每条都必须带与目标完全一致的 `--confirm <目标 ID>`（全局命令为
+  `--confirm pause|resume`），否则退出码 2 且不写库。
+- 退出码：0 成功；1 未知对象/状态不允许；2 确认缺失或不匹配；3 草稿已变化；
+  4 非 operator。除 `pause`/`resume` 直接写 `SupervisorStore.set_runtime_paused`
+  外，所有写命令复用 `SupervisorService` / `OrchestrationService` /
+  `ApprovalService`；`pause`/`resume` 不经过这三者是因为运行控制位本身不是业务写，
+  M4 已将其定义为 Store 层单行状态。operator 校验与 `RuntimeController` 使用同一函数。
+
+**测试与验收**
+
+- 单元：首屏顺序与链接、可行动作映射、四类模板与限长、脱敏、草拟去重/拒绝静默/
+  `since_ms`、批准事务与 digest 不符拒绝、`retry_effect` 只接受 `FAILED`、stop 撤销
+  pending、operator 与 `--confirm`、CLI 退出码。
+- 集成：accept → 草拟 → approve → runtime 派发恰好一次（跨重启）；deny 后静默；
+  READY/WAITING/FAILED 各最多一条；暂停期间不草拟，resume 补路由；stop 后旧草稿
+  不可批准。
+- 心脏覆盖率闸门由 33 扩到 35（新增 `notifications.py`、`console.py`）；三解释器、
+  全量门禁、L1 与 `orchestration/service.py` 零 diff 沿用既有口径。
 
 ### WP-6.6：Beta 演练、数据收集与发布门禁
 
