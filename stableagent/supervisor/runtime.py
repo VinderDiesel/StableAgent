@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
 
+from stableagent.control.approval import ApprovalService
 from stableagent.control.audit import AuditWriter
 from stableagent.control.policy import StaticPolicy
 from stableagent.orchestration.executor import WorkerExecutor
@@ -29,6 +30,7 @@ from stableagent.orchestration.scheduler import Scheduler
 from stableagent.orchestration.service import OrchestrationService, RecoverySummary
 from stableagent.supervisor.assessor import ObserveOnlyAssessor
 from stableagent.supervisor.model import Decision, RuntimeControl, SourceCursor
+from stableagent.supervisor.notifications import NotificationConfig, NotificationDrafter
 from stableagent.supervisor.router import (
     RouterConfig,
     RouterPermissionError,
@@ -57,6 +59,7 @@ class RuntimeConfig(BaseModel):
     lock_ttl_ms: int = 30_000
     stop_grace_ms: int = 5_000
     step_interval_ms: int = 1_000
+    notifications: NotificationConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,7 @@ class RuntimeStep:
     external: int
     running: int
     source_error: str | None = None
+    drafted: int = 0
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,27 @@ class RuntimeStatus(BaseModel):
     pending_approvals: int
 
 
+def read_runtime_status(store: SupervisorStore, clock: Clock) -> RuntimeStatus:
+    now = clock.now_ms()
+    lock = store.get_runtime_lock()
+    control = store.get_runtime_control()
+    started = lock is not None and lock.expires_at > now
+    return RuntimeStatus(
+        started=started,
+        paused=control.paused,
+        owner=lock.owner if started and lock is not None else None,
+        paused_at=control.changed_at if control.paused else None,
+        paused_by=control.actor if control.paused else None,
+        reason=control.reason if control.paused else None,
+        source_health=tuple(store.list_source_cursors()),
+        queued_tickets=store.count_tickets(status=TicketStatus.QUEUED),
+        running_assignments=store.count_assignments(status=AssignmentStatus.RUNNING),
+        due_effects=store.count_due_effects(now),
+        failed_effects=len(store.list_failed_effects()),
+        pending_approvals=len(store.list_pending_approvals()),
+    )
+
+
 @dataclass(frozen=True)
 class RuntimeBundle:
     runtime: Runtime
@@ -125,6 +150,7 @@ class Runtime:
         effects: EffectDispatcher,
         config: RuntimeConfig,
         clock: Clock,
+        drafter: NotificationDrafter | None = None,
     ) -> None:
         self._store = store
         self._source = source
@@ -134,8 +160,10 @@ class Runtime:
         self._effects = effects
         self._config = config
         self._clock = clock
+        self._drafter = drafter
         self._started = False
         self._stop_requested = False
+        self._was_paused = False
 
     @property
     def config(self) -> RuntimeConfig:
@@ -153,6 +181,7 @@ class Runtime:
         recovery = self._orchestration.recover()
         control = self._store.get_runtime_control()
         routed = 0 if control.paused else self._route_pending()
+        self._was_paused = control.paused
         self._started = True
         return RuntimeStart(recovery=recovery, routed=routed, paused=control.paused)
 
@@ -169,6 +198,7 @@ class Runtime:
             source_error = error.code
         control = self._store.get_runtime_control()
         if control.paused:
+            self._was_paused = True
             return RuntimeStep(
                 paused=True,
                 received=len(batch.events),
@@ -179,9 +209,14 @@ class Runtime:
                 external=0,
                 running=len(self._scheduler.running_assignments()),
                 source_error=source_error,
+                drafted=0,
             )
         self._renew_lock()
-        routed = duplicates = 0
+        routed = 0
+        if self._was_paused:
+            routed += self._route_pending()
+            self._was_paused = False
+        duplicates = 0
         for event in batch.events:
             reception = self._router.receive(event.trigger)
             if reception.duplicate:
@@ -189,6 +224,9 @@ class Runtime:
             else:
                 routed += 1
         tick = await self._scheduler.tick()
+        drafted = 0
+        if self._drafter is not None:
+            drafted = self._drafter.draft_due()
         external = await self._effects.dispatch_due()
         return RuntimeStep(
             paused=False,
@@ -200,27 +238,11 @@ class Runtime:
             external=external,
             running=tick.running,
             source_error=source_error,
+            drafted=drafted,
         )
 
     def status(self) -> RuntimeStatus:
-        now = self._clock.now_ms()
-        lock = self._store.get_runtime_lock()
-        control = self._store.get_runtime_control()
-        started = lock is not None and lock.expires_at > now
-        return RuntimeStatus(
-            started=started,
-            paused=control.paused,
-            owner=lock.owner if started and lock is not None else None,
-            paused_at=control.changed_at if control.paused else None,
-            paused_by=control.actor if control.paused else None,
-            reason=control.reason if control.paused else None,
-            source_health=tuple(self._store.list_source_cursors()),
-            queued_tickets=self._store.count_tickets(status=TicketStatus.QUEUED),
-            running_assignments=self._store.count_assignments(status=AssignmentStatus.RUNNING),
-            due_effects=self._store.count_due_effects(now),
-            failed_effects=len(self._store.list_failed_effects()),
-            pending_approvals=len(self._store.list_pending_approvals()),
-        )
+        return read_runtime_status(self._store, self._clock)
 
     def pause(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
         return self._store.set_runtime_paused(
@@ -234,6 +256,7 @@ class Runtime:
         if self._started:
             self._renew_lock()
             self._route_pending()
+        self._was_paused = False
         return control
 
     async def serve(self, *, max_steps: int | None = None) -> int:
@@ -299,7 +322,10 @@ def build_runtime(
         ids=ids,
         audit=audit,
     )
-    service = SupervisorService(store, policy, router, clock=clock, ids=ids, audit=audit)
+    approvals = ApprovalService(store, clock=clock, ids=ids)
+    service = SupervisorService(
+        store, policy, router, clock=clock, ids=ids, audit=audit, approvals=approvals
+    )
     orchestration = OrchestrationService(store, clock=clock, ids=ids)
     scheduler = Scheduler(
         store=store,
@@ -309,6 +335,15 @@ def build_runtime(
         max_concurrency=scheduler_max_concurrency,
     )
     effects = EffectDispatcher(store, effect_handlers, clock=clock)
+    drafter = None
+    if config.notifications is not None:
+        drafter = NotificationDrafter(
+            store,
+            approvals,
+            config.notifications,
+            repository=config.router.repository,
+            clock=clock,
+        )
     runtime = Runtime(
         store=store,
         source=source,
@@ -318,6 +353,7 @@ def build_runtime(
         effects=effects,
         config=config,
         clock=clock,
+        drafter=drafter,
     )
     controller = RuntimeController(runtime, service, orchestration)
     return RuntimeBundle(

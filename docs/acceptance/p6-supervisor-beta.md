@@ -10625,9 +10625,7 @@ from stableagent.supervisor.notifications import NotificationConfig
         StaticPolicyConfig(
             repository="o/r",
             actors=frozenset({"alice"}),
-            grantable_actions=frozenset(
-                {Action.READ_REPOSITORY, Action.COMMENT_ISSUE}
-            ),
+            grantable_actions=frozenset({Action.READ_REPOSITORY, Action.COMMENT_ISSUE}),
             default_validity_ms=60_000,
         ),
         clock=clock,

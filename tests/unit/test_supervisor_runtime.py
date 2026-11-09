@@ -17,6 +17,7 @@ from stableagent.supervisor.model import (
     Trigger,
     TriggerKind,
 )
+from stableagent.supervisor.notifications import NotificationConfig
 from stableagent.supervisor.router import (
     RouterConfig,
     RouterPermissionError,
@@ -118,7 +119,7 @@ async def env(tmp_path: Path):
         StaticPolicyConfig(
             repository="o/r",
             actors=frozenset({"alice"}),
-            grantable_actions=frozenset({Action.READ_REPOSITORY}),
+            grantable_actions=frozenset({Action.READ_REPOSITORY, Action.COMMENT_ISSUE}),
             default_validity_ms=60_000,
         ),
         clock=clock,
@@ -136,12 +137,13 @@ async def env(tmp_path: Path):
             router=RouterConfig(
                 repository="o/r",
                 operators=frozenset({"alice"}),
-                actions=("read_repository",),
+                actions=("read_repository", "comment_issue"),
             ),
             owner="test-runtime",
             lock_ttl_ms=1_000,
             stop_grace_ms=10,
             step_interval_ms=0,
+            notifications=NotificationConfig(enabled=True, max_chars=400, since_ms=0),
         ),
         clock=clock,
         ids=ids,
@@ -365,3 +367,53 @@ async def test_reevaluate_appends_an_attempt_without_new_triggers(env) -> None:
 
     assert decision.attempt == 2
     assert len(store.list_triggers()) == before
+
+
+async def test_step_drafts_one_notification_approval(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+
+    step = await bundle.runtime.step()
+
+    assert step.drafted == 1
+    pending = store.list_pending_approvals()
+    assert [(row["ticket_id"], row["reason"]) for row in pending] == [
+        (store.list_tickets()[0].id, "notification:accepted")
+    ]
+
+
+async def test_paused_step_does_not_draft(env) -> None:
+    bundle, store, clock, source, _ = env
+    store.set_runtime_paused(True, actor="alice", now=clock.now_ms(), reason="maint")
+    bundle.runtime.start()
+    source.feed(_event())
+
+    step = await bundle.runtime.step()
+
+    assert step.paused is True and step.drafted == 0
+    assert store.list_pending_approvals() == []
+
+
+async def test_external_resume_routes_pending_then_drafts(env) -> None:
+    bundle, store, clock, source, _ = env
+    store.set_runtime_paused(True, actor="alice", now=clock.now_ms(), reason="maint")
+    bundle.runtime.start()
+    source.feed(_event())
+    assert (await bundle.runtime.step()).drafted == 0
+    store.set_runtime_paused(False, actor="alice", now=clock.now_ms())
+
+    step = await bundle.runtime.step()
+
+    assert (step.paused, step.routed, step.drafted) == (False, 1, 1)
+    assert len(store.list_tickets()) == 1
+
+
+async def test_drafted_counts_only_new_approvals(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    assert (await bundle.runtime.step()).drafted == 1
+
+    assert (await bundle.runtime.step()).drafted == 0
+    assert len(store.list_pending_approvals()) == 1
