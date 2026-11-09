@@ -27,6 +27,7 @@ from stableagent.supervisor.router import (
     RequestSignal,
     RouterConfig,
     RouterModeError,
+    RouterNotFoundError,
     RouterService,
     ensure_subscription,
 )
@@ -494,3 +495,70 @@ def test_context_subscription_never_expands_the_mandate(store, policy, clock, id
     assert mandate_after.actions == mandate_before.actions
     assert len(store.list_tickets()) == 1
     assert len(store.list_inputs(ticket.id)) == 2
+
+
+class FlakyAssessor:
+    """第一次失败、之后委托给 ObserveOnlyAssessor；用于 unavailable → reevaluate。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def assess(self, context):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("assessor down")
+        return ObserveOnlyAssessor().assess(context)
+
+
+def _flaky_router(store, policy, clock, ids) -> RouterService:
+    return RouterService(
+        store,
+        policy,
+        FlakyAssessor(),
+        RouterConfig(
+            repository="o/r",
+            operators=frozenset({"alice"}),
+            actions=("read_repository", "run_command"),
+            allowed_commands=("pytest",),
+        ),
+        clock=clock,
+        ids=ids,
+    )
+
+
+def test_assessor_failure_records_unavailable(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    reception = _flaky_router(store, policy, clock, ids).receive(_trigger())
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.UNAVAILABLE
+    assert decision.strength is DecisionStrength.INFERRED
+    assert decision.reason_codes == ["assessor_error"]
+
+
+def test_reevaluate_retries_unavailable_without_refanout(store, policy, clock, ids) -> None:
+    router = _flaky_router(store, policy, clock, ids)
+    ticket = _accept(router, store)
+    trigger = _trigger(
+        external_id="github:o/r:issue_comment:9",
+        kind=TriggerKind.ISSUE_COMMENT,
+    )
+    first = router.receive(trigger)
+    assert store.get_decision(first.decision_ids[0]).outcome is DecisionOutcome.UNAVAILABLE
+    inputs_before = len(store.list_inputs(ticket.id))
+    retried = router.reevaluate(trigger.id)
+    assert retried.duplicate is False
+    assert retried.input_ids == []
+    decision = store.get_decision(retried.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.OBSERVE
+    assert decision.attempt == 2
+    assert "reevaluated" in decision.reason_codes
+    assert len(store.list_inputs(ticket.id)) == inputs_before
+    assert len(store.list_decisions(trigger_id=trigger.id)) == 2
+
+
+def test_reevaluate_of_a_missing_trigger_raises(store, policy, clock, ids) -> None:
+    router = _router(store, policy, clock, ids)
+    with pytest.raises(RouterNotFoundError):
+        router.reevaluate("tg-missing")

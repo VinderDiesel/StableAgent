@@ -226,7 +226,26 @@ class RouterService:
         admission = self._admit(trigger, signal)
         with self._store.transaction():
             return self._route(
-                trigger, signal=signal, signal_error=signal_error, admission=admission
+                trigger,
+                signal=signal,
+                signal_error=signal_error,
+                admission=admission,
+                reevaluate=False,
+            )
+
+    def reevaluate(self, trigger_id: str) -> Reception:
+        trigger = self._store.get_trigger(trigger_id)
+        if trigger is None:
+            raise RouterNotFoundError(f"trigger 不存在：{trigger_id}")
+        signal, signal_error = self._read_signal(trigger)
+        admission = self._admit(trigger, signal)
+        with self._store.transaction():
+            return self._route(
+                trigger,
+                signal=signal,
+                signal_error=signal_error,
+                admission=admission,
+                reevaluate=True,
             )
 
     # ------------------------------------------------------------------ 路由
@@ -237,12 +256,14 @@ class RouterService:
         signal: RequestSignal | None,
         signal_error: str | None,
         admission: Admission | None,
+        reevaluate: bool = False,
     ) -> Reception:
-        if self._already_decided(trigger.id):
-            return Reception(trigger_id=trigger.id, duplicate=True)
-        self._store.insert_trigger(trigger)
+        if not reevaluate:
+            if self._already_decided(trigger.id):
+                return Reception(trigger_id=trigger.id, duplicate=True)
+            self._store.insert_trigger(trigger)
         now = self._clock.now_ms()
-        input_ids = self._fanout(trigger, now, signal)
+        input_ids = [] if reevaluate else self._fanout(trigger, now, signal)
         threads = [
             thread
             for key in trigger.thread_keys
@@ -260,7 +281,7 @@ class RouterService:
             return self._reception(trigger, decision, input_ids=input_ids)
         if admission is not None and signal is not None:
             return self._route_explicit(trigger, signal, admission, primary, now, input_ids)
-        return self._route_inferred(trigger, threads, now, input_ids)
+        return self._route_inferred(trigger, threads, now, input_ids, reevaluate=reevaluate)
 
     def _route_explicit(
         self,
@@ -334,14 +355,37 @@ class RouterService:
         return self._reception(trigger, decision, ticket_id=ticket.id, input_ids=input_ids)
 
     def _route_inferred(
-        self, trigger: Trigger, threads: list[Thread], now: int, input_ids: list[str]
+        self,
+        trigger: Trigger,
+        threads: list[Thread],
+        now: int,
+        input_ids: list[str],
+        *,
+        reevaluate: bool = False,
     ) -> Reception:
         if self._config.mode is AutonomyMode.OFF:
             decision = self._ignore(trigger, now, "autonomy_off", DecisionStrength.INFERRED)
             return self._reception(trigger, decision, input_ids=input_ids)
         context = self._assessment_context(trigger, threads)
-        assessment = self._assessor.assess(context)
-        decision = self._observe(trigger, now, assessment.reason_codes, digest=trigger.digest)
+        try:
+            assessment = self._assessor.assess(context)
+        except Exception:
+            decision = record_decision(
+                self._store,
+                ids=self._ids,
+                created_at=now,
+                trigger_ids=[trigger.id],
+                outcome=DecisionOutcome.UNAVAILABLE,
+                strength=DecisionStrength.INFERRED,
+                reason_codes=["assessor_error"],
+                policy_version=self._policy.policy_version,
+                request_digest=trigger.digest,
+            )
+            return self._reception(trigger, decision, input_ids=input_ids)
+        reasons = list(assessment.reason_codes)
+        if reevaluate:
+            reasons.append("reevaluated")
+        decision = self._observe(trigger, now, reasons, digest=trigger.digest)
         return self._reception(trigger, decision, input_ids=input_ids)
 
     def _accept(
