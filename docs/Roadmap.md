@@ -321,15 +321,18 @@ Channel ← Durable Outbox ← Report / Result ←──────────
 - 仅在需要决策、审批、失败或结果可用时通知人。
 - 在 `observe` 模式下完成足够的真实数据评估，再决定哪些规则可切换 `auto`。
 
-**当前进度（2026-11-09）**：M1 基础层（8/8）与 M2 GitHub Source（8/8）完成——M1 落地
-ADR-06、`supervisor/` 领域模型、`SupervisorStore`（P5 库无损扩展、同连接同事务）与六个
-只读监管视图；M2 接入只读 polling：Issue/PR/评论/评审/CI status 标准化为
-Trigger/Thread/Channel，cursor 分页可续、双重去重、错误四分类落 `source_health`，写入
-仍在单个 `BEGIN IMMEDIATE` 事务内；CI 心脏覆盖率闸门 25→28→29。本地门禁
-`749 passed, 6 skipped`（覆盖 98.89%），Python 3.10 / 3.11 / 3.12 一致。逐项证据见
+**当前进度（2026-11-09）**：M1 基础层（8/8）、M2 GitHub Source（8/8）与 M3 Router Intake
+（8/8）完成——M1 落地 ADR-06、`supervisor/` 领域模型、`SupervisorStore`（P5 库无损扩展、
+同连接同事务）与六个只读监管视图；M2 接入只读 polling：Issue/PR/评论/评审/CI status 标准化为
+Trigger/Thread/Channel，cursor 分页可续、双重去重、错误四分类落 `source_health`；M3 把
+`receive(trigger)` 收敛为唯一入口：Trigger 去重、Subscription 扇出、explicit 五件原子写、
+六种 outcome、`unavailable` 重评估与运维命令层（attach/subscribe/unsubscribe/stop/
+handback/resume/record_pull_request）。CI 心脏覆盖率闸门 25→28→29→32。本地门禁
+`804 passed, 6 skipped`（覆盖 98.76%），Python 3.10 / 3.11 / 3.12 一致。逐项证据见
 [P6 验收账本](acceptance/p6-supervisor-beta.md)，部署口径见
-[GitHub Source 指南](guides/supervisor-github-source.md)。下一步：M3 Router Intake、
-Subscription 与 Decision（规格 WP-6.3）。
+[GitHub Source 指南](guides/supervisor-github-source.md) 与
+[Router 运维指南](guides/supervisor-router.md)。下一步：M4 常驻调度、恢复与运行控制
+（规格 WP-6.4）。
 
 ---
 

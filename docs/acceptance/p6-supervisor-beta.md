@@ -110,25 +110,40 @@ supervisor。
 
 ### M3：Router Intake、Subscription 与 Decision（规格 WP-6.3）
 
-> **状态：计划已展开（7 个 Task / 38 个 Step），待维护者确认后开工。** `receive(trigger)`
+> **状态：M3 收口（Task 1~7 全部完成）。** `receive(trigger)`
 > 是外部事件进入领域的唯一命令；`observe` 锁定、Channel 不授予权限、context 订阅不扩大
-> Mandate。任务级计划见 §9。
+> Mandate。任务级计划见 §9，出口读数见 §9 末尾。
 
-- [ ] **M3-1** `AutonomyMode`（`off`/`observe`/`auto`，`auto` 构造期拒绝）与
+- [x] **M3-1** `AutonomyMode`（`off`/`observe`/`auto`，`auto` 构造期拒绝）与
       `CandidateAssessor` 窄协议；`ObserveOnlyAssessor` 的确定性规则。
-      `tests/unit/test_supervisor_assessor.py`。
-- [ ] **M3-2** GitHubSource 为带正文事件补 `payload["request"]`（`text`/`mentioned`/`url`）；
+      `tests/unit/test_supervisor_assessor.py` 6 passed（六条规则各一例；`auto` 在
+      `RouterService.__init__` 抛 `RouterModeError`）；提交 `bbb7342`。
+- [x] **M3-2** GitHubSource 为带正文事件补 `payload["request"]`（`text`/`mentioned`/`url`）；
       `SupervisorStore` 增加 `next_decision_attempt` 与 `find_accepted_decision`。
-- [ ] **M3-3** `receive()`：Trigger 去重、Thread 解析、live Subscription 扇出（每 Ticket
+      `tests/unit/test_github_source.py` 新增 2 例（mention 大小写不敏感、CI 事件无 request
+      键）；`tests/unit/test_supervisor_store.py` 新增 2 例（按 digest 递增 attempt、跳过
+      OBSERVE 只认 ACCEPT）；提交 `6d98962`。
+- [x] **M3-3** `receive()`：Trigger 去重、Thread 解析、live Subscription 扇出（每 Ticket
       每事件一条 Input + deliver effect）、`off` 忽略与 `observe` 只记录。
-- [ ] **M3-4** explicit 准入：未准入 IGNORE；准入后 Mandate/Ticket/Input/Assignment/
+      `tests/unit/test_supervisor_router.py` 前 20 例（duplicate 不新增 Decision/Ticket、
+      扇出与 sequence 递增、`off` 不调评估器）；提交 `7fa4f79`。
+- [x] **M3-4** explicit 准入：未准入 IGNORE；准入后 Mandate/Ticket/Input/Assignment/
       launch effect/own Subscription 与 Decision 同事务；malformed 与 repository 不匹配稳定拒绝。
-- [ ] **M3-5** 归属语义：own Thread 后续消息 ATTACH、重复 `request_digest` ATTACH、
+      同文件覆盖五件原子写与两类稳定拒绝；提交 `7fa4f79`。
+- [x] **M3-5** 归属语义：own Thread 后续消息 ATTACH、重复 `request_digest` ATTACH、
       已 stop 的 STOP、已结束的 OBSERVE 且保留 Input、多个 owner 的 `ambiguous_owner`。
-- [ ] **M3-6** `unavailable` 与 `reevaluate`：评估器异常只记 `unavailable`；重评估不重复扇出。
-- [ ] **M3-7** 命令层：attach/subscribe/unsubscribe/stop（Task 5）与 handback/resume/
+      同文件覆盖五种归属分支（含终态订阅不扇出）；提交 `7fa4f79`。
+- [x] **M3-6** `unavailable` 与 `reevaluate`：评估器异常只记 `unavailable`；重评估不重复扇出。
+      `test_supervisor_router.py` 后 3 例（异常转 `unavailable`/`assessor_error`、
+      `reevaluate` 追加 attempt 且不新增 Trigger/Input、未知 trigger 抛
+      `RouterNotFoundError`）；提交 `9e2f1c3`。
+- [x] **M3-7** 命令层：attach/subscribe/unsubscribe/stop（Task 5）与 handback/resume/
       `record_pull_request`（Task 6）；全部检查 operator、Ticket 状态与 Mandate 复检。
-- [ ] **M3-8** CI FOCUS 29→32、`docs/guides/supervisor-router.md`、全量门禁与账本回填。
+      `tests/unit/test_supervisor_service.py` 22 passed（stop 保留 own 护栏、handback 降级
+      可开新 Ticket、resume 仅 COMPLETED/FAILED 且 `revalidate(when="launch")` + 审计、
+      PR 报告升 own）；提交 `d5093f9`、`d9aabc3`。
+- [x] **M3-8** CI FOCUS 29→32、`docs/guides/supervisor-router.md`、全量门禁与账本回填。
+      `tests/unit/test_ci_focus_gate.py` 1 passed（32 文件、无通配兜底）；出口读数见 §9。
 
 ### M4：常驻调度、恢复与运行控制（规格 WP-6.4；待 M3 收口后展开）
 
@@ -153,6 +168,8 @@ supervisor。
 ```bash
 .venv/bin/pytest -q tests/unit/test_supervisor_model.py tests/unit/test_supervisor_store.py
 .venv/bin/pytest -q tests/unit/test_supervisor_views.py tests/unit/test_ci_focus_gate.py
+.venv/bin/pytest -q tests/unit/test_supervisor_assessor.py tests/unit/test_supervisor_router.py \
+  tests/unit/test_supervisor_service.py
 .venv/bin/ruff check stableagent tests examples benchmarks
 .venv/bin/ruff format --check stableagent tests examples benchmarks
 .venv/bin/mypy
@@ -6617,6 +6634,25 @@ git commit -m "docs: close p6 m3 with router intake evidence"
 ```
 
 ---
+
+### M3 出口读数（2026-11-09，落盘 `/tmp/p6-m3-*.txt` 后读回）
+
+- 全量：`804 passed, 6 skipped, 0 failed`（19.54s，总覆盖 `98.76%`）。
+- 三解释器：`.venv`（3.10）/ `.matrix/py311`（3.11.16）/ `.matrix/py312`（3.12.14）
+  均为 `804 passed, 6 skipped`。
+- 新增三文件覆盖率：`supervisor/assessor.py` `31/31 = 100.00%`；
+  `supervisor/router.py` `267/274 = 97.45%`；`supervisor/service.py`
+  `167/172 = 97.09%`（均 ≥90%）。
+- 静态：`ruff check` `All checks passed!`；`ruff format --check`
+  `151 files already formatted`；`mypy` `Success: no issues found in 68 source files`。
+- 边界：`git diff 234f620..HEAD --stat -- stableagent/core/` 与
+  `... -- stableagent/orchestration/service.py` 均为 0 行；下层包真实 import
+  `stableagent.supervisor` 的 grep 命中 0 行；`git diff --check` 无输出。
+- 计划预期偏差（以实测为准）：Task 1 计划写 `7 passed`，实际 6 例；Task 2 计划写
+  `40 passed`，实际 51 例（含 M3 前存量）；Task 5 计划写 `8 passed`，实际 7 例；
+  Task 6 计划写 `15 passed` / 合计 `38 passed`，实际 Service 14 例、合计 37 例。
+  Task 7 为把 `service.py` 覆盖率从 86.63% 抬到闸门线，补了 8 例错误路径/审计用例，
+  最终 Service 22 例、三文件合计 51 例。
 
 ## 10. M3 自检记录（writing-plans）
 

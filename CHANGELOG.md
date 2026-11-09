@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### 实现（P6 M3 Router Intake，2026-11-09）
+- `stableagent/supervisor/model.py`：新增 `AutonomyMode`（`off`/`observe`/`auto`）；
+  `auto` 在 `RouterService` 构造期拒绝（P6 Beta 锁定 `observe`）
+- `stableagent/supervisor/assessor.py`：`CandidateAssessor` 窄协议与确定性
+  `ObserveOnlyAssessor`（ci_context_only / thread_not_open / existing_ticket_context /
+  already_owned / context_only / inferred_candidate），只评估不执行
+- `stableagent/supervisor/router.py`：`RouterService.receive` 成为外部事件唯一入口——
+  按既有 Decision 去重、live Subscription 扇出（每 Ticket 一条 Input + deliver effect）、
+  explicit 五件原子写（Mandate/Ticket/Input/Assignment/launch effect + own Subscription +
+  ACCEPT Decision）、六种 outcome（accept/observe/ignore/attach/stop/unavailable）；
+  `reevaluate` 追加递增 attempt 且不重复扇出；评估器异常只记 `unavailable`
+- `stableagent/supervisor/service.py`：运维命令层 attach/subscribe/unsubscribe/stop/
+  handback/resume/record_pull_request；全部校验 operator（大小写不敏感）；stop 保留 own
+  护栏；resume 仅 COMPLETED/FAILED，要求显式准入与 `revalidate(when="launch")` 并写审计；
+  PR 仅在 Worker 报告的 `pull_number` 上由 context 升 own
+- `stableagent/supervisor/source.py`：带正文事件补 `payload["request"]`（text/mentioned/
+  url），mention 大小写不敏感；`SupervisorStore` 新增 `next_decision_attempt` 与
+  `find_accepted_decision`
+- 新增 [Router 运维指南](docs/guides/supervisor-router.md)：唯一入口、去重顺序、三档自治、
+  outcome 表、命令权限、订阅生命周期与安全边界
+- CI 心脏覆盖率闸门 29→32（新增 assessor/router/service）；三文件覆盖率
+  `100.00%` / `97.45%` / `97.09%`；全量 `804 passed, 6 skipped`，3.10/3.11/3.12 一致
+
 ### 实现（P6 M2 GitHub Source，2026-11-09）
 - `stableagent/supervisor/source.py`：`Source` / `ChannelWriter` 协议、`SourceEvent` /
   `PollBatch` 记录与 `source.transient` / `auth` / `gone` / `schema` 四分类；`GitHubSource`

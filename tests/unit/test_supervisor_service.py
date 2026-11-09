@@ -23,6 +23,7 @@ from stableagent.supervisor.model import (
 )
 from stableagent.supervisor.router import (
     RouterConfig,
+    RouterNotFoundError,
     RouterPermissionError,
     RouterService,
     RouterStateError,
@@ -82,7 +83,21 @@ def store(tmp_path: Path, clock: FixedClock) -> SupervisorStore:
 
 
 @pytest.fixture
-def service(store: SupervisorStore, clock: FixedClock, ids: SequenceIds) -> SupervisorService:
+def make_service(store: SupervisorStore, clock: FixedClock, ids: SequenceIds):
+    def build(*, audit: Any = None) -> SupervisorService:
+        return _build_service(store, clock, ids, audit=audit)
+
+    return build
+
+
+@pytest.fixture
+def service(make_service) -> SupervisorService:
+    return make_service()
+
+
+def _build_service(
+    store: SupervisorStore, clock: FixedClock, ids: SequenceIds, *, audit: Any = None
+) -> SupervisorService:
     policy = StaticPolicy(
         StaticPolicyConfig(
             repository="o/r",
@@ -108,7 +123,7 @@ def service(store: SupervisorStore, clock: FixedClock, ids: SequenceIds) -> Supe
         clock=clock,
         ids=ids,
     )
-    return SupervisorService(store, policy, router, clock=clock, ids=ids)
+    return SupervisorService(store, policy, router, clock=clock, ids=ids, audit=audit)
 
 
 def _accept(service: SupervisorService, store: SupervisorStore):
@@ -200,19 +215,14 @@ def test_stop_on_completed_ticket_only_ends_context_subscriptions(service, store
 
 def test_handback_turns_own_into_context_and_allows_a_new_ticket(service, store) -> None:
     ticket = _accept(service, store)
-    follow = _trigger(
-        external_id="github:o/r:issue_comment:7", text="follow up"
-    )
+    follow = _trigger(external_id="github:o/r:issue_comment:7", text="follow up")
     store.insert_trigger(follow)
     decision = service.handback(
         ticket.id, thread_key="issue:o/r#1", trigger_id=follow.id, actor="alice"
     )
     assert decision.outcome is DecisionOutcome.OBSERVE
     assert decision.reason_codes == ["handback"]
-    live = {
-        item.mode
-        for item in store.list_subscriptions(ticket_id=ticket.id, live_only=True)
-    }
+    live = {item.mode for item in store.list_subscriptions(ticket_id=ticket.id, live_only=True)}
     assert live == {SubscriptionMode.CONTEXT}
     reception = service.receive(
         _trigger(
@@ -255,9 +265,7 @@ def test_resume_rejects_an_expired_mandate(service, store, clock) -> None:
         service.resume(ticket.id, trigger_id=trigger.id, actor="alice")
 
 
-def test_resume_requeues_with_a_new_assignment_and_reuses_the_pending_input(
-    service, store
-) -> None:
+def test_resume_requeues_with_a_new_assignment_and_reuses_the_pending_input(service, store) -> None:
     ticket = _accept(service, store)
     store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
     follow = _trigger(
@@ -293,9 +301,7 @@ def test_record_pull_request_adds_own_subscription_from_a_report(service, store,
             details={"pull_number": 9},
         )
     )
-    subscription = service.record_pull_request(
-        ticket.id, report_id="rp-1", actor="alice"
-    )
+    subscription = service.record_pull_request(ticket.id, report_id="rp-1", actor="alice")
     assert subscription.thread_key == "pr:o/r#9"
     assert subscription.mode is SubscriptionMode.OWN
     live = store.list_subscriptions(ticket_id=ticket.id, thread_key="pr:o/r#9", live_only=True)
@@ -319,3 +325,112 @@ def test_record_pull_request_rejects_a_report_without_a_number(service, store, c
     )
     with pytest.raises(RouterStateError, match="pull_number"):
         service.record_pull_request(ticket.id, report_id="rp-2", actor="alice")
+
+
+def test_record_pull_request_rejects_an_unknown_report(service, store) -> None:
+    ticket = _accept(service, store)
+    with pytest.raises(RouterNotFoundError, match="report"):
+        service.record_pull_request(ticket.id, report_id="rp-missing", actor="alice")
+
+
+def test_reevaluate_is_operator_only_and_records_a_new_decision(service, store) -> None:
+    _accept(service, store)
+    trigger = _trigger(external_id="github:o/r:issue_comment:20", text="again")
+    store.insert_trigger(trigger)
+    with pytest.raises(RouterPermissionError):
+        service.reevaluate(trigger.id, actor="mallory")
+    decision = service.reevaluate(trigger.id, actor="alice")
+    assert service.router.config.repository == "o/r"
+    assert decision.outcome is DecisionOutcome.ATTACH
+    assert len(store.list_decisions(trigger_id=trigger.id)) == 1
+
+
+def test_subscribe_rejects_a_trigger_without_a_thread(service, store) -> None:
+    ticket = _accept(service, store)
+    trigger = _trigger(external_id="github:o/r:issue_comment:21").model_copy(
+        update={"thread_keys": []}
+    )
+    store.insert_trigger(trigger)
+    with pytest.raises(RouterStateError, match="thread key"):
+        service.subscribe(ticket.id, trigger_id=trigger.id, actor="alice")
+
+
+def test_handback_requires_an_own_subscription(service, store) -> None:
+    ticket = _accept(service, store)
+    trigger = _trigger(external_id="github:o/r:issue_comment:22", text="hand back")
+    store.insert_trigger(trigger)
+    service.handback(ticket.id, thread_key="issue:o/r#1", trigger_id=trigger.id, actor="alice")
+    with pytest.raises(RouterStateError, match="own"):
+        service.handback(ticket.id, thread_key="issue:o/r#1", trigger_id=trigger.id, actor="alice")
+
+
+def test_commands_reject_unknown_identifiers(service, store) -> None:
+    ticket = _accept(service, store)
+    with pytest.raises(RouterNotFoundError, match="ticket"):
+        service.attach("tk-missing", thread_key="issue:o/r#1", actor="alice")
+    with pytest.raises(RouterNotFoundError, match="thread"):
+        service.attach(ticket.id, thread_key="issue:o/r#99", actor="alice")
+    with pytest.raises(RouterNotFoundError, match="trigger"):
+        service.subscribe(ticket.id, trigger_id="tg-missing", actor="alice")
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    with pytest.raises(RouterStateError, match="已结束"):
+        service.attach(ticket.id, thread_key="issue:o/r#1", actor="alice")
+
+
+def test_resume_inserts_a_task_input_and_restores_own_when_missing(service, store, clock) -> None:
+    ticket = _accept(service, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    for subscription in store.list_subscriptions(ticket_id=ticket.id, live_only=True):
+        store.end_subscription(subscription.id, ended_at=clock.now_ms())
+    trigger = _trigger(external_id="github:o/r:issue_comment:23", text="fresh resume text")
+    store.insert_trigger(trigger)
+    inputs_before = len(store.list_inputs(ticket.id))
+    resumed = service.resume(ticket.id, trigger_id=trigger.id, actor="alice")
+    assert resumed.status is TicketStatus.QUEUED
+    assert len(store.list_inputs(ticket.id)) == inputs_before + 1
+    own = [
+        item
+        for item in store.list_subscriptions(ticket_id=ticket.id, live_only=True)
+        if item.mode is SubscriptionMode.OWN
+    ]
+    assert [item.thread_key for item in own] == ["issue:o/r#1"]
+
+
+def test_stop_records_manual_stop_even_after_all_subscriptions_end(service, store, clock) -> None:
+    ticket = _accept(service, store)
+    for subscription in store.list_subscriptions(ticket_id=ticket.id, live_only=True):
+        store.end_subscription(subscription.id, ended_at=clock.now_ms())
+    stopped = service.stop(ticket.id, actor="alice")
+    assert stopped.status is TicketStatus.CANCELLED
+    decisions = store.list_decisions()
+    assert decisions[-1].outcome is DecisionOutcome.STOP
+    assert decisions[-1].reason_codes == ["manual_stop"]
+
+
+class _RecordingAudit:
+    def __init__(self) -> None:
+        self.admissions: list[tuple[Any, str | None]] = []
+        self.revalidations: list[tuple[Any, str, Any, str | None]] = []
+
+    def admitted(self, admission: Any, *, ticket_id: str | None = None) -> None:
+        self.admissions.append((admission, ticket_id))
+
+    def revalidated(
+        self, mandate: Any, when: str, decision: Any, *, ticket_id: str | None = None
+    ) -> None:
+        self.revalidations.append((mandate, when, decision, ticket_id))
+
+
+def test_resume_audits_admission_and_launch_revalidation(make_service, store) -> None:
+    service = make_service()
+    ticket = _accept(service, store)
+    store.update_ticket(ticket.model_copy(update={"status": TicketStatus.COMPLETED}))
+    trigger = _trigger(external_id="github:o/r:issue_comment:24", text="resume audited")
+    store.insert_trigger(trigger)
+    audit = _RecordingAudit()
+    audited = make_service(audit=audit)
+    audited.resume(ticket.id, trigger_id=trigger.id, actor="alice")
+    assert len(audit.admissions) == 1
+    assert audit.admissions[0][0].admitted is True
+    assert [item[1] for item in audit.revalidations] == ["launch"]
+    assert audit.revalidations[0][3] == ticket.id
