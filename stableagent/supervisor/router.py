@@ -92,6 +92,12 @@ class RouterConfig(BaseModel):
     requires_approval: bool = False
 
 
+def require_operator(operators: frozenset[str], actor: str) -> None:
+    allowed = {name.casefold() for name in operators}
+    if actor.casefold() not in allowed:
+        raise RouterPermissionError(f"actor 不是 operator：{actor}")
+
+
 class RequestSignal(BaseModel):
     """Source 标准化后的显式请求；text 只进 digest 与 Input，不参与判定（L4）。"""
 

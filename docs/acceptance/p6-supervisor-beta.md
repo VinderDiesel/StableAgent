@@ -11617,15 +11617,10 @@ def test_cli_main_covers_ticket_thread_retry_and_controls(tmp_path: Path, capsys
     assert main([*base, "resume", "--confirm", "resume"]) == 0
 
     missing = tmp_path / "missing.json"
-    assert (
-        main(["--db", str(db), "--config", str(missing), "--operator", "alice", "status"])
-        == 1
-    )
+    assert main(["--db", str(db), "--config", str(missing), "--operator", "alice", "status"]) == 1
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"repository": "o/r", "bogus": 1}), encoding="utf-8")
-    assert (
-        main(["--db", str(db), "--config", str(bad), "--operator", "alice", "status"]) == 1
-    )
+    assert main(["--db", str(db), "--config", str(bad), "--operator", "alice", "status"]) == 1
     bad_action = tmp_path / "bad-action.json"
     bad_action.write_text(
         json.dumps({"repository": "o/r", "operators": ["alice"], "actions": ["merge"]}),
@@ -11699,7 +11694,6 @@ from stableagent.control.audit import AuditWriter
 from stableagent.control.errors import ApprovalDecidedError, UnknownApprovalError
 from stableagent.control.model import Action, ApprovalRequest, ApprovalStatus
 from stableagent.control.policy import P5_POLICY_VERSION, StaticPolicy, StaticPolicyConfig
-from stableagent.orchestration.errors import UnknownTicketError
 from stableagent.orchestration.model import (
     Assignment,
     Clock,
@@ -11717,13 +11711,7 @@ from stableagent.supervisor.notifications import (
     NotificationDraft,
     notification_effect,
 )
-from stableagent.supervisor.router import (
-    RouterConfig,
-    RouterError,
-    RouterPermissionError,
-    RouterService,
-    require_operator,
-)
+from stableagent.supervisor.router import RouterConfig, RouterService, require_operator
 from stableagent.supervisor.runtime import RuntimeStatus, read_runtime_status
 from stableagent.supervisor.service import SupervisorService
 from stableagent.supervisor.store import SupervisorStore
@@ -11902,18 +11890,14 @@ class Console:
         self._confirm(confirm, trigger_id)
         return self._service.reevaluate(trigger_id, actor=actor)
 
-    def pause(
-        self, *, actor: str, confirm: str, reason: str | None = None
-    ) -> RuntimeControl:
+    def pause(self, *, actor: str, confirm: str, reason: str | None = None) -> RuntimeControl:
         self._require_operator(actor)
         self._confirm(confirm, "pause")
         return self._store.set_runtime_paused(
             True, actor=actor, now=self._clock.now_ms(), reason=reason
         )
 
-    def resume(
-        self, *, actor: str, confirm: str, reason: str | None = None
-    ) -> RuntimeControl:
+    def resume(self, *, actor: str, confirm: str, reason: str | None = None) -> RuntimeControl:
         self._require_operator(actor)
         self._confirm(confirm, "resume")
         return self._store.set_runtime_paused(
@@ -11945,8 +11929,7 @@ class Console:
 def render_status(view: StatusView) -> str:
     runtime = view.runtime
     lines = [
-        f"runtime started={runtime.started} paused={runtime.paused}"
-        f" owner={runtime.owner or '-'}",
+        f"runtime started={runtime.started} paused={runtime.paused} owner={runtime.owner or '-'}",
         "queue"
         f" queued_tickets={view.sections.queue.queued_tickets}"
         f" running_assignments={view.sections.queue.running_assignments}"
@@ -11991,9 +11974,7 @@ def render_ticket(detail: TicketDetail) -> str:
             f" mode={subscription.mode.value} ended_at={subscription.ended_at or '-'}"
         )
     for event in detail.timeline:
-        lines.append(
-            f"timeline {event.at} {event.kind} {event.object_id or '-'} {event.summary}"
-        )
+        lines.append(f"timeline {event.at} {event.kind} {event.object_id or '-'} {event.summary}")
     return "\n".join(lines)
 
 

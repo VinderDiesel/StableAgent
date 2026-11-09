@@ -33,9 +33,9 @@ from stableagent.supervisor.model import Decision, RuntimeControl, SourceCursor
 from stableagent.supervisor.notifications import NotificationConfig, NotificationDrafter
 from stableagent.supervisor.router import (
     RouterConfig,
-    RouterPermissionError,
     RouterService,
     RouterStateError,
+    require_operator,
 )
 from stableagent.supervisor.service import SupervisorService
 from stableagent.supervisor.source import PollBatch, Source, SourceError
@@ -407,6 +407,4 @@ class RuntimeController:
         return self._supervisor.reevaluate(trigger_id, actor=actor)
 
     def _require_operator(self, actor: str) -> None:
-        allowed = {name.casefold() for name in self._runtime.config.router.operators}
-        if actor.casefold() not in allowed:
-            raise RouterPermissionError(f"actor 不是 operator：{actor}")
+        require_operator(self._runtime.config.router.operators, actor)

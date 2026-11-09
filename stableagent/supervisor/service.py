@@ -47,6 +47,7 @@ from stableagent.supervisor.router import (
     ensure_subscription,
     latest_trigger,
     record_decision,
+    require_operator,
 )
 from stableagent.supervisor.source import pull_request_thread_key
 from stableagent.supervisor.store import SupervisorStore
@@ -401,9 +402,7 @@ class SupervisorService:
 
     # ------------------------------------------------------------- 内部
     def _require_operator(self, actor: str) -> None:
-        allowed = {name.casefold() for name in self._router.config.operators}
-        if actor.casefold() not in allowed:
-            raise RouterPermissionError(f"actor 不是 operator：{actor}")
+        require_operator(self._router.config.operators, actor)
 
     def _require_ticket(self, ticket_id: str) -> Ticket:
         ticket = self._store.get_ticket(ticket_id)
