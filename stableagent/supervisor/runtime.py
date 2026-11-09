@@ -16,21 +16,24 @@ from stableagent.control.audit import AuditWriter
 from stableagent.control.policy import StaticPolicy
 from stableagent.orchestration.executor import WorkerExecutor
 from stableagent.orchestration.model import (
+    Assignment,
     AssignmentStatus,
     Clock,
     EffectKind,
     IdFactory,
+    Ticket,
     TicketStatus,
 )
 from stableagent.orchestration.outbox import EffectDispatcher, EffectHandler
 from stableagent.orchestration.scheduler import Scheduler
 from stableagent.orchestration.service import OrchestrationService, RecoverySummary
 from stableagent.supervisor.assessor import ObserveOnlyAssessor
-from stableagent.supervisor.model import RuntimeControl, SourceCursor
+from stableagent.supervisor.model import Decision, RuntimeControl, SourceCursor
 from stableagent.supervisor.router import (
     RouterConfig,
     RouterPermissionError,
     RouterService,
+    RouterStateError,
 )
 from stableagent.supervisor.service import SupervisorService
 from stableagent.supervisor.source import PollBatch, Source, SourceError
@@ -351,6 +354,21 @@ class RuntimeController:
     def resume_processing(self, *, actor: str, reason: str | None = None) -> RuntimeControl:
         self._require_operator(actor)
         return self._runtime.resume(actor=actor, reason=reason)
+
+    def retry_ticket(self, ticket_id: str, *, actor: str) -> Assignment:
+        self._require_operator(actor)
+        ticket = self._orchestration.get_ticket(ticket_id).ticket
+        if ticket.status is not TicketStatus.FAILED:
+            raise RouterStateError(f"retry_ticket 只接受 FAILED：{ticket.status.value}")
+        return self._orchestration.retry_ticket(ticket_id)
+
+    def stop_ticket(self, ticket_id: str, *, actor: str, reason: str | None = None) -> Ticket:
+        self._require_operator(actor)
+        return self._supervisor.stop(ticket_id, actor=actor, reason=reason)
+
+    def reevaluate(self, trigger_id: str, *, actor: str) -> Decision:
+        self._require_operator(actor)
+        return self._supervisor.reevaluate(trigger_id, actor=actor)
 
     def _require_operator(self, actor: str) -> None:
         allowed = {name.casefold() for name in self._runtime.config.router.operators}

@@ -9,9 +9,19 @@ import pytest
 
 from stableagent.control.model import Action
 from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
-from stableagent.orchestration.model import EffectKind
-from stableagent.supervisor.model import Thread, ThreadKind, Trigger, TriggerKind
-from stableagent.supervisor.router import RouterConfig, RouterPermissionError
+from stableagent.orchestration.model import EffectKind, TicketAction, TicketStatus
+from stableagent.supervisor.model import (
+    DecisionOutcome,
+    Thread,
+    ThreadKind,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.router import (
+    RouterConfig,
+    RouterPermissionError,
+    RouterStateError,
+)
 from stableagent.supervisor.runtime import (
     RuntimeConfig,
     RuntimeLockError,
@@ -310,3 +320,48 @@ async def test_serve_runs_bounded_steps_then_stops(env) -> None:
     assert steps == 2
     assert len(executor.launched) == 1
     assert store.get_runtime_lock() is None
+
+
+async def test_retry_ticket_only_accepts_failed_and_is_operator_gated(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    ticket = store.list_tickets()[0]
+
+    with pytest.raises(RouterStateError):
+        bundle.controller.retry_ticket(ticket.id, actor="alice")
+    with pytest.raises(RouterPermissionError):
+        bundle.controller.retry_ticket(ticket.id, actor="mallory")
+
+    bundle.orchestration.transition_ticket(ticket.id, TicketAction.FAIL)
+    assignment = bundle.controller.retry_ticket(ticket.id, actor="alice")
+    assert assignment.attempt == 2
+    assert store.get_ticket(ticket.id).status is TicketStatus.QUEUED
+
+
+async def test_stop_ticket_cancels_and_records_a_stop_decision(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    ticket = store.list_tickets()[0]
+
+    stopped = bundle.controller.stop_ticket(ticket.id, actor="alice", reason="duplicate")
+
+    assert stopped.status is TicketStatus.CANCELLED
+    assert DecisionOutcome.STOP in [decision.outcome for decision in store.list_decisions()]
+
+
+async def test_reevaluate_appends_an_attempt_without_new_triggers(env) -> None:
+    bundle, store, _, source, _ = env
+    source.feed(_event())
+    bundle.runtime.start()
+    await bundle.runtime.step()
+    trigger = store.list_triggers()[0]
+    before = len(store.list_triggers())
+
+    decision = bundle.controller.reevaluate(trigger.id, actor="alice")
+
+    assert decision.attempt == 2
+    assert len(store.list_triggers()) == before
