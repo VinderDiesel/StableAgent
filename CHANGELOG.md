@@ -4,6 +4,31 @@
 
 ## [Unreleased]
 
+### 实现（P6 M5 Console，2026-11-09）
+- `stableagent/supervisor/views.py`：注意力排序固定为 approval 0 → failed_effect 1 →
+  waiting_ticket 2 → ready_ticket 3；`StatusSections` 汇总队列、source_health 与
+  AttentionItem；`TicketDetail` 带 mandate/assignment/subscription/effects/reports 与
+  时间线（`TimelineEvent.object_id`）
+- `stableagent/supervisor/notifications.py`：`NotificationKind`（accepted/result/
+  attention/failure）与固定模板；正文只取 Ticket 标题、对应 Report `summary` 和稳定
+  评论 URL，`max_chars` 截断补 `…`；`NotificationDrafter.draft_due` 只对
+  `origin_kind="github"` 且 mandate 含 `comment_issue` 的 Ticket 草拟，按 digest 去重，
+  拒绝后该 Ticket 永久静默
+- `stableagent/control/approval.py`、`stableagent/supervisor/service.py`：批准与 effect
+  入队同事务；stop 在同一事务撤销待批并取消 Assignment；`retry_effect` 把 FAILED 重置
+  为 PENDING 且沿用原 idempotency key（at-least-once）
+- `stableagent/supervisor/runtime.py`：每轮顺序为心跳 → poll → 暂停检查 → 路由 →
+  `Scheduler.tick` → 草拟 → 外部派发；暂停轮不草拟；外部恢复先补路由再草拟；
+  `read_runtime_status` 供只读视图复用
+- `stableagent/supervisor/console.py`、`stableagent/supervisor/cli.py`：stdlib argparse
+  控制台，`status`/`ticket`/`thread` 只读，写命令一律要求 `--confirm <target-id>`；
+  退出码 0 成功、1 未知或状态不符、2 确认缺失/不匹配、3 草稿已变、4 非 operator；
+  不读凭据、不发起网络
+- 新增 [监管控制台指南](docs/guides/supervisor-console.md)
+- CI 心脏覆盖率闸门 33→35（新增 `supervisor/notifications.py`、`supervisor/console.py`）；
+  全量 `874 passed, 6 skipped`，覆盖 98.53%，两个新文件均 96%，3.10/3.11/3.12 一致；
+  L1 与 `orchestration/service.py` 零 diff
+
 ### 实现（P6 M4 Runtime，2026-11-09）
 - `stableagent/supervisor/store.py`：schema v2 新增 `runtime_lock` 与 `runtime_control`
   单例行；锁获取/心跳/释放、暂停位与递增 generation、未路由 Trigger 查询与队列计数

@@ -39,12 +39,14 @@ FOCUS_FILES = [
     "supervisor/router.py",
     "supervisor/service.py",
     "supervisor/runtime.py",
+    "supervisor/notifications.py",
+    "supervisor/console.py",
 ]
 
 
-def test_focus_covers_the_thirty_three_cardiac_files() -> None:
+def test_focus_covers_the_thirty_five_cardiac_files() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert all(f'"{name}"' in text for name in FOCUS_FILES)
-    assert len(FOCUS_FILES) == 33
-    assert "33 文件" in text  # 步骤名与注释同步
+    assert len(FOCUS_FILES) == 35
+    assert "35 文件" in text  # 步骤名与注释同步
     assert text.count('".py"') == 0  # 不许用通配兜底

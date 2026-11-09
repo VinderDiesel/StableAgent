@@ -173,7 +173,38 @@ supervisor。
       全量门禁与账本回填。`tests/unit/test_ci_focus_gate.py` 1 passed（33 文件、无通配兜底）；
       出口读数见 §11。
 
-### M5：最小监管面与注意力协议（规格 WP-6.5；待 M4 收口后展开）
+### M5：最小监管面与注意力协议（规格 WP-6.5）
+
+> **状态：M5 收口（Task 1~8 全部完成）。** CLI-only 监管面：首屏按注意力排序，写命令
+> 必须 `--confirm`；生命周期通知先草拟成 `COMMENT_ISSUE` 审批，人工批准后在同一事务
+> 入队 effect，拒绝即静默。任务级计划见 §12，自检与出口读数见 §12 末尾。
+
+- [x] **M5-1** 首屏段落、注意力目标与稳定链接：`AttentionItem` 增 `target_id/needs/
+      why/actions/ticket_link/thread_link`，`QueueCounts` 与 `StatusSections` 汇总队列与
+      Source 健康。`tests/unit/test_supervisor_views.py` 10 passed（新增 4 例）；提交
+      `c402158`。
+- [x] **M5-2** Ticket 详情与时间线 `object_id`：`TicketDetail` 聚合 Assignment、订阅与
+      已批准摘要；`thread_timeline` / `ticket_timeline` 的事件带对象 id，不返回 payload。
+      同文件 13 passed（新增 3 例）；提交 `094a5d1`。
+- [x] **M5-3** 通知模板、限长与纯函数配置：四类固定模板、`max_chars` 截断与稳定 URL。
+      `tests/unit/test_supervisor_notifications.py` 5 passed；提交 `6819cd8`。
+- [x] **M5-4** 通知草拟器、digest 与审批去重：按 Ticket 状态草拟；mandate 必须含
+      `comment_issue`；同 digest 只开一条 pending；已拒绝即静默。同文件 11 passed
+      （新增 6 例）；提交 `c4c9934`。
+- [x] **M5-5** 批准与 effect 同事务、失败 effect 重试、stop 撤销：`ApprovalService.decide`
+      增加可选 `effect`，拒绝使运行中 Assignment 失败；`stop` 在同一事务撤销 pending。
+      `tests/unit/test_approval_service.py` 12 passed（新增 3 例）、
+      `tests/unit/test_supervisor_service.py` 24 passed（新增 2 例）；提交 `96c675b`。
+- [x] **M5-6** Runtime 草拟接线与暂停恢复补路由：每轮 tick 后、外部 effect 派发前草拟；
+      外部 resume 先补路由再草拟。`tests/unit/test_supervisor_runtime.py` 20 passed
+      （新增 4 例）、`tests/integration/test_superagent_notifications.py` 3 passed；
+      提交 `b3af2e2`。
+- [x] **M5-7** Console 命令面与 stdlib CLI：只读 `status/ticket/thread`，写命令统一
+      operator 门禁 + `--confirm`；退出码 0/1/2/3/4。`tests/unit/test_supervisor_console.py`
+      11 passed；`service + runtime` 回归 44 passed；提交 `b356a13`。
+- [x] **M5-8** CI FOCUS 33→35（`supervisor/notifications.py`、`supervisor/console.py`）、
+      `docs/guides/supervisor-console.md`、全量门禁与账本回填。
+      `tests/unit/test_ci_focus_gate.py` 1 passed（35 文件、无通配兜底）；出口读数见 §12。
 
 ### M6：Beta 演练与发布门禁（规格 WP-6.6；待 M5 收口后展开）
 
@@ -193,7 +224,9 @@ supervisor。
 
 ```bash
 .venv/bin/pytest -q tests/unit/test_supervisor_model.py tests/unit/test_supervisor_store.py
-.venv/bin/pytest -q tests/unit/test_supervisor_views.py tests/unit/test_ci_focus_gate.py
+.venv/bin/pytest -q tests/unit/test_supervisor_views.py \
+  tests/unit/test_supervisor_notifications.py tests/unit/test_supervisor_console.py \
+  tests/unit/test_ci_focus_gate.py
 .venv/bin/pytest -q tests/unit/test_supervisor_assessor.py tests/unit/test_supervisor_router.py \
   tests/unit/test_supervisor_service.py
 .venv/bin/pytest -q tests/unit/test_supervisor_runtime.py \
@@ -12462,4 +12495,20 @@ git commit -m "docs: close p6 m5 with console and attention evidence"
 
 ### M5 出口读数（2026-11-09，落盘 `/tmp/p6-m5-*.txt` 后读回）
 
-- 全量 / 三解释器 / 覆盖率 / 静态 / 边界四零 / 计划偏差：执行 Task 8 时按读回文件回填。
+- **全量：** `/tmp/p6-m5-full.txt` → `874 passed, 6 skipped in 20.34s`；总覆盖率
+  `98.53%`（门槛 70%）。
+- **三解释器：** 3.10 `874 passed, 6 skipped`；`/tmp/p6-m5-py311.txt` 与
+  `/tmp/p6-m5-py312.txt` 同为 `874 passed, 6 skipped`，总覆盖率均 `98.53%`。
+- **心脏覆盖率：** `supervisor/notifications.py` `96%`（109 行、4 行未覆盖）、
+  `supervisor/console.py` `96%`（163 行、6 行未覆盖），均 ≥90%；FOCUS 35 契约
+  `1 passed`。
+- **静态：** `/tmp/p6-m5-ruff.txt` → `All checks passed!`；
+  `/tmp/p6-m5-format.txt` → `160 files already formatted`；
+  `/tmp/p6-m5-mypy.txt` → `Success: no issues found in 72 source files`。
+- **边界四零：** `/tmp/p6-m5-l1.txt`、`/tmp/p6-m5-c1.txt`、`/tmp/p6-m5-reverse.txt`、
+  `/tmp/p6-m5-diffcheck.txt` 均为 0 字节——`stableagent/core/` 与
+  `orchestration/service.py` 对 `234f620` 零 diff，既有包无反向 import。
+- **CLI：** `/tmp/p6-m5-help.txt` 输出 `usage:` 且退出 0。
+- **计划偏差：** 8 个 Task / 44 个 Step 全部完成；仅有三处格式对齐（多行 `frozenset`、
+  `pause/resume` 签名与 CLI 断言折行）与两处未使用 import 清理，均不改变行为；
+  其余与计划一致。

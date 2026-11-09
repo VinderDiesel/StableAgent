@@ -9,7 +9,7 @@
 | P3 | [Context Engineering](p3-context-engineering.md) | Completed evidence | 追溯压缩/能力视图/预算治理、Evidence 位置决策、benchmark 与 CI 收口记录 |
 | P4 | [Ticket Orchestration](p4-ticket-orchestration.md) | Completed evidence（run 41596839282；DoD 60/60，里程碑 30/30） | 追溯 M1/M2/M3 里程碑步骤、心脏边界 L1~L8 与逐项验收证据 |
 | P5 | [Guarded Execution](p5-guarded-execution.md) | Completed evidence（run 42433929377；DoD 46/46，里程碑 40/40） | 跟踪 M1~M4 里程碑步骤、心脏边界 L1~L8 与逐项验收证据 |
-| P6 | [Supervisor Beta](p6-supervisor-beta.md) | Active（M4 完成 7/7；里程碑 4/6） | 跟踪 M1~M6 里程碑步骤、P6 出口不变量 I1~I6 与逐项验收证据 |
+| P6 | [Supervisor Beta](p6-supervisor-beta.md) | Active（M5 完成 8/8；里程碑 5/6） | 跟踪 M1~M6 里程碑步骤、P6 出口不变量 I1~I6 与逐项验收证据 |
 
 使用规则：
 
