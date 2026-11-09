@@ -7,9 +7,11 @@ receive / reevaluate 留在 RouterService；命令层只做 Ticket / Subscriptio
 from __future__ import annotations
 
 from stableagent.control.audit import AuditWriter
+from stableagent.control.model import ExplicitRequest
 from stableagent.control.policy import StaticPolicy
 from stableagent.orchestration.model import (
     TERMINAL_TICKET_STATUSES,
+    Assignment,
     AssignmentStatus,
     Clock,
     Effect,
@@ -17,6 +19,7 @@ from stableagent.orchestration.model import (
     IdFactory,
     Ticket,
     TicketAction,
+    TicketInput,
     TicketStatus,
     next_ticket_status,
 )
@@ -26,11 +29,15 @@ from stableagent.supervisor.model import (
     DecisionStrength,
     Subscription,
     SubscriptionMode,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
     Trigger,
     payload_digest,
 )
 from stableagent.supervisor.router import (
     Reception,
+    RequestSignal,
     RouterNotFoundError,
     RouterPermissionError,
     RouterService,
@@ -39,6 +46,7 @@ from stableagent.supervisor.router import (
     latest_trigger,
     record_decision,
 )
+from stableagent.supervisor.source import pull_request_thread_key
 from stableagent.supervisor.store import SupervisorStore
 
 _LIVE_ASSIGNMENT_STATUSES = (
@@ -174,6 +182,195 @@ class SupervisorService:
                 request_digest=payload_digest({"command": "stop", "ticket": ticket_id}),
             )
             return updated
+
+    def handback(
+        self,
+        ticket_id: str,
+        *,
+        thread_key: str,
+        trigger_id: str,
+        actor: str,
+    ) -> Decision:
+        """把 own 降为 context：之后的明确消息重新走 Router，可创建新 Ticket。"""
+        self._require_operator(actor)
+        trigger = self._require_trigger(trigger_id)
+        with self._store.transaction():
+            ticket = self._require_live_ticket(ticket_id)
+            self._require_thread(thread_key)
+            now = self._clock.now_ms()
+            own = [
+                subscription
+                for subscription in self._store.list_subscriptions(
+                    ticket_id=ticket.id, thread_key=thread_key, live_only=True
+                )
+                if subscription.mode is SubscriptionMode.OWN
+            ]
+            if not own:
+                raise RouterStateError("ticket 不 own 该 thread")
+            for subscription in own:
+                self._store.end_subscription(subscription.id, ended_at=now)
+            ensure_subscription(
+                self._store,
+                ids=self._ids,
+                ticket_id=ticket.id,
+                thread_key=thread_key,
+                mode=SubscriptionMode.CONTEXT,
+                created_at=now,
+            )
+            return record_decision(
+                self._store,
+                ids=self._ids,
+                created_at=now,
+                trigger_ids=[trigger.id],
+                outcome=DecisionOutcome.OBSERVE,
+                strength=DecisionStrength.INFERRED,
+                reason_codes=["handback"],
+                policy_version=self._policy.policy_version,
+                request_digest=trigger.digest,
+            )
+
+    def resume(self, ticket_id: str, *, trigger_id: str, actor: str) -> Ticket:
+        """已结束 Ticket 的唯一重开路径：operator + 显式请求 + Mandate 复检。"""
+        self._require_operator(actor)
+        trigger = self._require_trigger(trigger_id)
+        signal = RequestSignal.from_trigger(trigger)
+        if signal is None:
+            raise RouterStateError("resume 需要显式 request")
+        admission = self._policy.admit_explicit(
+            ExplicitRequest(
+                repository=self._router.config.repository,
+                requester=trigger.actor,
+                mentioned=signal.mentioned,
+                stable_id=signal.stable_id,
+                text=signal.text,
+            )
+        )
+        if self._audit is not None:
+            self._audit.admitted(admission)
+        if not admission.admitted:
+            raise RouterPermissionError(f"resume 未准入：{admission.reason_code}")
+        with self._store.transaction():
+            ticket = self._require_ticket(ticket_id)
+            if ticket.status is TicketStatus.CANCELLED:
+                raise RouterStateError("cancelled ticket 不可 resume")
+            if ticket.status not in (TicketStatus.COMPLETED, TicketStatus.FAILED):
+                raise RouterStateError(f"ticket 未结束：{ticket.status.value}")
+            mandate = self._store.get_mandate(ticket.mandate_id)
+            if mandate is None:
+                raise RouterStateError("mandate 不存在")
+            verdict = self._policy.revalidate(mandate, when="launch")
+            if self._audit is not None:
+                self._audit.revalidated(mandate, "launch", verdict, ticket_id=ticket.id)
+            if not verdict.allowed:
+                raise RouterStateError(f"revalidation_failed:{verdict.reason}")
+            now = self._clock.now_ms()
+            pending = [
+                item
+                for item in self._store.list_inputs(ticket.id)
+                if item.state == "pending" and item.payload == signal.text
+            ]
+            if not pending:
+                sequence = len(self._store.list_inputs(ticket.id)) + 1
+                self._store.insert_input(
+                    TicketInput(
+                        id=self._ids.new_id("in"),
+                        ticket_id=ticket.id,
+                        sequence=sequence,
+                        kind="task",
+                        payload=signal.text,
+                        created_at=now,
+                    )
+                )
+            updated = ticket.model_copy(
+                update={
+                    "status": TicketStatus.QUEUED,
+                    "queued_at": now,
+                    "ended_at": None,
+                    "woken_at": None,
+                }
+            )
+            self._store.update_ticket(updated)
+            attempt = len(self._store.list_assignments(ticket.id)) + 1
+            assignment = Assignment(id=self._ids.new_id("as"), ticket_id=ticket.id, attempt=attempt)
+            self._store.insert_assignment(assignment)
+            self._store.enqueue_effect(
+                Effect(
+                    id=self._ids.new_id("ef"),
+                    kind=EffectKind.LAUNCH_ASSIGNMENT,
+                    idempotency_key=f"launch:{assignment.id}:{attempt}",
+                    payload={"assignment_id": assignment.id, "ticket_id": ticket.id},
+                    due_at=now,
+                )
+            )
+            own = [
+                subscription
+                for subscription in self._store.list_subscriptions(
+                    ticket_id=ticket.id, live_only=True
+                )
+                if subscription.mode is SubscriptionMode.OWN
+            ]
+            if not own and trigger.thread_keys:
+                ensure_subscription(
+                    self._store,
+                    ids=self._ids,
+                    ticket_id=ticket.id,
+                    thread_key=trigger.thread_keys[0],
+                    mode=SubscriptionMode.OWN,
+                    created_at=now,
+                )
+            record_decision(
+                self._store,
+                ids=self._ids,
+                created_at=now,
+                trigger_ids=[trigger.id],
+                outcome=DecisionOutcome.ACCEPT,
+                strength=DecisionStrength.EXPLICIT,
+                reason_codes=["resumed"],
+                policy_version=self._policy.policy_version,
+                request_digest=admission.request_digest,
+                mandate_id=mandate.id,
+            )
+            return updated
+
+    def record_pull_request(self, ticket_id: str, *, report_id: str, actor: str) -> Subscription:
+        """Worker 报告里出现的 PR 才能升为 own；正文只取数字，不取授权（L4）。"""
+        self._require_operator(actor)
+        with self._store.transaction():
+            ticket = self._require_live_ticket(ticket_id)
+            report = next(
+                (item for item in self._store.list_reports(ticket.id) if item.id == report_id),
+                None,
+            )
+            if report is None:
+                raise RouterNotFoundError(f"report 不存在：{report_id}")
+            number = report.details.get("pull_number", report.details.get("pr_number"))
+            if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                raise RouterStateError("report 缺少 pull_number")
+            thread_key = pull_request_thread_key(self._router.config.repository, number)
+            self._store.upsert_thread(
+                Thread(
+                    key=thread_key,
+                    repository=self._router.config.repository,
+                    kind=ThreadKind.PULL_REQUEST,
+                    external_ref=f"#{number}",
+                    last_trigger_at=report.created_at,
+                    status=ThreadStatus.OPEN,
+                )
+            )
+            now = self._clock.now_ms()
+            for subscription in self._store.list_subscriptions(
+                ticket_id=ticket.id, thread_key=thread_key, live_only=True
+            ):
+                if subscription.mode is SubscriptionMode.CONTEXT:
+                    self._store.end_subscription(subscription.id, ended_at=now)
+            return ensure_subscription(
+                self._store,
+                ids=self._ids,
+                ticket_id=ticket.id,
+                thread_key=thread_key,
+                mode=SubscriptionMode.OWN,
+                created_at=now,
+            )
 
     # ------------------------------------------------------------- 内部
     def _require_operator(self, actor: str) -> None:
