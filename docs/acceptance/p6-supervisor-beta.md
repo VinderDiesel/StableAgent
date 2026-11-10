@@ -13775,3 +13775,31 @@ git commit -m "docs: backfill p6 m6 exit readings"
   跑完，再下一轮草拟通知；固定 rounds=4 收敛到 READY/FAILED/WAITING，避免并发时序
   断言脆弱。WAITING Ticket 的 Assignment 保持 RUNNING（Worker 驻留语义），但 asyncio
   task 已结束，`runtime.stop()` 的 `wait_idle` 不阻塞。
+
+### M6 出口读数（2026-11-10，落盘 `/tmp/p6-m6-*.txt` 后读回）
+
+- **全量：** `/tmp/p6-m6-full.txt` → `878 passed, 6 skipped in 21.00s`；总覆盖率
+  `98.54%`（门槛 70%）。
+- **三解释器：** 3.10 `878 passed, 6 skipped`；`/tmp/p6-m6-py311.txt` 与
+  `/tmp/p6-m6-py312.txt` 同为 `878 passed, 6 skipped`，总覆盖率均 `98.54%`。
+- **心脏覆盖率：** `supervisor/store.py` `100%`（184 行、0 行未覆盖）、
+  `supervisor/views.py` `95%`（178 行、9 行未覆盖），均 ≥90%；FOCUS 35 契约
+  `1 passed`（`/tmp/p6-m6-focus.txt`，无新增心脏文件）。
+- **静态：** `/tmp/p6-m6-ruff.txt` → `All checks passed!`；
+  `/tmp/p6-m6-format.txt` → `162 files already formatted`；
+  `/tmp/p6-m6-mypy.txt` → `Success: no issues found in 72 source files`。
+- **边界四零：** `/tmp/p6-m6-l1.txt`、`/tmp/p6-m6-c1.txt`、`/tmp/p6-m6-reverse.txt`、
+  `/tmp/p6-m6-diffcheck.txt` 均为 0 字节（收口提交 `be6b86b` 后对最终 HEAD 复核）——
+  `stableagent/core/` 与 `orchestration/service.py` 对 `234f620` 零 diff，既有包无
+  反向 import。
+- **示例两 phase：** `/tmp/p6-m6-run.txt` 末行 `BETA_RESULT tickets=3 resumed=1
+  external_comments=1 duplicate_tickets=0 bot_triggers=0`；`/tmp/p6-m6-report.txt`
+  末行 `BETA_REPORT {...}`，`tickets={"failed":1,"ready":1,"waiting":1}`、
+  `would_accept=1`、`recovered_assignments=1`、`retried_effects=0`、
+  `effects["github_comment:succeeded"]=1`、`approvals["comment_issue:approved"]=1`、
+  `notification_counts` 三 Ticket 各 2（合计 6）。
+- **计划偏差：** 6 个 Task / 27 个 Step 全部完成。门禁提前到 Task 5 提交前运行，
+  以便 CHANGELOG/docs/README 用实测读数回填（代码树与最终 HEAD 一致，仅文档差异）；
+  §4 计数在计划提交时由误写的 24 校正为 27；Roadmap 下一步措辞对齐 P7 实际标题
+  "生产化与生态扩展"；另有 `recovered_assignments` 单行折行与两处文件末尾换行的
+  格式修正，均不改变行为。其余与计划一致。
