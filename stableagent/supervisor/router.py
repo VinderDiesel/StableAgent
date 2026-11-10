@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from stableagent.control.audit import AuditWriter
 from stableagent.control.model import Admission, ExplicitRequest
 from stableagent.control.policy import StaticPolicy
+from stableagent.observability.emitter import DomainEventEmitter
+from stableagent.observability.events import DomainEventKind
 from stableagent.orchestration.model import (
     TERMINAL_TICKET_STATUSES,
     Assignment,
@@ -212,6 +214,7 @@ class RouterService:
         clock: Clock,
         ids: IdFactory,
         audit: AuditWriter | None = None,
+        emitter: DomainEventEmitter | None = None,
     ) -> None:
         if config.mode not in _ALLOWED_MODES:
             raise RouterModeError(f"{config.mode.value} 未启用：P6 Beta 锁定 observe")
@@ -222,6 +225,7 @@ class RouterService:
         self._clock = clock
         self._ids = ids
         self._audit = audit
+        self._emitter = emitter
 
     @property
     def config(self) -> RouterConfig:
@@ -231,13 +235,15 @@ class RouterService:
         signal, signal_error = self._read_signal(trigger)
         admission = self._admit(trigger, signal)
         with self._store.transaction():
-            return self._route(
+            reception = self._route(
                 trigger,
                 signal=signal,
                 signal_error=signal_error,
                 admission=admission,
                 reevaluate=False,
             )
+        self._emit_reception(reception)
+        return reception
 
     def reevaluate(self, trigger_id: str) -> Reception:
         trigger = self._store.get_trigger(trigger_id)
@@ -246,12 +252,37 @@ class RouterService:
         signal, signal_error = self._read_signal(trigger)
         admission = self._admit(trigger, signal)
         with self._store.transaction():
-            return self._route(
+            reception = self._route(
                 trigger,
                 signal=signal,
                 signal_error=signal_error,
                 admission=admission,
                 reevaluate=True,
+            )
+        self._emit_reception(reception)
+        return reception
+
+    def _emit_reception(self, reception: Reception) -> None:
+        if self._emitter is None:
+            return
+        outcome = "duplicate" if reception.duplicate else "ok"
+        self._emitter.emit_safe(
+            DomainEventKind.TRIGGER_RECEIVED,
+            outcome=outcome,
+            trigger_id=reception.trigger_id,
+            ticket_id=reception.ticket_id,
+            attrs={
+                "decision_count": len(reception.decision_ids),
+                "fanned_out": reception.fanned_out,
+            },
+        )
+        for decision_id in reception.decision_ids:
+            self._emitter.emit_safe(
+                DomainEventKind.DECISION_RECORDED,
+                outcome=outcome,
+                trigger_id=reception.trigger_id,
+                ticket_id=reception.ticket_id,
+                decision_id=decision_id,
             )
 
     # ------------------------------------------------------------------ 路由

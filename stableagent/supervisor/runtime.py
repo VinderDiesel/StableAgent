@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from stableagent.control.approval import ApprovalService
 from stableagent.control.audit import AuditWriter
 from stableagent.control.policy import StaticPolicy
+from stableagent.observability.emitter import DomainEventEmitter
 from stableagent.orchestration.executor import WorkerExecutor
 from stableagent.orchestration.model import (
     Assignment,
@@ -311,8 +312,10 @@ def build_runtime(
     ids: IdFactory,
     scheduler_max_concurrency: int = 1,
     audit: AuditWriter | None = None,
+    emitter: DomainEventEmitter | None = None,
 ) -> RuntimeBundle:
     """组成根：只注入依赖；observe 评估器与 P4 服务在此装配。"""
+    obs = emitter if emitter is not None else DomainEventEmitter(store, clock=clock, ids=ids)
     router = RouterService(
         store,
         policy,
@@ -321,6 +324,7 @@ def build_runtime(
         clock=clock,
         ids=ids,
         audit=audit,
+        emitter=obs,
     )
     approvals = ApprovalService(store, clock=clock, ids=ids)
     service = SupervisorService(
@@ -334,7 +338,7 @@ def build_runtime(
         clock=clock,
         max_concurrency=scheduler_max_concurrency,
     )
-    effects = EffectDispatcher(store, effect_handlers, clock=clock)
+    effects = EffectDispatcher(store, effect_handlers, clock=clock, emitter=obs)
     drafter = None
     if config.notifications is not None:
         drafter = NotificationDrafter(

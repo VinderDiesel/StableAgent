@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from stableagent.observability.store import ObservabilityStore
 from stableagent.orchestration.model import (
     AssignmentStatus,
     Clock,
@@ -19,7 +20,6 @@ from stableagent.orchestration.model import (
     Ticket,
     TicketStatus,
 )
-from stableagent.orchestration.store import Store
 from stableagent.supervisor import SUPERVISOR_SCHEMA_VERSION
 from stableagent.supervisor.model import (
     Channel,
@@ -203,8 +203,8 @@ class BetaSnapshot:
     source_health: tuple[SourceCursor, ...]
 
 
-class SupervisorStore(Store):
-    """P4 Store 的增量扩展：同一连接、同一事务、只加表。"""
+class SupervisorStore(ObservabilityStore):
+    """P4 Store 的增量扩展：同一连接、同一事务、只加表（含 P7 domain_events）。"""
 
     def __init__(self, db_path: str | Path, *, clock: Clock) -> None:
         super().__init__(db_path, clock=clock)

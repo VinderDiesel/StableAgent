@@ -19,3 +19,4 @@ coverage.xml
 # 本地解释器矩阵（Task 26）
 .matrix/
 .bench-p4-orchestration/
+.tmp-pytest/

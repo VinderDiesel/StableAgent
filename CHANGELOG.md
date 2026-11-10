@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 实现（P7 M1 可观测性，2026-11-10）
+- 新增 `stableagent/observability/`：`DomainEvent`、脱敏、`ObservabilityStore`
+  （`domain_events` + `p7-observability-v1`）、`DomainEventEmitter`（`emit` /
+  `emit_safe`）、进程内 Metrics、ticket 根 Trace
+- `SupervisorStore` 继承 `ObservabilityStore`；Router / EffectDispatcher /
+  `build_runtime` 事务外旁路接线
+- CI FOCUS 35→40；[可观测性指南](docs/guides/observability.md)；
+  [ADR-07](docs/design-decisions/07-production-hardening.md) 与
+  [P7 验收账本](docs/acceptance/p7-production-hardening.md)
+- 门禁：本地 `845 passed, 6 skipped`（覆盖 97.35%；沙箱忽略 git worktree 相关用例），
+  新 FOCUS 文件均 ≥95%；`core/` 与 `orchestration/service.py` 零业务改动
+
 ### 文档（工程收口口径，2026-11-10）
 - 维护者裁定推广：后续**全部**阶段/里程碑/任务的工程收口只看代码完成与离线可靠性；
   真实仓库试跑、observe 标注、生产 canary 等数据回填一律不作 DoD

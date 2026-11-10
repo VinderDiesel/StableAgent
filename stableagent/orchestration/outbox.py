@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING
 
 from stableagent.orchestration.errors import DeferrableEffectError, PermanentEffectError
 from stableagent.orchestration.model import (
@@ -14,6 +15,9 @@ from stableagent.orchestration.model import (
     next_effect_status,
 )
 from stableagent.orchestration.store import Store
+
+if TYPE_CHECKING:
+    from stableagent.observability.emitter import DomainEventEmitter
 
 EffectHandler = Callable[[Effect], Awaitable[None]]
 
@@ -30,6 +34,7 @@ class EffectDispatcher:
         eligible: Mapping[EffectKind, Callable[[Effect], bool]] | None = None,
         backoff: Callable[[int], int] | None = None,
         on_exhausted: Callable[[Effect, str], None] | None = None,
+        emitter: DomainEventEmitter | None = None,
     ) -> None:
         self._store = store
         self._handlers = dict(handlers)
@@ -39,6 +44,7 @@ class EffectDispatcher:
         self._eligible = dict(eligible or {})
         self._backoff = backoff
         self._on_exhausted = on_exhausted
+        self._emitter = emitter
         self._outcomes: list[tuple[str, EffectState]] = []
 
     def outcomes(self) -> list[tuple[str, EffectState]]:
@@ -55,20 +61,58 @@ class EffectDispatcher:
             if not self._eligible.get(effect.kind, lambda e: True)(effect):
                 continue  # 门控关闭：不领取、不记 attempts（设计裁定 2：事实源在 Store）
             claimed = self._claim(effect)
+            self._emit_effect("attempted", claimed)
             try:
                 await handler(claimed)
             except DeferrableEffectError as exc:
                 self._defer(claimed, repr(exc))  # 回退与"真实失败"两条账
+                self._emit_effect("failed", claimed, reason_code="deferrable", detail=repr(exc))
                 continue
             except PermanentEffectError as exc:
                 self._fail_permanently(claimed, repr(exc))  # 重放只会被同样拒绝：不进退避
+                self._emit_effect("failed", claimed, reason_code="permanent", detail=repr(exc))
                 continue
             except Exception as exc:  # 副作用失败：退避重试，达上限才失败
                 self._fail_or_retry(claimed, repr(exc))
+                self._emit_effect("failed", claimed, reason_code="retryable", detail=repr(exc))
                 continue
             self._settle(claimed, EffectAction.SUCCEED)
+            self._emit_effect("succeeded", claimed)
             handled += 1
         return handled
+
+    def _emit_effect(
+        self,
+        phase: str,
+        effect: Effect,
+        *,
+        reason_code: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        if self._emitter is None:
+            return
+        from stableagent.observability.events import DomainEventKind
+
+        kind = {
+            "attempted": DomainEventKind.EFFECT_ATTEMPTED,
+            "succeeded": DomainEventKind.EFFECT_SUCCEEDED,
+            "failed": DomainEventKind.EFFECT_FAILED,
+        }[phase]
+        attrs: dict[str, object] = {
+            "effect_kind": effect.kind.value,
+            "attempts": effect.attempts,
+        }
+        if detail is not None:
+            attrs["detail"] = detail
+        ticket_id = effect.payload.get("ticket_id")
+        self._emitter.emit_safe(
+            kind,
+            outcome="ok" if phase != "failed" else "error",
+            reason_code=reason_code,
+            ticket_id=ticket_id if isinstance(ticket_id, str) else None,
+            effect_id=effect.id,
+            attrs=attrs,
+        )
 
     def _claim(self, effect: Effect) -> Effect:
         with self._store.transaction():
