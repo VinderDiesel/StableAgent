@@ -69,9 +69,14 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 - [x] **M2-5** `call_hard_timeout_seconds` + `AgentLoop` `asyncio.wait_for`。
 - [x] **M2-6** 最小接线、指南、FOCUS、出口门禁。
 
-### M3：多 Source / Channel 与 MCP 治理（规格 WP-7.3）
+### M3：多 Source / Channel 与 MCP 治理（规格 WP-7.3；ADR-07 决策 11–14）
 
-- [ ] 至少一个非 GitHub fake Source + McpRegistry。
+> **状态：M3 收口（2026-11-10）。** Slack fake Source + McpRegistry + IdentityLink。
+
+- [x] **M3-1** ADR-07 决策 11–14；本账本 M3 TDD；状态面。
+- [x] **M3-2** 模型扩展 + GitHub Source 拆分 + SlackFakeSource。
+- [x] **M3-3** Slack Channel/Effect + McpRegistry + IdentityLink。
+- [x] **M3-4** 指南、FOCUS、出口门禁。
 
 ### M4：Memory 与数据生命周期（规格 WP-7.4）
 
@@ -88,7 +93,8 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 ## 2. P7 退出清单（规格 §5；工程收口）
 
 - [x] ProviderRouter 多 Provider，成本/预算/选择/fallback 可追溯且不污染 Core（M2）。
-- [ ] 新 Source/Channel/MCP 经 Trigger/Outbox/Policy，tenant 隔离与幂等。
+- [x] 新 Source/Channel/MCP 经 Trigger/Outbox/Policy，tenant 隔离与幂等（M3：Slack fake +
+      McpRegistry + IdentityLink；飞书/Jira 同构留后续）。
 - [ ] Memory 具备 scope、授权、生命周期、删除、降级与离线质量评估。
 - [x] 审计、指标、trace、SLO 与脱敏覆盖 Worker→effect（M1：Trigger/Decision/Effect
       旁路事件 + 脱敏 + 指标 + ticket trace；SLO 配置化留后续）。
@@ -142,3 +148,18 @@ env -u NO_PROXY -u no_proxy .venv/bin/pytest -q
 - `ruff check` 目标文件通过；`mypy`：Success: no issues found in 84 source files。
 - FOCUS 42 文件；`control/cost.py` 93.9%、`providers/routing.py` 98.4%、`core/loop.py` 97.1%。
 - `orchestration/service.py` 未改签名；loop 哈希基线更新为 P7 M2（ADR-07 决策 10）。
+
+---
+
+## 6. M3 任务级计划（WP-7.3）
+
+### Task 1–4：已合并落地（2026-11-10）
+
+见 §1 M3 勾选。
+
+### M3 出口读数（2026-11-10，`/tmp/p7-m3-*.txt`）
+
+- 本地（沙箱忽略 git worktree 相关用例）：`878 passed, 8 skipped`；覆盖 **96.83%**。
+- `ruff check` 通过；`mypy`：Success: no issues found in 90 source files。
+- FOCUS 45 文件；`mcp_registry` 94.5%、`sources/slack` 96.5%、`channels/slack` 91.4%。
+- `SUPERVISOR_SCHEMA_VERSION = p7-supervisor-v1`（identity_links 表）。

@@ -6,6 +6,6 @@
 
 from __future__ import annotations
 
-SUPERVISOR_SCHEMA_VERSION = "p6-supervisor-v2"
+SUPERVISOR_SCHEMA_VERSION = "p7-supervisor-v1"
 
 __all__ = ["SUPERVISOR_SCHEMA_VERSION"]

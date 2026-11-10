@@ -315,8 +315,8 @@ def test_find_accepted_decision_skips_observe_rows(store: SupervisorStore) -> No
 
 
 def test_schema_v2_seeds_runtime_control_and_no_lock(store: SupervisorStore) -> None:
-    assert SUPERVISOR_SCHEMA_VERSION == "p6-supervisor-v2"
-    assert store.schema_version() == "p6-supervisor-v2"
+    assert SUPERVISOR_SCHEMA_VERSION == "p7-supervisor-v1"
+    assert store.schema_version() == "p7-supervisor-v1"
     assert store.get_runtime_lock() is None
     assert store.get_runtime_control() == RuntimeControl()
 

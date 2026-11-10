@@ -74,6 +74,8 @@ class EffectKind(str, Enum):
     GITHUB_COMMENT = "github_comment"
     GITHUB_PULL_REQUEST = "github_pull_request"
     GITHUB_REQUEST_REVIEW = "github_request_review"
+    # P7 M3：Slack Channel 回写（ADR-07 决策 13）
+    SLACK_MESSAGE = "slack_message"
 
 
 class ReportKind(str, Enum):

@@ -69,6 +69,7 @@ def test_enum_values_are_pinned() -> None:
         "review_comment",
         "review",
         "ci_status",
+        "message",
     }
     assert {k.value for k in DecisionOutcome} == {
         "accept",
@@ -124,4 +125,5 @@ def test_thread_kinds_are_pinned() -> None:
         "pull_request",
         "review",
         "repository",
+        "channel",
     }

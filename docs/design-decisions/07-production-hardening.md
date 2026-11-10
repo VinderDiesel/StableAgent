@@ -99,6 +99,29 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
   `provider_error` → FAILED。外层 Assignment `deadline_at` 语义不变，两层分别可配、
   分别可观测。
 
+### 11. 首个非 GitHub Source = Slack（M3 / WP-7.3）
+
+- `supervisor/sources/`：`github.py`（从 `source.py` 迁出实现）、`slack.py`（fake）。
+- `Trigger.source` / `Thread.source` ∈ `{github, slack}`；新增 `TriggerKind.MESSAGE`、
+  `ChannelKind.SLACK_MESSAGE`、`ThreadKind.CHANNEL`。
+- Slack 仅 fake fixture；无真实 HTTP。飞书/Jira 同构扩展留后续。
+
+### 12. 禁止隐式跨 Source 身份映射
+
+- 引入 `IdentityLink`（显式、可撤销）落 Store；无自动映射路径。
+- M3 不做管理 UI，只提供 CRUD + 审计钩子。
+
+### 13. Slack Channel 经 Outbox
+
+- 新增 `EffectKind.SLACK_MESSAGE`；`channels/slack.py` fake writer。
+- 保序/幂等沿用 outbox；外部失败可重试并留 receipt。
+
+### 14. McpRegistry 治理
+
+- `integrations/mcp_registry.py`：descriptor（version、transport、tenant allowlist、
+  schema digest、health、credential_ref、audit_level、enabled、远程安全字段）。
+- 注册/启用/禁用经 operator 回调；discovery ≠ invoke；禁用阻断 pending 调用并审计。
+
 ## 被否决方案
 
 - **用 OpenTelemetry 替换自研事件**：增加运行时依赖与学习成本，违背 Core 轻量。
@@ -107,6 +130,7 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 - **M1 引入完整多租户**：范围蔓延；字段默认值足够向前兼容。
 - **在 Worker step 中途无记录换模型**：破坏可重放与审计。
 - **把预算判定塞进 AgentLoop 内部**：污染 Core；预算属外层/Assignment policy。
+- **跨 Source 隐式 actor 映射**：身份混淆与越权风险。
 
 ## 后果与代价
 
@@ -115,16 +139,19 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 - 进程内 Metrics 不跨进程聚合；多实例需外置 sink（P7 后续）。
 - Core 增加可选硬超时字段；默认 `None` 保持旧行为。
 - 价格表版本需运维维护；估算误差必须显式标记。
+- Source/Channel kind 扩展后旧客户端需容忍新枚举值。
 
 ## 测试与证据
 
-M1/M2 实测门禁证据回填在
+M1–M3 实测门禁证据回填在
 [P7 验收账本](../acceptance/p7-production-hardening.md)；本 ADR 不复制会腐坏的读数。
 
 ## 关联文档
 
-- [P7 Spec WP-7.1 / WP-7.2](../specs/p7-production-hardening-ecosystem.md)
+- [P7 Spec WP-7.1–7.3](../specs/p7-production-hardening-ecosystem.md)
 - [可观测性指南](../guides/observability.md)（M1）
 - [Provider 路由指南](../guides/provider-routing.md)（M2）
+- [Sources / MCP 指南](../guides/sources-mcp.md)（M3）
 - [工程收口口径](../Roadmap.md)
+
 

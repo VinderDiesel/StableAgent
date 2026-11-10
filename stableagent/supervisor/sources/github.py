@@ -1,0 +1,402 @@
+"""GitHub Source 实现（从 source.py 迁出；契约仍在 supervisor.source）。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from stableagent.integrations.github import GitHubReadClient, GitHubReadItem
+from stableagent.orchestration.model import Clock
+from stableagent.supervisor.model import (
+    Channel,
+    ChannelKind,
+    SourceCursor,
+    SourceHealth,
+    Thread,
+    ThreadKind,
+    ThreadStatus,
+    Trigger,
+    TriggerKind,
+)
+from stableagent.supervisor.source import (
+    PollBatch,
+    SourceError,
+    SourceEvent,
+    SourceSchemaError,
+    SourceTransientError,
+    issue_thread_key,
+    pull_request_thread_key,
+    repository_thread_key,
+    review_thread_key,
+    stable_channel_id,
+    stable_trigger_id,
+)
+from stableagent.supervisor.store import SupervisorStore
+
+
+class GitHubSource:
+    """单仓库只读 Source：`normalize` 无副作用；写库只发生在 `poll`。"""
+
+    def __init__(
+        self,
+        store: SupervisorStore,
+        client: GitHubReadClient,
+        *,
+        repository: str,
+        bot_login: str,
+        clock: Clock,
+    ) -> None:
+        self._store = store
+        self._client = client
+        self._repository = repository
+        self._bot_login = bot_login
+        self._clock = clock
+
+    def normalize(self, item: GitHubReadItem) -> SourceEvent | None:
+        kind = TriggerKind(item.kind.value)
+        if kind is TriggerKind.ISSUE:
+            return self._issue(item)
+        if kind is TriggerKind.PULL_REQUEST:
+            return self._pull_request(item)
+        if kind is TriggerKind.ISSUE_COMMENT:
+            return self._issue_comment(item)
+        if kind is TriggerKind.REVIEW_COMMENT:
+            return self._review_comment(item)
+        if kind is TriggerKind.REVIEW:
+            return self._review(item)
+        if kind is TriggerKind.CI_STATUS:
+            return self._ci_status(item)
+        raise SourceSchemaError(f"unsupported kind {item.kind.value}")
+
+    def _issue(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        number = _int_field(resource, "number")
+        key = issue_thread_key(self._repository, number)
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.ISSUE, number, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.ISSUE,
+                external_ref=f"#{number}",
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+        )
+
+    def _pull_request(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        number = _int_field(resource, "number")
+        key = pull_request_thread_key(self._repository, number)
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.PULL_REQUEST, number, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref=f"#{number}",
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+        )
+
+    def _trigger(
+        self,
+        item: GitHubReadItem,
+        kind: TriggerKind,
+        subject: int,
+        actor: str,
+        thread_key: str,
+    ) -> Trigger:
+        external_id = f"github:{self._repository}:{kind.value}:{subject}"
+        payload: dict[str, Any] = {"resource": item.resource, "deleted": item.deleted}
+        request = self._request_block(item.resource)
+        if request is not None:
+            payload["request"] = request
+        return Trigger(
+            id=stable_trigger_id(external_id),
+            external_id=external_id,
+            kind=kind,
+            actor=actor,
+            thread_keys=[thread_key],
+            occurred_at=item.occurred_at,
+            received_at=self._clock.now_ms(),
+            payload=payload,
+        )
+
+    def _request_block(self, resource: dict[str, Any]) -> dict[str, Any] | None:
+        """只把"有人写了正文"的事件标成候选请求；mention 命中不决定 action 集合（L4）。"""
+        body = resource.get("body")
+        if not isinstance(body, str) or not body:
+            return None
+        handle = self._bot_login.removesuffix("[bot]")
+        url = resource.get("html_url")
+        return {
+            "text": body,
+            "mentioned": f"@{handle}".casefold() in body.casefold(),
+            "url": url if isinstance(url, str) else None,
+        }
+
+    def _is_self(self, actor: str) -> bool:
+        return actor.casefold() == self._bot_login.casefold()
+
+    def _issue_comment(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        comment_id = _int_field(resource, "id")
+        number = _int_field(resource, "issue_number")
+        if bool(resource.get("is_pull_request")):
+            key = pull_request_thread_key(self._repository, number)
+            thread_kind = ThreadKind.PULL_REQUEST
+            channel_kind = ChannelKind.PULL_REQUEST_COMMENT
+        else:
+            key = issue_thread_key(self._repository, number)
+            thread_kind = ThreadKind.ISSUE
+            channel_kind = ChannelKind.ISSUE_COMMENT
+        external_ref = f"#{number}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.ISSUE_COMMENT, comment_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=thread_kind,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, channel_kind, external_ref),
+                thread_key=key,
+                kind=channel_kind,
+                external_ref=external_ref,
+            ),
+        )
+
+    def _review_comment(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        comment_id = _int_field(resource, "id")
+        pull_number = _int_field(resource, "pull_number")
+        review_id = _int_field(resource, "review_id")
+        key = review_thread_key(self._repository, pull_number, review_id)
+        external_ref = f"review:{review_id}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.REVIEW_COMMENT, comment_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REVIEW,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, ChannelKind.REVIEW_REPLY, external_ref),
+                thread_key=key,
+                kind=ChannelKind.REVIEW_REPLY,
+                external_ref=external_ref,
+            ),
+        )
+
+    def _review(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = _actor(resource)
+        if self._is_self(actor):
+            return None
+        review_id = _int_field(resource, "id")
+        pull_number = _int_field(resource, "pull_number")
+        key = review_thread_key(self._repository, pull_number, review_id)
+        external_ref = f"review:{review_id}"
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.REVIEW, review_id, actor, key),
+            thread=Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REVIEW,
+                external_ref=external_ref,
+                last_trigger_at=item.occurred_at,
+                status=_thread_status(item, resource, closed_state="dismissed"),
+            ),
+            channel=Channel(
+                id=stable_channel_id(key, ChannelKind.REVIEW_REPLY, external_ref),
+                thread_key=key,
+                kind=ChannelKind.REVIEW_REPLY,
+                external_ref=external_ref,
+            ),
+        )
+
+    def _ci_status(self, item: GitHubReadItem) -> SourceEvent | None:
+        resource = item.resource
+        actor = resource.get("actor", "github")
+        if not isinstance(actor, str) or not actor:
+            raise SourceSchemaError("actor 必须是非空字符串")
+        if self._is_self(actor):
+            return None
+        status_id = _int_field(resource, "id")
+        _str_field(resource, "sha")
+        state = _str_field(resource, "state")
+        if state not in {"pending", "success", "failure", "error"}:
+            raise SourceSchemaError(f"未知 CI state：{state}")
+        pull_number = resource.get("pull_number")
+        if pull_number is not None and (
+            not isinstance(pull_number, int) or isinstance(pull_number, bool)
+        ):
+            raise SourceSchemaError("pull_number 必须是整数或 null")
+        if pull_number is not None:
+            key = pull_request_thread_key(self._repository, pull_number)
+            thread = Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.PULL_REQUEST,
+                external_ref=f"#{pull_number}",
+                last_trigger_at=item.occurred_at,
+                status=ThreadStatus.OPEN,
+            )
+        else:
+            key = repository_thread_key(self._repository)
+            thread = Thread(
+                key=key,
+                repository=self._repository,
+                kind=ThreadKind.REPOSITORY,
+                external_ref=self._repository,
+                last_trigger_at=item.occurred_at,
+                status=ThreadStatus.OPEN,
+            )
+        return SourceEvent(
+            trigger=self._trigger(item, TriggerKind.CI_STATUS, status_id, actor, key),
+            thread=thread,
+        )
+
+    async def poll(self, *, limit: int = 100, max_pages: int = 10) -> PollBatch:
+        stored = self._store.get_source_cursor("github")
+        cursor = stored.cursor if stored else None
+        try:
+            events, next_cursor, in_batch_duplicates = await self._fetch(cursor, limit, max_pages)
+        except SourceError as error:
+            self._record_failure(stored, error)
+            raise
+        return self._persist(events, next_cursor, in_batch_duplicates)
+
+    async def _fetch(
+        self, cursor: str | None, limit: int, max_pages: int
+    ) -> tuple[list[SourceEvent], str | None, int]:
+        next_cursor = cursor
+        items: list[GitHubReadItem] = []
+        for _ in range(max_pages):
+            page = await self._client.list_events(
+                repository=self._repository, cursor=next_cursor, limit=limit
+            )
+            items.extend(page.items)
+            if page.next_cursor is not None and page.next_cursor == next_cursor:
+                raise SourceSchemaError("cursor 未推进")
+            next_cursor = page.next_cursor
+            if next_cursor is None:
+                break
+        events, duplicates = self._dedupe(items)
+        return events, next_cursor, duplicates
+
+    def _persist(
+        self, events: list[SourceEvent], next_cursor: str | None, in_batch_duplicates: int
+    ) -> PollBatch:
+        with self._store.transaction():
+            fresh: list[SourceEvent] = []
+            duplicates = 0
+            for event in events:
+                if not self._store.insert_trigger(event.trigger):
+                    duplicates += 1
+                    continue
+                self._store.upsert_thread(event.thread)
+                if event.channel is not None:
+                    self._store.insert_channel(event.channel)
+                fresh.append(event)
+            self._store.put_source_cursor(
+                SourceCursor(
+                    source="github",
+                    cursor=next_cursor,
+                    last_success_at=self._clock.now_ms(),
+                    consecutive_failures=0,
+                    health=SourceHealth.OK,
+                )
+            )
+        return PollBatch(
+            events=fresh,
+            next_cursor=next_cursor,
+            duplicates=duplicates + in_batch_duplicates,
+        )
+
+    def _dedupe(self, items: list[GitHubReadItem]) -> tuple[list[SourceEvent], int]:
+        by_external: dict[str, SourceEvent] = {}
+        duplicates = 0
+        for item in items:
+            event = self.normalize(item)
+            if event is None:
+                continue
+            if event.trigger.external_id in by_external:
+                duplicates += 1
+                continue
+            by_external[event.trigger.external_id] = event
+        ordered = sorted(
+            by_external.values(),
+            key=lambda event: (event.trigger.occurred_at, event.trigger.external_id),
+        )
+        return ordered, duplicates
+
+    def _record_failure(self, stored: SourceCursor | None, error: SourceError) -> None:
+        health = (
+            SourceHealth.DEGRADED
+            if isinstance(error, SourceTransientError)
+            else SourceHealth.FAILED
+        )
+        previous = stored.consecutive_failures if stored else 0
+        with self._store.transaction():
+            self._store.put_source_cursor(
+                SourceCursor(
+                    source="github",
+                    cursor=stored.cursor if stored else None,
+                    last_success_at=stored.last_success_at if stored else None,
+                    consecutive_failures=previous + 1,
+                    health=health,
+                )
+            )
+
+
+def _int_field(resource: dict[str, Any], field: str) -> int:
+    value = resource.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SourceSchemaError(f"{field} 必须是整数")
+    return value
+
+
+def _str_field(resource: dict[str, Any], field: str) -> str:
+    value = resource.get(field)
+    if not isinstance(value, str) or not value:
+        raise SourceSchemaError(f"{field} 必须是非空字符串")
+    return value
+
+
+def _actor(resource: dict[str, Any]) -> str:
+    user = resource.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    if isinstance(login, str) and login:
+        return login
+    actor = resource.get("actor")
+    if isinstance(actor, str) and actor:
+        return actor
+    raise SourceSchemaError("缺少 actor / user.login")
+
+
+def _thread_status(
+    item: GitHubReadItem, resource: dict[str, Any], *, closed_state: str = "closed"
+) -> ThreadStatus:
+    if item.deleted or resource.get("state") == closed_state:
+        return ThreadStatus.CLOSED
+    return ThreadStatus.OPEN

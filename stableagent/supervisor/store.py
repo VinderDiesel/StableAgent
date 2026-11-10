@@ -27,6 +27,7 @@ from stableagent.supervisor.model import (
     Decision,
     DecisionOutcome,
     DecisionStrength,
+    IdentityLink,
     RuntimeControl,
     RuntimeLock,
     SourceCursor,
@@ -98,6 +99,15 @@ _SUPERVISOR_SCHEMA: dict[str, str] = {
         " paused INTEGER NOT NULL DEFAULT 0, reason TEXT, actor TEXT,"
         " changed_at INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0)"
     ),
+    "identity_links": (
+        "CREATE TABLE IF NOT EXISTS identity_links ("
+        " id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,"
+        " left_source TEXT NOT NULL, left_actor TEXT NOT NULL,"
+        " right_source TEXT NOT NULL, right_actor TEXT NOT NULL,"
+        " created_at INTEGER NOT NULL, created_by TEXT NOT NULL,"
+        " revoked_at INTEGER, revoked_by TEXT,"
+        " UNIQUE (tenant_id, left_source, left_actor, right_source, right_actor))"
+    ),
 }
 
 _SUPERVISOR_INDEXES: tuple[str, ...] = (
@@ -166,6 +176,21 @@ def _row_to_source_cursor(row: sqlite3.Row) -> SourceCursor:
         last_success_at=row["last_success_at"],
         consecutive_failures=row["consecutive_failures"],
         health=SourceHealth(row["health"]),
+    )
+
+
+def _row_to_identity_link(row: sqlite3.Row) -> IdentityLink:
+    return IdentityLink(
+        id=row["id"],
+        tenant_id=row["tenant_id"],
+        left_source=row["left_source"],
+        left_actor=row["left_actor"],
+        right_source=row["right_source"],
+        right_actor=row["right_actor"],
+        created_at=row["created_at"],
+        created_by=row["created_by"],
+        revoked_at=row["revoked_at"],
+        revoked_by=row["revoked_by"],
     )
 
 
@@ -590,6 +615,89 @@ class SupervisorStore(ObservabilityStore):
             if ticket is not None:
                 tickets.append(ticket)
         return tickets
+
+    # ---------------------------------------------------------- IdentityLink
+    def insert_identity_link(self, link: IdentityLink) -> bool:
+        if link.revoked_at is not None:
+            raise ValueError("new IdentityLink must not be revoked")
+        cursor = self._conn.execute(
+            "INSERT OR IGNORE INTO identity_links"
+            " (id, tenant_id, left_source, left_actor, right_source, right_actor,"
+            "  created_at, created_by, revoked_at, revoked_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+            (
+                link.id,
+                link.tenant_id,
+                link.left_source,
+                link.left_actor,
+                link.right_source,
+                link.right_actor,
+                link.created_at,
+                link.created_by,
+            ),
+        )
+        return int(cursor.rowcount) == 1
+
+    def revoke_identity_link(
+        self, link_id: str, *, revoked_at: int, revoked_by: str
+    ) -> IdentityLink | None:
+        row = self._conn.execute(
+            "SELECT * FROM identity_links WHERE id = ?", (link_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        if row["revoked_at"] is not None:
+            return _row_to_identity_link(row)
+        self._conn.execute(
+            "UPDATE identity_links SET revoked_at = ?, revoked_by = ? WHERE id = ?",
+            (revoked_at, revoked_by, link_id),
+        )
+        updated = self._conn.execute(
+            "SELECT * FROM identity_links WHERE id = ?", (link_id,)
+        ).fetchone()
+        assert updated is not None
+        return _row_to_identity_link(updated)
+
+    def list_identity_links(
+        self, *, tenant_id: str, include_revoked: bool = False
+    ) -> list[IdentityLink]:
+        if include_revoked:
+            rows = self._conn.execute(
+                "SELECT * FROM identity_links WHERE tenant_id = ? ORDER BY created_at, id",
+                (tenant_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM identity_links WHERE tenant_id = ?"
+                " AND revoked_at IS NULL ORDER BY created_at, id",
+                (tenant_id,),
+            ).fetchall()
+        return [_row_to_identity_link(row) for row in rows]
+
+    def resolve_identity(
+        self,
+        *,
+        tenant_id: str,
+        source: str,
+        actor: str,
+        target_source: str,
+    ) -> str | None:
+        """仅经显式未撤销 IdentityLink 解析；无隐式跨 Source 映射。"""
+        rows = self._conn.execute(
+            "SELECT * FROM identity_links WHERE tenant_id = ? AND revoked_at IS NULL"
+            " AND (("
+            " left_source = ? AND left_actor = ? AND right_source = ?"
+            ") OR ("
+            " right_source = ? AND right_actor = ? AND left_source = ?"
+            "))",
+            (tenant_id, source, actor, target_source, source, actor, target_source),
+        ).fetchall()
+        if not rows:
+            return None
+        row = rows[0]
+        if row["left_source"] == source and row["left_actor"] == actor:
+            return str(row["right_actor"])
+        return str(row["left_actor"])
 
     # ---------------------------------------------------------- Beta 只读报告
     def beta_snapshot(self) -> BetaSnapshot:

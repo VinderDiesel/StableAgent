@@ -155,7 +155,8 @@ def test_m2_effect_kinds_close_the_whitelist() -> None:
         "github_comment",
         "github_pull_request",
         "github_request_review",
-    }  # C1 + ADR-05：白名单只按里程碑点名扩容（prepare_worktree、run_command、三条 GitHub 写）
+        "slack_message",
+    }  # 按里程碑点名扩容；P7 M3 加 slack_message
     # L6：merge 与 auto-merge 在类型里不存在（值与成员名两个口径都钉死），不是"运行时开关拒绝"
     names = {k.name.lower() for k in EffectKind}
     assert {"merge", "enable_auto_merge", "auto_merge"}.isdisjoint(values | names)

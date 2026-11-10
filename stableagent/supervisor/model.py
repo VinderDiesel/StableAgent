@@ -26,6 +26,7 @@ class TriggerKind(str, Enum):
     REVIEW_COMMENT = "review_comment"
     REVIEW = "review"
     CI_STATUS = "ci_status"
+    MESSAGE = "message"  # P7 M3：Slack 等聊天 Source
 
 
 class ThreadKind(str, Enum):
@@ -33,6 +34,7 @@ class ThreadKind(str, Enum):
     PULL_REQUEST = "pull_request"
     REVIEW = "review"
     REPOSITORY = "repository"
+    CHANNEL = "channel"  # P7 M3：Slack 频道/DM 线程
 
 
 class ThreadStatus(str, Enum):
@@ -45,6 +47,7 @@ class ChannelKind(str, Enum):
     ISSUE_COMMENT = "issue_comment"
     PULL_REQUEST_COMMENT = "pull_request_comment"
     REVIEW_REPLY = "review_reply"
+    SLACK_MESSAGE = "slack_message"  # P7 M3
 
 
 class SubscriptionMode(str, Enum):
@@ -85,7 +88,7 @@ class Trigger(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: str
-    source: Literal["github"] = "github"
+    source: Literal["github", "slack"] = "github"
     external_id: str
     kind: TriggerKind
     actor: str
@@ -94,6 +97,7 @@ class Trigger(BaseModel):
     received_at: int
     payload: dict[str, Any]
     digest: str = ""
+    tenant_id: str = "default"
 
     @model_validator(mode="before")
     @classmethod
@@ -114,12 +118,13 @@ class Thread(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     key: str
-    source: Literal["github"] = "github"
+    source: Literal["github", "slack"] = "github"
     repository: str
     kind: ThreadKind
     external_ref: str
     last_trigger_at: int
     status: ThreadStatus = ThreadStatus.OPEN
+    tenant_id: str = "default"
 
 
 class Channel(BaseModel):
@@ -165,6 +170,24 @@ class SourceCursor(BaseModel):
     last_success_at: int | None = None
     consecutive_failures: int = Field(default=0, ge=0)
     health: SourceHealth = SourceHealth.OK
+    tenant_id: str = "default"
+
+
+class IdentityLink(BaseModel):
+    """显式跨 Source 身份链接；可撤销；禁止隐式映射（ADR-07 决策 12）。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    tenant_id: str = "default"
+    left_source: Literal["github", "slack"]
+    left_actor: str
+    right_source: Literal["github", "slack"]
+    right_actor: str
+    created_at: int
+    created_by: str
+    revoked_at: int | None = None
+    revoked_by: str | None = None
 
 
 class RuntimeLock(BaseModel):

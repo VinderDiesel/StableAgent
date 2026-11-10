@@ -26,7 +26,7 @@ jobs:
         run: mypy
       - name: Tests + coverage (全库门槛 70%，见 pyproject fail_under)
         run: pytest --cov=stableagent --cov-report=xml --cov-report=term-missing
-      - name: 心脏模块覆盖率闸门（42 文件：loop/checkpoint/errors/context/evidence/orchestration/control/execution/integrations/supervisor/observability/routing 各 ≥90%）
+      - name: 心脏模块覆盖率闸门（45 文件：含 sources/slack、channels/slack、mcp_registry ≥90%）
         run: |
           python - <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -57,6 +57,7 @@ jobs:
               "execution/sandbox.py",
               "integrations/github.py",
               "integrations/mcp.py",
+              "integrations/mcp_registry.py",
               "supervisor/model.py",
               "supervisor/store.py",
               "supervisor/views.py",
@@ -67,6 +68,8 @@ jobs:
               "supervisor/runtime.py",
               "supervisor/notifications.py",
               "supervisor/console.py",
+              "supervisor/sources/slack.py",
+              "supervisor/channels/slack.py",
               "observability/events.py",
               "observability/redaction.py",
               "observability/emitter.py",

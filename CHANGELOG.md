@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 实现（P7 M3 Sources / MCP，2026-11-10）
+- SlackFakeSource + GitHub Source 迁入 `supervisor/sources/`；`EffectKind.SLACK_MESSAGE`
+- `McpRegistry`（tenant allowlist、enable/disable、discovery≠invoke）
+- `IdentityLink` 表与显式解析；指南 [sources-mcp](docs/guides/sources-mcp.md)
+- FOCUS 42→45；门禁 `878 passed, 8 skipped`（覆盖 96.83%）
+
 ### 实现（P7 M2 多 Provider / 成本路由，2026-11-10）
 - Anthropic（Messages）与 Ollama（`/api/chat`）Provider + fake transport 测试
 - `ProviderRouter` / `ProviderSelection` + `merge_provider_selection`；`control/cost`
