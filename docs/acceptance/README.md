@@ -10,7 +10,7 @@
 | P4 | [Ticket Orchestration](p4-ticket-orchestration.md) | Completed evidence（run 41596839282；DoD 60/60，里程碑 30/30） | 追溯 M1/M2/M3 里程碑步骤、心脏边界 L1~L8 与逐项验收证据 |
 | P5 | [Guarded Execution](p5-guarded-execution.md) | Completed evidence（run 42433929377；DoD 46/46，里程碑 40/40） | 跟踪 M1~M4 里程碑步骤、心脏边界 L1~L8 与逐项验收证据 |
 | P6 | [Supervisor Beta](p6-supervisor-beta.md) | Completed evidence（工程收口 2026-11-10） | 追溯 M1~M6、I1~I6、离线门禁；收口口径见 Roadmap「工程收口口径」 |
-| P7 | [Production Hardening](p7-production-hardening.md) | Active（M3 收口；下一步 M4） | 跟踪 M1~M6、出口不变量 I1~I6 与逐项验收；工程收口口径见 Roadmap |
+| P7 | [Production Hardening](p7-production-hardening.md) | Active（M4 收口；下一步 M5） | 跟踪 M1~M6、出口不变量 I1~I6 与逐项验收；工程收口口径见 Roadmap |
 
 使用规则：
 

@@ -78,9 +78,14 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 - [x] **M3-3** Slack Channel/Effect + McpRegistry + IdentityLink。
 - [x] **M3-4** 指南、FOCUS、出口门禁。
 
-### M4：Memory 与数据生命周期（规格 WP-7.4）
+### M4：Memory 与数据生命周期（规格 WP-7.4；ADR-07 决策 15–18）
 
-- [ ] 短/长期 Memory、Policy、检索、删除与离线评测。
+> **状态：实施中。** 独立 `MemoryStore` + Policy + 词法检索 + erase/降级。
+
+- [x] **M4-1** ADR-07 决策 15–18；本账本 M4 TDD；状态面。
+- [x] **M4-2** model + `MemoryStore`（`p7-memory-v1`）+ `MemoryPolicy` + short/long facade。
+- [x] **M4-3** `LexicalRetriever` + `MemoryService`（降级 / erase / inject）+ 领域事件。
+- [x] **M4-4** 离线评测、指南、FOCUS、出口门禁。
 
 ### M5：FastAPI、Transport、监管 UI 与多租户（规格 WP-7.5）
 
@@ -95,7 +100,7 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 - [x] ProviderRouter 多 Provider，成本/预算/选择/fallback 可追溯且不污染 Core（M2）。
 - [x] 新 Source/Channel/MCP 经 Trigger/Outbox/Policy，tenant 隔离与幂等（M3：Slack fake +
       McpRegistry + IdentityLink；飞书/Jira 同构留后续）。
-- [ ] Memory 具备 scope、授权、生命周期、删除、降级与离线质量评估。
+- [x] Memory 具备 scope、授权、生命周期、删除、降级与离线质量评估（M4）。
 - [x] 审计、指标、trace、SLO 与脱敏覆盖 Worker→effect（M1：Trigger/Decision/Effect
       旁路事件 + 脱敏 + 指标 + ticket trace；SLO 配置化留后续）。
 - [ ] FastAPI、SSE、RBAC 与最小监管 UI 可部署且不绕过服务边界。
@@ -163,3 +168,32 @@ env -u NO_PROXY -u no_proxy .venv/bin/pytest -q
 - `ruff check` 通过；`mypy`：Success: no issues found in 90 source files。
 - FOCUS 45 文件；`mcp_registry` 94.5%、`sources/slack` 96.5%、`channels/slack` 91.4%。
 - `SUPERVISOR_SCHEMA_VERSION = p7-supervisor-v1`（identity_links 表）。
+
+---
+
+## 7. M4 任务级计划（WP-7.4）
+
+### Task 1：ADR / 账本 / 状态面（M4-1）
+
+- ADR-07 追加决策 15–18；状态面指向 M4；本账本展开勾选。
+
+### Task 2：Store / Policy / facade（M4-2）
+
+- `MemoryRecord` / scope / classification；`MemoryStore` DDL + 跨 tenant 拒绝。
+- `MemoryPolicy`（origin、分类、去重、TTL、容量）；short/long 薄 facade。
+
+### Task 3：检索 / Service / 事件（M4-3）
+
+- `LexicalRetriever` + 授权过滤 + token 裁剪；`MemoryService` 降级与 erase receipt；
+  `DomainEventKind` 追加 memory.*；`inject_into_messages`。
+
+### Task 4：评测 / FOCUS / 出口（M4-4）
+
+- 离线评测集；`docs/guides/memory.md`；FOCUS 45→48；全量离线门禁。
+
+### M4 出口读数（2026-11-10，`/tmp/p7-m4-*.txt`）
+
+- 本地（沙箱忽略 git worktree / github example 相关用例）：`903 passed, 8 skipped`；覆盖 **96.80%**。
+- `ruff check`：All checks passed；`mypy`：Success: no issues found in 99 source files。
+- FOCUS 48 文件；`memory/store` 100%、`memory/policy` 95.9%、`memory/retrieval` 90.7%。
+- marker `p7-memory-v1`；与 checkpoint `MemoryCheckpointStore` 隔离。

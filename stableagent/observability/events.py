@@ -16,6 +16,10 @@ class DomainEventKind(str, Enum):
     EFFECT_ATTEMPTED = "effect.attempted"
     EFFECT_SUCCEEDED = "effect.succeeded"
     EFFECT_FAILED = "effect.failed"
+    MEMORY_WRITTEN = "memory.written"
+    MEMORY_RETRIEVED = "memory.retrieved"
+    MEMORY_ERASED = "memory.erased"
+    MEMORY_DEGRADED = "memory.degraded"
 
 
 def canonical_attrs_digest(attrs: dict[str, Any]) -> str:

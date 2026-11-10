@@ -122,6 +122,32 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
   schema digest、health、credential_ref、audit_level、enabled、远程安全字段）。
 - 注册/启用/禁用经 operator 回调；discovery ≠ invoke；禁用阻断 pending 调用并审计。
 
+### 15. Memory 两层同表，独立 Store（M4 / WP-7.4）
+
+- `stableagent/memory/`：`MemoryStore(ObservabilityStore)` + marker `p7-memory-v1`；
+  **不**加深 `SupervisorStore` 继承链。
+- `memories` 行以 `layer ∈ {short, long}` 区分：short = Ticket/Assignment scope；
+  long = tenant（可选 repository）scope。只存 policy 批准后的摘要/事实 + digest。
+- 与 checkpoint 的 `MemoryCheckpointStore`（进程内 run 快照）命名隔离，勿混用。
+
+### 16. 写入必经 MemoryPolicy；检索 = 授权 + 词法 baseline
+
+- `MemoryPolicy`：允许 origin、分类上限、同 scope digest 去重、TTL、容量、敏感拒绝/
+  脱敏。模型/MCP 无直写旁路。
+- `LexicalRetriever`：确定性 token overlap；无向量库、无在线 embedding。跨
+  tenant/scope 拒绝；过期与已 erase 不可见；结果带 provenance 与 token 预算裁剪。
+
+### 17. 删除可验证；失败降级不阻断 Ticket
+
+- `erase` 软删 + `EraseReceipt`；索引同步剔除；发射 `memory.erased`。
+- `MemoryService.retrieve/write` 吞异常 → 空结果 / 跳过写入并记 `memory.degraded`；
+  绝不阻断 Ticket。
+
+### 18. Worker 注入不改 Core / 编排签名
+
+- `inject_into_messages` 供 Context 侧可选注入；`core/loop.py` 与
+  `orchestration/service.py` 零签名改动。`MemoryConfig` 仅兼容扩展字段。
+
 ## 被否决方案
 
 - **用 OpenTelemetry 替换自研事件**：增加运行时依赖与学习成本，违背 Core 轻量。
@@ -131,6 +157,9 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 - **在 Worker step 中途无记录换模型**：破坏可重放与审计。
 - **把预算判定塞进 AgentLoop 内部**：污染 Core；预算属外层/Assignment policy。
 - **跨 Source 隐式 actor 映射**：身份混淆与越权风险。
+- **把知识 Memory 塞进 AgentState 或改 AgentLoop**：污染 Core；Memory 是受控服务。
+- **M4 引入在线 embedding / 向量库**：破坏离线门禁与确定性评测。
+- **隐式 short→long 提升**：绕过 Policy 与审批边界。
 
 ## 后果与代价
 
@@ -140,18 +169,21 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 - Core 增加可选硬超时字段；默认 `None` 保持旧行为。
 - 价格表版本需运维维护；估算误差必须显式标记。
 - Source/Channel kind 扩展后旧客户端需容忍新枚举值。
+- Memory 独立 Store 与 Supervisor 同库需各自打开或共享路径；调用方注入 `MemoryService`。
+- 词法检索召回弱于向量；M4 以离线评测与权限正确性优先。
 
 ## 测试与证据
 
-M1–M3 实测门禁证据回填在
+M1–M4 实测门禁证据回填在
 [P7 验收账本](../acceptance/p7-production-hardening.md)；本 ADR 不复制会腐坏的读数。
 
 ## 关联文档
 
-- [P7 Spec WP-7.1–7.3](../specs/p7-production-hardening-ecosystem.md)
+- [P7 Spec WP-7.1–7.4](../specs/p7-production-hardening-ecosystem.md)
 - [可观测性指南](../guides/observability.md)（M1）
 - [Provider 路由指南](../guides/provider-routing.md)（M2）
 - [Sources / MCP 指南](../guides/sources-mcp.md)（M3）
+- [Memory 指南](../guides/memory.md)（M4）
 - [工程收口口径](../Roadmap.md)
 
 

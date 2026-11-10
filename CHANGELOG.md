@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 实现（P7 M4 Memory，2026-11-10）
+- `stableagent/memory/`：`MemoryStore`（`p7-memory-v1`）、Policy、短/长期 facade、
+  `LexicalRetriever`、`MemoryService`（降级 / erase receipt / inject）
+- `DomainEventKind` 追加 `memory.*`；离线评测 fixtures；指南
+  [memory](docs/guides/memory.md)；ADR-07 决策 15–18
+- FOCUS 45→48；与 checkpoint `MemoryCheckpointStore` 命名隔离；
+  门禁 `903 passed, 8 skipped`（覆盖 96.80%；沙箱忽略 worktree 相关）
+
 ### 实现（P7 M3 Sources / MCP，2026-11-10）
 - SlackFakeSource + GitHub Source 迁入 `supervisor/sources/`；`EffectKind.SLACK_MESSAGE`
 - `McpRegistry`（tenant allowlist、enable/disable、discovery≠invoke）

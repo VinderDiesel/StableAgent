@@ -144,6 +144,11 @@ class SandboxConfig(BaseModel):
 class MemoryConfig(BaseModel):
     short_term_enabled: bool = True
     long_term_backend: str = "none"
+    short_ttl_ms: int = 86_400_000
+    long_ttl_ms: int | None = 31_536_000_000
+    max_items_per_scope: int = 100
+    max_content_chars: int = 4_000
+
 
 
 class ControlConfig(BaseModel):
