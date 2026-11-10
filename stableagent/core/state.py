@@ -100,6 +100,8 @@ class ProviderConfig(BaseModel):
     model: str = "gpt-4o"
     api_base: str | None = None
     request_timeout_seconds: float = 60.0
+    # P7 M2：Provider 单次调用内层硬超时（asyncio）；None = 不包裹（向后兼容）
+    call_hard_timeout_seconds: float | None = None
 
 
 class ContextConfig(BaseModel):

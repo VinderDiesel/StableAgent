@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 实现（P7 M2 多 Provider / 成本路由，2026-11-10）
+- Anthropic（Messages）与 Ollama（`/api/chat`）Provider + fake transport 测试
+- `ProviderRouter` / `ProviderSelection` + `merge_provider_selection`；`control/cost`
+  （价格表、软/硬预算、`BudgetedProvider` 硬超支零调用）
+- Core：`call_hard_timeout_seconds` + `AgentLoop` `asyncio.wait_for`（ADR-07 决策 10）
+- 指南 [provider-routing](docs/guides/provider-routing.md)；FOCUS 40→42；
+  门禁 `869 passed, 8 skipped`（覆盖 97.10%）
+
 ### 实现（P7 M1 可观测性，2026-11-10）
 - 新增 `stableagent/observability/`：`DomainEvent`、脱敏、`ObservabilityStore`
   （`domain_events` + `p7-observability-v1`）、`DomainEventEmitter`（`emit` /

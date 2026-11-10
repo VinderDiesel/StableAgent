@@ -13,8 +13,8 @@ from stableagent.orchestration.errors import IdempotencyConflictError, Orchestra
 
 ROOT = pathlib.Path(stableagent.__file__).parent
 
-# P4 起点 46441f0 的 loop.py 内容哈希（M1 出口实测，与 git show 46441f0:...| shasum -a 256 一致）。
-_LOOP_SHA256_AT_P4_BASE = "27b71b6100a9813e59b25d8c016ba3e99527e6fa7dc1f895a4d446255cfc6299"
+# P7 M2 批准碰 Core：内层硬超时后的 loop.py 内容哈希（ADR-07 决策 10）。
+_LOOP_SHA256_AT_P7_M2 = "7f36273404fead0a9031c53dc127937c778656fd07df14f3b329a440e1306e6c"
 
 
 def _imports_of(path: pathlib.Path) -> set[str]:
@@ -52,10 +52,10 @@ def test_every_error_carries_a_stable_code() -> None:
     assert IdempotencyConflictError("x", "y").code == "orchestration.idempotency_conflict"
 
 
-def test_loop_py_is_byte_identical_to_p4_base() -> None:
-    """L1：M1 期间 loop.py 零 diff——用内容哈希替代 git 区间比对，测试保持离线。"""
+def test_loop_py_matches_p7_m2_hard_timeout_baseline() -> None:
+    """L1：P7 M2 起允许硬超时改动；哈希锁住已批准基线，防无 ADR 漂移。"""
     digest = hashlib.sha256((ROOT / "core" / "loop.py").read_bytes()).hexdigest()
-    assert digest == _LOOP_SHA256_AT_P4_BASE
+    assert digest == _LOOP_SHA256_AT_P7_M2
 
 
 def test_agent_state_dump_has_no_ticket_fields() -> None:

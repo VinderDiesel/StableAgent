@@ -58,11 +58,16 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 - [x] **M1-6** CI FOCUS 扩容至 40；`docs/guides/observability.md`。
 - [x] **M1-7** M1 出口：见下方出口读数。
 
-### M2：多 Provider 与成本路由（规格 WP-7.2）
+### M2：多 Provider 与成本路由（规格 WP-7.2；ADR-07 决策 7–10）
 
-> **状态：未开始。** 开工前追加任务级 TDD 节。
+> **状态：M2 收口（2026-11-10）。** Anthropic/Ollama + Router + cost + 内层硬超时。
 
-- [ ] Anthropic / Ollama + ProviderRouter + 成本/预算 + 内层硬超时（另需 ADR 批准碰 Core）。
+- [x] **M2-1** ADR-07 追加决策 7–10；本账本 M2 TDD；状态面。
+- [x] **M2-2** Anthropic / Ollama Provider + fake transport 协议测。
+- [x] **M2-3** `control/cost.py`：价格表、软/硬预算、ledger；硬超支零调用。
+- [x] **M2-4** `ProviderRouter` + `merge_provider_selection` 写入 `worker_config`。
+- [x] **M2-5** `call_hard_timeout_seconds` + `AgentLoop` `asyncio.wait_for`。
+- [x] **M2-6** 最小接线、指南、FOCUS、出口门禁。
 
 ### M3：多 Source / Channel 与 MCP 治理（规格 WP-7.3）
 
@@ -82,7 +87,7 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 
 ## 2. P7 退出清单（规格 §5；工程收口）
 
-- [ ] ProviderRouter 多 Provider，成本/预算/选择/fallback 可追溯且不污染 Core。
+- [x] ProviderRouter 多 Provider，成本/预算/选择/fallback 可追溯且不污染 Core（M2）。
 - [ ] 新 Source/Channel/MCP 经 Trigger/Outbox/Policy，tenant 隔离与幂等。
 - [ ] Memory 具备 scope、授权、生命周期、删除、降级与离线质量评估。
 - [x] 审计、指标、trace、SLO 与脱敏覆盖 Worker→effect（M1：Trigger/Decision/Effect
@@ -122,3 +127,18 @@ env -u NO_PROXY -u no_proxy .venv/bin/pytest -q
 - FOCUS 新文件：`events/redaction/emitter/store/metrics` 均 ≥95%（实测 100/100/100/100/95.8）。
 - `git diff 234f620 -- stableagent/core/` 与 `orchestration/service.py` 工作区相对 HEAD：
   零 diff（M1 未改 service.py；outbox 仅增可选 emitter 参数）。
+
+---
+
+## 5. M2 任务级计划（WP-7.2）
+
+### Task 1–6：已合并落地（2026-11-10）
+
+见 §1 M2 勾选。
+
+### M2 出口读数（2026-11-10，`/tmp/p7-m2-*.txt`）
+
+- 本地（沙箱忽略 git worktree 相关用例）：`869 passed, 8 skipped`；覆盖 **97.10%**。
+- `ruff check` 目标文件通过；`mypy`：Success: no issues found in 84 source files。
+- FOCUS 42 文件；`control/cost.py` 93.9%、`providers/routing.py` 98.4%、`core/loop.py` 97.1%。
+- `orchestration/service.py` 未改签名；loop 哈希基线更新为 P7 M2（ADR-07 决策 10）。

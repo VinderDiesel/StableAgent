@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -55,12 +56,21 @@ class AgentLoop:
         self._tool_selector = tool_selector or _select_all
         self.pause_requested = False
 
+    async def _acomplete(
+        self, messages: list[Message], tools: list[dict[str, Any]]
+    ) -> Any:
+        hard = self._config.provider.call_hard_timeout_seconds
+        coro = self._provider.acomplete(messages, tools=tools)
+        if hard is None:
+            return await coro
+        return await asyncio.wait_for(coro, timeout=hard)
+
     async def advance(self, state: AgentState) -> tuple[AgentState, list[Event]]:
         """执行一步转移：读入快照，返回新快照与本步事件。不触碰外部状态。"""
         messages = self._assembler.assemble(state.messages)
         specs = self._tool_selector(self._registry.specs(), state)
         try:
-            response = await self._provider.acomplete(messages, tools=specs)
+            response = await self._acomplete(messages, specs)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             failed = state.model_copy(update={"status": AgentStatus.FAILED, "error": detail})

@@ -46,12 +46,14 @@ FOCUS_FILES = [
     "observability/emitter.py",
     "observability/store.py",
     "observability/metrics.py",
+    "control/cost.py",
+    "providers/routing.py",
 ]
 
 
-def test_focus_covers_the_forty_cardiac_files() -> None:
+def test_focus_covers_the_forty_two_cardiac_files() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert all(f'"{name}"' in text for name in FOCUS_FILES)
-    assert len(FOCUS_FILES) == 40
-    assert "40 文件" in text  # 步骤名与注释同步
+    assert len(FOCUS_FILES) == 42
+    assert "42 文件" in text  # 步骤名与注释同步
     assert text.count('".py"') == 0  # 不许用通配兜底

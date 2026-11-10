@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-当前主线 **P7：生产化与生态扩展 — M1 可观测性已收口，下一步 M2 多 Provider**（2026-11-10）。**工程收口口径**：只看代码与离线可靠性（见 [Roadmap](Roadmap.md)）。实施入口：[P7 Spec](specs/p7-production-hardening-ecosystem.md) → [验收账本](acceptance/p7-production-hardening.md) → [ADR-07](design-decisions/07-production-hardening.md)；运维见 [可观测性指南](guides/observability.md)。**P6** 已工程收口。
+当前主线 **P7：生产化与生态扩展 — M2 已收口，下一步 M3 多 Source/MCP**。**工程收口口径**：只看代码与离线可靠性（见 [Roadmap](Roadmap.md)）。实施入口：[P7 Spec](specs/p7-production-hardening-ecosystem.md) → [验收账本](acceptance/p7-production-hardening.md) → [ADR-07](design-decisions/07-production-hardening.md)；[可观测性](guides/observability.md)、[Provider 路由](guides/provider-routing.md)。
 
 - 现行范围和阶段顺序：[Roadmap](Roadmap.md)（含工程收口口径）
-- 当前阶段 P7：[实施规格](specs/p7-production-hardening-ecosystem.md) → [验收账本与实施计划](acceptance/p7-production-hardening.md) → [ADR-07](design-decisions/07-production-hardening.md)；[可观测性指南](guides/observability.md)
+- 当前阶段 P7：[实施规格](specs/p7-production-hardening-ecosystem.md) → [验收账本](acceptance/p7-production-hardening.md) → [ADR-07](design-decisions/07-production-hardening.md)
 - 已完成阶段 P6：[实施规格](specs/p6-single-repository-super-agent-beta.md) → [验收账本（工程收口证据）](acceptance/p6-supervisor-beta.md) → [ADR-06](design-decisions/06-super-agent-router.md)；[GitHub Source](guides/supervisor-github-source.md)、[Router](guides/supervisor-router.md)、[Runtime](guides/supervisor-runtime.md)、[Console](guides/supervisor-console.md)、[Beta runbook](guides/supervisor-beta.md)、[迁移](guides/supervisor-migration.md)
 - 已完成阶段 P5：[实施规格](specs/p5-guarded-execution-repository-integration.md) → [验收账本（已完成证据）](acceptance/p5-guarded-execution.md) → [ADR-05](design-decisions/05-guarded-execution.md)
 - 已完成阶段 P4：[实施规格](specs/p4-ticket-orchestration-kernel.md) → [验收账本（已完成证据）](acceptance/p4-ticket-orchestration.md) → [ADR-04](design-decisions/04-ticket-orchestration.md)
@@ -51,7 +51,7 @@
 | P4 | 完成（DoD 60/60，里程碑 30/30） | [P4 Spec](specs/p4-ticket-orchestration-kernel.md) | [P4 Acceptance](acceptance/p4-ticket-orchestration.md) | [ADR-04](design-decisions/04-ticket-orchestration.md) |
 | P5 | 完成（DoD 46/46，里程碑 40/40；远端 CI run 42433929377 在 3.10/3.12 双绿） | [P5 Spec](specs/p5-guarded-execution-repository-integration.md) | [P5 Acceptance](acceptance/p5-guarded-execution.md) | [ADR-05](design-decisions/05-guarded-execution.md) |
 | P6 | 工程收口（2026-11-10；出口第 7 项开发阶段豁免） | [P6 Spec](specs/p6-single-repository-super-agent-beta.md) | [P6 Acceptance](acceptance/p6-supervisor-beta.md) | [ADR-06](design-decisions/06-super-agent-router.md) |
-| P7 | Active（M1 收口；下一步 M2） | [P7 Spec](specs/p7-production-hardening-ecosystem.md) | [P7 Acceptance](acceptance/p7-production-hardening.md) | [ADR-07](design-decisions/07-production-hardening.md) |
+| P7 | Active（M2 收口；下一步 M3） | [P7 Spec](specs/p7-production-hardening-ecosystem.md) | [P7 Acceptance](acceptance/p7-production-hardening.md) | [ADR-07](design-decisions/07-production-hardening.md) |
 
 ## 文档维护
 

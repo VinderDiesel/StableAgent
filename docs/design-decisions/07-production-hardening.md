@@ -70,26 +70,61 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
   `effect.failed`。
 - 不接满规格全部事件种类；其余在后续里程碑按需追加。
 
+### 7. 多 Provider 统一契约（M2 / WP-7.2）
+
+- OpenAI、Anthropic、Ollama 均只实现 `complete` / `acomplete` / `stream` 与
+  `ToolCall`/`usage` 归一化；不得新增第四种 Worker 调用形态。
+- Anthropic 走 Messages API；Ollama 钉死 `/api/chat`。离线以 httpx MockTransport
+  验收；live smoke 仅 `@pytest.mark.live`。
+
+### 8. ProviderRouter 与选择持久化
+
+- `ProviderRouter.select` 仅在 Assignment **启动前**运行；输出不可变
+  `ProviderSelection`（候选、理由、model、price_table_version、fallback 链）。
+- 选择经 `merge_provider_selection` 写入 `worker_config["provider_selection"]`；
+  禁止在已有 Worker step 内静默换模型。`providers/` 不 import `orchestration`。
+
+### 9. 成本与预算在 Core 外强制
+
+- `control/cost.py`：`PricingTable` + `BudgetPolicy` + `CostLedger`。
+- 实际 Provider usage 优先；缺失时用估算并标 `estimated=true`。
+- 硬超支不得调用 Provider；软超支返回可观测信号，外层可转审批/暂停（M2 不深改
+  ApprovalService）。租户成本规则不得塞进 `AgentLoop` 内部策略。
+
+### 10. Provider 单次调用内层硬超时（批准碰 Core）
+
+- 承接 ADR-02 后果 4 / ADR-04 处置：`ProviderConfig.call_hard_timeout_seconds`
+  （`None` = 不包裹，向后兼容）与 `request_timeout_seconds`（httpx）分离。
+- `AgentLoop.advance` 用 `asyncio.timeout` 包裹整次 `acomplete`；超时走既有
+  `provider_error` → FAILED。外层 Assignment `deadline_at` 语义不变，两层分别可配、
+  分别可观测。
+
 ## 被否决方案
 
 - **用 OpenTelemetry 替换自研事件**：增加运行时依赖与学习成本，违背 Core 轻量。
 - **把 DomainEvent 写入改到业务同一事务且失败即回滚**：违反旁路约束。
 - **扩展 `authorization_audit` 承载全部领域事件**：破坏授权表语义，难以后续裁剪。
 - **M1 引入完整多租户**：范围蔓延；字段默认值足够向前兼容。
+- **在 Worker step 中途无记录换模型**：破坏可重放与审计。
+- **把预算判定塞进 AgentLoop 内部**：污染 Core；预算属外层/Assignment policy。
 
 ## 后果与代价
 
 - `SupervisorStore` 继承链多一层；打开旧库会多一张表与一个 marker。
 - 事件种类初期不全，仪表盘需容忍缺失 kind。
 - 进程内 Metrics 不跨进程聚合；多实例需外置 sink（P7 后续）。
+- Core 增加可选硬超时字段；默认 `None` 保持旧行为。
+- 价格表版本需运维维护；估算误差必须显式标记。
 
 ## 测试与证据
 
-M1 实测门禁、脱敏与旁路失败证据回填在
+M1/M2 实测门禁证据回填在
 [P7 验收账本](../acceptance/p7-production-hardening.md)；本 ADR 不复制会腐坏的读数。
 
 ## 关联文档
 
-- [P7 Spec WP-7.1](../specs/p7-production-hardening-ecosystem.md)
-- [可观测性指南](../guides/observability.md)（M1 交付）
+- [P7 Spec WP-7.1 / WP-7.2](../specs/p7-production-hardening-ecosystem.md)
+- [可观测性指南](../guides/observability.md)（M1）
+- [Provider 路由指南](../guides/provider-routing.md)（M2）
 - [工程收口口径](../Roadmap.md)
+
