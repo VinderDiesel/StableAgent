@@ -206,19 +206,43 @@ supervisor。
       `docs/guides/supervisor-console.md`、全量门禁与账本回填。
       `tests/unit/test_ci_focus_gate.py` 1 passed（35 文件、无通配兜底）；出口读数见 §12。
 
-### M6：Beta 演练与发布门禁（规格 WP-6.6；待 M5 收口后展开）
+### M6：Beta 演练与发布门禁（规格 WP-6.6）
+
+> **状态：M6 收口（Task 1~6 全部完成）。** 离线演练示例 06（run/report 两 phase）+
+> 只读 `BetaReport`（`views.beta_report` ← `store.beta_snapshot`）+ 真实仓库 runbook +
+> ADR-06 决策 11。真实 GitHub HTTP 客户端不在 M6 实现；真实 Beta 数据由维护者按 runbook
+> 回填前，P6 出口第 7 项保持未勾。任务级计划见 §13，自检与出口读数见 §13 末尾。
+
+- [x] **M6-1** BetaSnapshot 与 BetaReport 只读聚合：`store.beta_snapshot()` 11 字段
+      SQL 聚合（json_each 展开 reason_codes），`views.beta_report()` 冻结模型不返回
+      payload。`tests/unit/test_supervisor_views.py` 15 passed（新增 2 例）、
+      `tests/unit/test_supervisor_store.py` 23 passed 回归；提交 `1bb4ba8`。
+- [x] **M6-2** 示例 06 run phase 离线演练：多 Issue/PR/CI Trigger、两个并发 Ticket、
+      FAILED/WAITING/READY→COMPLETED 后评论经 operator resume 恢复；断言外部评论恰好
+      一次、同 Thread 不重复建票、bot 自事件过滤。
+      `tests/integration/test_superagent_beta.py` 1 passed；提交 `ac5b164`。
+- [x] **M6-3** 示例 06 report phase：只读同一 `beta.db` 输出 `BETA_REPORT <json>`，
+      不写业务数据、不发外部消息。同文件 2 passed（新增 1 例）；提交 `8b47ab8`。
+- [x] **M6-4** 真实仓库 Beta runbook：`docs/guides/supervisor-beta.md` 声明真实 HTTP
+      客户端前置缺口、安全边界、record-only→explicit 两阶段、人工数据记录表（PR 重复数
+      必须为 0）、回滚与发布门禁；相对链接均指向既有文件。提交 `f9e58f7`。
+- [x] **M6-5** ADR-06 决策 11 与状态面收口：离线先行、observe 数据是 auto 唯一依据；
+      账本 §1/§2/§3/§4 与 README/docs/CHANGELOG 同步到 M6 完成。
+- [x] **M6-6** 全量门禁、三解释器矩阵与出口回填：FOCUS 35 不变（store/views 已在列），
+      出口读数见 §13。
 
 ## 2. P6 退出清单（规格 §4）
 
-- [ ] GitHub Source 将所有支持事件确定性映射为 Trigger/Thread/Channel，并持久化
+- [x] GitHub Source 将所有支持事件确定性映射为 Trigger/Thread/Channel，并持久化
       cursor/去重状态。
-- [ ] Router 是 Trigger、Decision、Subscription 与 Ticket 创建的唯一写入口。
-- [ ] 所有显式任务经过 P5 Policy/Mandate；推断候选在 `observe` 只记录、不执行。
-- [ ] Ticket 后续评论、PR 和 CI 输入正确归属，且不会因此扩大授权。
-- [ ] Router、Source、Outbox、Scheduler 和 Worker 的崩溃恢复不丢失或重复语义副作用。
-- [ ] 监管入口以待人工事项为首要视图，所有外部消息符合注意力预算。
+- [x] Router 是 Trigger、Decision、Subscription 与 Ticket 创建的唯一写入口。
+- [x] 所有显式任务经过 P5 Policy/Mandate；推断候选在 `observe` 只记录、不执行。
+- [x] Ticket 后续评论、PR 和 CI 输入正确归属，且不会因此扩大授权。
+- [x] Router、Source、Outbox、Scheduler 和 Worker 的崩溃恢复不丢失或重复语义副作用。
+- [x] 监管入口以待人工事项为首要视图，所有外部消息符合注意力预算。
 - [ ] 单仓库 Beta 有 dry-run 记录、明确风险边界、回滚步骤和可审计数据。
-- [ ] 所有离线门禁通过；新增 supervisor 核心模块的 CI 覆盖率 ≥90%。
+      （真实 Beta 数据由维护者按 runbook 回填前不勾，见 §13 决议 1）
+- [x] 所有离线门禁通过；新增 supervisor 核心模块的 CI 覆盖率 ≥90%。
 
 ## 3. 阶段验证命令（收口前须在 CI 复现）
 
@@ -231,6 +255,7 @@ supervisor。
   tests/unit/test_supervisor_service.py
 .venv/bin/pytest -q tests/unit/test_supervisor_runtime.py \
   tests/integration/test_superagent_recovery.py
+.venv/bin/pytest -q tests/integration/test_superagent_beta.py
 .venv/bin/ruff check stableagent tests examples benchmarks
 .venv/bin/ruff format --check stableagent tests examples benchmarks
 .venv/bin/mypy
@@ -243,7 +268,8 @@ git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py   # 必须
 
 M1 展开为 **8 个 Task / 47 个 Step**，M2 展开为 **7 个 Task / 43 个 Step**，M3 展开为
 **7 个 Task / 38 个 Step**，M4 展开为 **7 个 Task / 39 个 Step**，M5 展开为
-**8 个 Task / 44 个 Step**。每个 Task 独立可验收、独立提交；Task 之间的接口在各自
+**8 个 Task / 44 个 Step**，M6 展开为 **6 个 Task / 27 个 Step**。每个 Task 独立可验收、
+独立提交；Task 之间的接口在各自
 `Interfaces` 块写清。任务级 Step 不计入里程碑步骤。
 
 ## 5. M1 任务级实施计划（writing-plans 产出，2026-11-08）

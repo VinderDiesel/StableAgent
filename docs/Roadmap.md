@@ -321,10 +321,10 @@ Channel ← Durable Outbox ← Report / Result ←──────────
 - 仅在需要决策、审批、失败或结果可用时通知人。
 - 在 `observe` 模式下完成足够的真实数据评估，再决定哪些规则可切换 `auto`。
 
-**当前进度（2026-11-09）**：M1 基础层（8/8）、M2 GitHub Source（8/8）、M3 Router Intake
-（8/8）、M4 常驻调度（7/7）与 M5 最小监管面（8/8）完成——M1 落地 ADR-06、
-`supervisor/` 领域模型、`SupervisorStore`（P5 库无损扩展、同连接同事务）与六个只读
-监管视图；M2 接入只读 polling：Issue/PR/评论/评审/CI status 标准化为
+**当前进度（2026-11-10）**：M1 基础层（8/8）、M2 GitHub Source（8/8）、M3 Router Intake
+（8/8）、M4 常驻调度（7/7）、M5 最小监管面（8/8）与 M6 Beta 演练（6/6）完成——M1 落地
+ADR-06、`supervisor/` 领域模型、`SupervisorStore`（P5 库无损扩展、同连接同事务）与六个
+只读监管视图；M2 接入只读 polling：Issue/PR/评论/评审/CI status 标准化为
 Trigger/Thread/Channel，cursor 分页可续、双重去重、错误四分类落 `source_health`；
 M3 把 `receive(trigger)` 收敛为唯一入口：Trigger 去重、Subscription 扇出、explicit
 五件原子写、六种 outcome、`unavailable` 重评估与运维命令层
@@ -332,14 +332,18 @@ M3 把 `receive(trigger)` 收敛为唯一入口：Trigger 去重、Subscription 
 单例行实现单实例锁、启动恢复、暂停与优雅停止，启动顺序固定为锁 → recover → 读暂停 →
 补路由，五个崩溃窗口各有集成证明；M5 提供 CLI-only 监管面：首屏按注意力排序、写命令
 必须 `--confirm`，生命周期通知先草拟成 `COMMENT_ISSUE` 审批，人工批准后在同一事务入队
-effect，拒绝即静默。CI 心脏覆盖率闸门 25→28→29→32→33→35。本地门禁
-`874 passed, 6 skipped`（覆盖 98.53%），Python 3.10 / 3.11 / 3.12 一致。逐项证据见
+effect，拒绝即静默；M6 交付离线演练示例 06（run/report 两 phase）、只读 `BetaReport`
+与真实仓库 [Beta runbook](guides/supervisor-beta.md)，ADR-06 决策 11 钉住"observe 数据
+是 auto 的唯一依据"。CI 心脏覆盖率闸门 25→28→29→32→33→35。本地门禁
+`878 passed, 6 skipped`（覆盖 98.54%），Python 3.10 / 3.11 / 3.12 一致。逐项证据见
 [P6 验收账本](acceptance/p6-supervisor-beta.md)，部署口径见
 [GitHub Source 指南](guides/supervisor-github-source.md)、
 [Router 运维指南](guides/supervisor-router.md)、
-[Runtime 运维指南](guides/supervisor-runtime.md) 与
-[监管控制台指南](guides/supervisor-console.md)。下一步：M6 Beta 演练与发布门禁
-（规格 WP-6.6）。
+[Runtime 运维指南](guides/supervisor-runtime.md)、
+[监管控制台指南](guides/supervisor-console.md) 与
+[Beta runbook](guides/supervisor-beta.md)。真实 Beta 数据待维护者按 runbook 回填，
+回填前 P6 出口第 7 项保持未勾。下一步：P7 生产化与生态扩展（多 Provider、多 Source
+与平台部署）。
 
 ---
 

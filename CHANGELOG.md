@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+### 实现（P6 M6 Beta 演练，2026-11-10）
+- `stableagent/supervisor/store.py`：`BetaSnapshot` 与 `beta_snapshot()` 只读聚合 11
+  字段（triggers/decisions/decision_reasons/would_accept/tickets/recovered_assignments/
+  approvals/notification_counts/effects/retried_effects/source_health）；reason_codes
+  用 `json_each` 展开，GROUP BY + ORDER BY 保证确定性；不返回任何 payload
+- `stableagent/supervisor/views.py`：`BetaReport` 冻结模型与 `beta_report(store)`，
+  Beta 数据报告是只读视图而非新命令面
+- `examples/06_superagent_beta.py`：离线演练 run/report 两 phase——多 Issue/PR/CI
+  Trigger、两个并发 Ticket、FAILED/WAITING/READY→COMPLETED 后评论经 operator resume
+  恢复；断言外部评论恰好一次、同 Thread 不重复建票、bot 自事件过滤；report 只读同一
+  `beta.db` 输出 `BETA_REPORT <json>`
+- 新增 [Beta runbook](docs/guides/supervisor-beta.md)：声明真实 GitHub HTTP 客户端前置
+  缺口，单仓库/专用 bot/allowlist/observe/最小 token、record-only→explicit 两阶段、
+  人工数据记录表（PR 重复数必须为 0）、回滚与发布门禁；真实 Beta 由维护者执行并回填
+- ADR-06 决策 11：离线先行，`observe` 数据是 P7 允许任何规则进入 `auto` 的唯一依据；
+  真实 Beta 数据回填前 P6 出口第 7 项保持未勾
+- 门禁：全量 `878 passed, 6 skipped`，覆盖 98.54%，`store.py` 100% / `views.py` 95%，
+  FOCUS 仍 35 文件，3.10/3.11/3.12 一致；L1 与 `orchestration/service.py` 零 diff
+
 ### 实现（P6 M5 Console，2026-11-09）
 - `stableagent/supervisor/views.py`：注意力排序固定为 approval 0 → failed_effect 1 →
   waiting_ticket 2 → ready_ticket 3；`StatusSections` 汇总队列、source_health 与

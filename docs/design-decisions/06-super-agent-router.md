@@ -113,6 +113,17 @@ supervisor → integrations → execution → control → orchestration → core
 - 降级需要旧二进制忽略新表；由于没有列变更，P5 二进制可直接打开 P6 库读取旧表。
 - 运维文档必须写明备份、marker 检查与降级步骤（WP-6.1 交付，随 Beta 文档落盘）。
 
+### 11. Beta 演练与发布门禁：离线先行，observe 数据是 auto 的唯一依据
+
+- M6 交付可复现的离线演练（`examples/06_superagent_beta.py`）与只读 `BetaReport`
+  （`views.beta_report` ← `store.beta_snapshot`）；真实 GitHub HTTP 客户端不在 M6 实现，
+  真实仓库 Beta 由维护者按 [Beta runbook](../guides/supervisor-beta.md) 执行并回填账本。
+- `BetaReport` 字段固定：triggers/decisions/decision_reasons/would_accept/tickets/
+  recovered_assignments/approvals/notification_counts/effects/retried_effects/source_health；
+  只读、不返回 payload。误报/漏报与人工接受/拒绝原因只进 runbook 人工记录表。
+- 发布门禁：`observe` 数据是 P7 允许任何规则进入 `auto` 的唯一依据；PR 重复数必须为 0；
+  真实 Beta 数据回填前 P6 出口第 7 项保持未勾。
+
 ## 被否决方案
 
 - **独立 supervisor SQLite**：包边界更干净，但 Trigger/Decision 与 Ticket/Assignment
