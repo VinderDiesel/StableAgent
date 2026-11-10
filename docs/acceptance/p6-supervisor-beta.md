@@ -13792,6 +13792,8 @@ git commit -m "docs: backfill p6 m6 exit readings"
   `/tmp/p6-m6-diffcheck.txt` 均为 0 字节（收口提交 `be6b86b` 后对最终 HEAD 复核）——
   `stableagent/core/` 与 `orchestration/service.py` 对 `234f620` 零 diff，既有包无
   反向 import。
+- **远端 CI：** 推送 `0441f23..ae679d7` 后 run `42772123961`（head `ae679d7`）
+  `quality (3.10)` 与 `quality (3.12)` 双 job `success`（GitHub Actions API 读回）。
 - **示例两 phase：** `/tmp/p6-m6-run.txt` 末行 `BETA_RESULT tickets=3 resumed=1
   external_comments=1 duplicate_tickets=0 bot_triggers=0`；`/tmp/p6-m6-report.txt`
   末行 `BETA_REPORT {...}`，`tickets={"failed":1,"ready":1,"waiting":1}`、
