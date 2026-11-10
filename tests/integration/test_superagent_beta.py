@@ -58,3 +58,19 @@ async def test_run_phase_rehearses_the_beta_scenario(tmp_path: Path) -> None:
         assert sum(report.notification_counts.values()) >= 3
     finally:
         store.close()
+
+
+async def test_report_phase_reads_the_same_database(tmp_path: Path) -> None:
+    code, out = await _run_example("--phase", "run", "--dir", str(tmp_path / "demo"))
+    assert code == 0, out
+    code, out = await _run_example("--phase", "report", "--dir", str(tmp_path / "demo"))
+    assert code == 0, out
+    line = next(item for item in out.splitlines() if item.startswith("BETA_REPORT "))
+    payload = json.loads(line.removeprefix("BETA_REPORT "))
+    assert payload["tickets"] == {"failed": 1, "ready": 1, "waiting": 1}
+    assert payload["would_accept"] == 1
+    assert payload["recovered_assignments"] == 1
+    assert payload["retried_effects"] == 0
+    assert payload["effects"]["github_comment:succeeded"] == 1
+    assert payload["approvals"]["comment_issue:approved"] == 1
+    assert payload["triggers"]["issue_comment"] == 1

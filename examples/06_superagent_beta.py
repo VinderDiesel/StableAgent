@@ -8,6 +8,7 @@
 
 用法：
     python examples/06_superagent_beta.py --phase run --dir .demo-beta
+    python examples/06_superagent_beta.py --phase report --dir .demo-beta
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from stableagent.supervisor.router import RouterConfig
 from stableagent.supervisor.runtime import RuntimeBundle, RuntimeConfig, build_runtime
 from stableagent.supervisor.source import GitHubSource
 from stableagent.supervisor.store import SupervisorStore
+from stableagent.supervisor.views import beta_report
 
 REPOSITORY = "owner/repo"
 BOT_LOGIN = "agent"
@@ -355,13 +357,28 @@ async def _run_phase(root: Path) -> int:
         store.close()
 
 
+def _report_phase(root: Path) -> int:
+    store = SupervisorStore(root / "beta.db", clock=DemoClock())
+    try:
+        report = beta_report(store)
+        print(
+            "BETA_REPORT "
+            + json.dumps(report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        )
+        return 0
+    finally:
+        store.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=("run",), default="run")
+    parser.add_argument("--phase", choices=("run", "report"), default="run")
     parser.add_argument("--dir", default=".demo-beta")
     args = parser.parse_args(argv)
     root = Path(args.dir).resolve()
-    return asyncio.run(_run_phase(root))
+    if args.phase == "run":
+        return asyncio.run(_run_phase(root))
+    return _report_phase(root)
 
 
 if __name__ == "__main__":
