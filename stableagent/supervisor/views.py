@@ -142,6 +142,39 @@ class StatusSections(BaseModel):
     queue: QueueCounts
 
 
+class BetaReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    triggers: dict[str, int]
+    decisions: dict[str, int]
+    decision_reasons: dict[str, int]
+    would_accept: int
+    tickets: dict[str, int]
+    recovered_assignments: int
+    approvals: dict[str, int]
+    notification_counts: dict[str, int]
+    effects: dict[str, int]
+    retried_effects: int
+    source_health: tuple[SourceCursor, ...]
+
+
+def beta_report(store: SupervisorStore) -> BetaReport:
+    snapshot = store.beta_snapshot()
+    return BetaReport(
+        triggers=snapshot.triggers,
+        decisions=snapshot.decisions,
+        decision_reasons=snapshot.decision_reasons,
+        would_accept=snapshot.would_accept,
+        tickets=snapshot.tickets,
+        recovered_assignments=snapshot.recovered_assignments,
+        approvals=snapshot.approvals,
+        notification_counts=snapshot.notification_counts,
+        effects=snapshot.effects,
+        retried_effects=snapshot.retried_effects,
+        source_health=snapshot.source_health,
+    )
+
+
 def thread_url(thread: Thread) -> str | None:
     """展示用链接：Issue/PR 指向具体条目，Review/Repository 按规格回落仓库 URL。"""
     base = f"https://github.com/{thread.repository}"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,21 @@ def _row_to_runtime_control(row: sqlite3.Row) -> RuntimeControl:
         changed_at=row["changed_at"],
         generation=row["generation"],
     )
+
+
+@dataclass(frozen=True)
+class BetaSnapshot:
+    triggers: dict[str, int]
+    decisions: dict[str, int]
+    decision_reasons: dict[str, int]
+    would_accept: int
+    tickets: dict[str, int]
+    recovered_assignments: int
+    approvals: dict[str, int]
+    notification_counts: dict[str, int]
+    effects: dict[str, int]
+    retried_effects: int
+    source_health: tuple[SourceCursor, ...]
 
 
 class SupervisorStore(Store):
@@ -574,3 +590,48 @@ class SupervisorStore(Store):
             if ticket is not None:
                 tickets.append(ticket)
         return tickets
+
+    # ---------------------------------------------------------- Beta 只读报告
+    def beta_snapshot(self) -> BetaSnapshot:
+        """WP-6.6 决议 2：Beta 数据报告的事实源；只读聚合，不返回任何 payload。"""
+        return BetaSnapshot(
+            triggers=self._group_counts(
+                "SELECT kind, COUNT(*) FROM triggers GROUP BY kind ORDER BY kind"
+            ),
+            decisions=self._group_counts(
+                "SELECT outcome, COUNT(*) FROM decisions GROUP BY outcome ORDER BY outcome"
+            ),
+            decision_reasons=self._group_counts(
+                "SELECT j.value, COUNT(*) FROM decisions d, json_each(d.reason_codes) j"
+                " GROUP BY j.value ORDER BY j.value"
+            ),
+            would_accept=self._count(
+                "SELECT COUNT(*) FROM decisions d WHERE d.outcome = 'observe'"
+                " AND d.strength = 'inferred' AND EXISTS ("
+                " SELECT 1 FROM json_each(d.reason_codes) WHERE value = 'inferred_candidate')"
+            ),
+            tickets=self._group_counts(
+                "SELECT status, COUNT(*) FROM tickets GROUP BY status ORDER BY status"
+            ),
+            recovered_assignments=self._count("SELECT COUNT(*) FROM assignments WHERE attempt > 1"),
+            approvals=self._group_counts(
+                "SELECT action || ':' || status, COUNT(*) FROM approval_requests"
+                " GROUP BY action, status ORDER BY action, status"
+            ),
+            notification_counts=self._group_counts(
+                "SELECT ticket_id, COUNT(*) FROM approval_requests"
+                " WHERE reason LIKE 'notification:%' GROUP BY ticket_id ORDER BY ticket_id"
+            ),
+            effects=self._group_counts(
+                "SELECT kind || ':' || state, COUNT(*) FROM effects"
+                " GROUP BY kind, state ORDER BY kind, state"
+            ),
+            retried_effects=self._count("SELECT COUNT(*) FROM effects WHERE attempts > 1"),
+            source_health=tuple(self.list_source_cursors()),
+        )
+
+    def _group_counts(self, sql: str) -> dict[str, int]:
+        return {str(row[0]): int(row[1]) for row in self._conn.execute(sql).fetchall()}
+
+    def _count(self, sql: str) -> int:
+        return int(self._conn.execute(sql).fetchone()[0])

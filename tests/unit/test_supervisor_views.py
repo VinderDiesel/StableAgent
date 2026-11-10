@@ -34,7 +34,7 @@ from stableagent.supervisor.model import (
     TriggerKind,
 )
 from stableagent.supervisor.store import SupervisorStore
-from stableagent.supervisor.views import SupervisorViews, thread_url
+from stableagent.supervisor.views import SupervisorViews, beta_report, thread_url
 from tests.support import FixedClock
 
 
@@ -420,3 +420,147 @@ def test_thread_timeline_events_carry_object_ids(store: SupervisorStore) -> None
     events = SupervisorViews(store).thread_timeline("issue:acme/widgets#1")
 
     assert [event.object_id for event in events] == ["tg-1", "dc-1"]
+
+
+def test_beta_report_aggregates_rehearsal_metrics(store: SupervisorStore) -> None:
+    _ticket(store, "tk-a", TicketStatus.QUEUED)
+    _ticket(store, "tk-b", TicketStatus.FAILED)
+    store.insert_trigger(
+        Trigger(
+            id="tg-1",
+            external_id="github:o/r:issue:1",
+            kind=TriggerKind.ISSUE,
+            actor="alice",
+            thread_keys=["issue:o/r#1"],
+            occurred_at=1,
+            received_at=2,
+            payload={"body": "DO-NOT-LEAK"},
+        )
+    )
+    store.insert_trigger(
+        Trigger(
+            id="tg-2",
+            external_id="github:o/r:ci_status:9",
+            kind=TriggerKind.CI_STATUS,
+            actor="github",
+            thread_keys=["repo:o/r"],
+            occurred_at=3,
+            received_at=4,
+            payload={},
+        )
+    )
+    for decision_id, digest, outcome, strength, reasons, trigger_ids in (
+        ("dc-1", "d-1", DecisionOutcome.ACCEPT, DecisionStrength.EXPLICIT, ["admitted"], ["tg-1"]),
+        (
+            "dc-2",
+            "d-2",
+            DecisionOutcome.OBSERVE,
+            DecisionStrength.INFERRED,
+            ["inferred_candidate"],
+            [],
+        ),
+        (
+            "dc-3",
+            "d-3",
+            DecisionOutcome.OBSERVE,
+            DecisionStrength.INFERRED,
+            ["ci_context_only"],
+            ["tg-2"],
+        ),
+        (
+            "dc-4",
+            "d-4",
+            DecisionOutcome.OBSERVE,
+            DecisionStrength.INFERRED,
+            ["already_owned"],
+            [],
+        ),
+    ):
+        store.insert_decision(
+            Decision(
+                id=decision_id,
+                trigger_ids=trigger_ids,
+                outcome=outcome,
+                strength=strength,
+                reason_codes=reasons,
+                policy_version="p6-v1",
+                request_digest=digest,
+                created_at=5,
+            )
+        )
+    store.insert_assignment(Assignment(id="as-1", ticket_id="tk-a", attempt=1))
+    store.insert_assignment(Assignment(id="as-2", ticket_id="tk-a", attempt=2))
+    store.insert_approval(
+        id="ap-1",
+        ticket_id="tk-a",
+        action="comment_issue",
+        resource_digest="ra-1",
+        reason="notification:accepted",
+        requested_at=1,
+    )
+    store.insert_approval(
+        id="ap-2",
+        ticket_id="tk-a",
+        action="comment_issue",
+        resource_digest="ra-2",
+        reason="notification:result",
+        requested_at=2,
+        status="approved",
+        decided_by="alice",
+        decided_at=3,
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-1",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="k-1",
+            state=EffectState.SUCCEEDED,
+            attempts=2,
+            due_at=1,
+        )
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-2",
+            kind=EffectKind.LAUNCH_ASSIGNMENT,
+            idempotency_key="k-2",
+            state=EffectState.PENDING,
+            due_at=1,
+        )
+    )
+    store.put_source_cursor(SourceCursor(source="github", cursor="9", health=SourceHealth.OK))
+
+    report = beta_report(store)
+
+    assert report.triggers == {"issue": 1, "ci_status": 1}
+    assert report.decisions == {"accept": 1, "observe": 3}
+    assert report.decision_reasons == {
+        "admitted": 1,
+        "already_owned": 1,
+        "ci_context_only": 1,
+        "inferred_candidate": 1,
+    }
+    assert report.would_accept == 1
+    assert report.tickets == {"queued": 1, "failed": 1}
+    assert report.recovered_assignments == 1
+    assert report.approvals == {"comment_issue:approved": 1, "comment_issue:pending": 1}
+    assert report.notification_counts == {"tk-a": 2}
+    assert report.effects == {"github_comment:succeeded": 1, "launch_assignment:pending": 1}
+    assert report.retried_effects == 1
+    assert [cursor.health for cursor in report.source_health] == [SourceHealth.OK]
+    assert "DO-NOT-LEAK" not in report.model_dump_json()
+
+
+def test_beta_report_on_empty_database_is_zero(store: SupervisorStore) -> None:
+    report = beta_report(store)
+    assert report.triggers == {}
+    assert report.decisions == {}
+    assert report.decision_reasons == {}
+    assert report.would_accept == 0
+    assert report.tickets == {}
+    assert report.recovered_assignments == 0
+    assert report.approvals == {}
+    assert report.notification_counts == {}
+    assert report.effects == {}
+    assert report.retried_effects == 0
+    assert report.source_health == ()
