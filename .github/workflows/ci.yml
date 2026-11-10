@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,server]"
       - name: Lint (ruff 0 error)
         run: ruff check stableagent tests examples benchmarks
       - name: Format check
@@ -26,7 +26,7 @@ jobs:
         run: mypy
       - name: Tests + coverage (全库门槛 70%，见 pyproject fail_under)
         run: pytest --cov=stableagent --cov-report=xml --cov-report=term-missing
-      - name: 心脏模块覆盖率闸门（48 文件：含 memory/store、policy、retrieval ≥90%）
+      - name: 心脏模块覆盖率闸门（51 文件：含 control/tenancy、rbac、transport/sse ≥90%）
         run: |
           python - <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -79,6 +79,9 @@ jobs:
               "memory/store.py",
               "memory/policy.py",
               "memory/retrieval.py",
+              "control/tenancy.py",
+              "control/rbac.py",
+              "transport/sse.py",
           )
           rows = [
               (k.get("filename", ""), 100 * float(k.get("line-rate")))

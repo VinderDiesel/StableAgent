@@ -148,6 +148,29 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 - `inject_into_messages` 供 Context 侧可选注入；`core/loop.py` 与
   `orchestration/service.py` 零签名改动。`MemoryConfig` 仅兼容扩展字段。
 
+### 19. optional `server` extra（M5 / WP-7.5）
+
+- FastAPI 仅进 `[project.optional-dependencies].server`；core 安装不得带入 Web 运行时。
+- `stableagent.api` 在缺少 fastapi 时抛清晰 ImportError。
+- API 只调用 Console / SupervisorService / ApprovalService / OrchestrationService /
+  Views；禁止路由直写 SQLite 或绕过 Policy/Outbox。
+
+### 20. Header Principal RBAC（非 JWT）
+
+- `Principal(tenant_id, actor_id, roles)`；请求头 `X-Tenant-Id` / `X-Actor-Id` /
+  `X-Roles`。角色等级：viewer → reviewer → operator → admin。
+- 写动作按矩阵授权并记审计；viewer 只读。不做 OIDC/JWT IdP。
+
+### 21. SSE only；租户 = key + 行过滤
+
+- `transport/sse.py`：Ticket 时间线 cursor / 重连 / 缓冲上限 / 授权重检 / 脱敏。
+- 无 WebSocket。租户不做独立库：`control/tenancy.py` 路径与断言；API app 绑定
+  `tenant_id`，Principal 不匹配则 403。
+
+### 22. 最小监管 UI
+
+- FastAPI 托管静态注意力板 HTML（无 SPA）；行动调 JSON API；不做像素 E2E。
+
 ## 被否决方案
 
 - **用 OpenTelemetry 替换自研事件**：增加运行时依赖与学习成本，违背 Core 轻量。
@@ -160,6 +183,9 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 - **把知识 Memory 塞进 AgentState 或改 AgentLoop**：污染 Core；Memory 是受控服务。
 - **M4 引入在线 embedding / 向量库**：破坏离线门禁与确定性评测。
 - **隐式 short→long 提升**：绕过 Policy 与审批边界。
+- **FastAPI 进 core 依赖**：违背轻量 Worker 安装面。
+- **M5 引入 JWT/OIDC**：运维与密钥面过大；Header Principal 足够离线验收。
+- **每租户独立库（M5）**：迁移成本高；tenant key + 行过滤先落地。
 
 ## 后果与代价
 
@@ -174,16 +200,17 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 
 ## 测试与证据
 
-M1–M4 实测门禁证据回填在
+M1–M5 实测门禁证据回填在
 [P7 验收账本](../acceptance/p7-production-hardening.md)；本 ADR 不复制会腐坏的读数。
 
 ## 关联文档
 
-- [P7 Spec WP-7.1–7.4](../specs/p7-production-hardening-ecosystem.md)
+- [P7 Spec WP-7.1–7.5](../specs/p7-production-hardening-ecosystem.md)
 - [可观测性指南](../guides/observability.md)（M1）
 - [Provider 路由指南](../guides/provider-routing.md)（M2）
 - [Sources / MCP 指南](../guides/sources-mcp.md)（M3）
 - [Memory 指南](../guides/memory.md)（M4）
+- [API Server 指南](../guides/api-server.md)（M5）
 - [工程收口口径](../Roadmap.md)
 
 

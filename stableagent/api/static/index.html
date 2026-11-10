@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>StableAgent Attention</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; background: #f6f4ef; color: #1c1917; }
+    header { padding: 1.25rem 1.5rem; background: #1c1917; color: #fafaf9; }
+    header h1 { margin: 0; font-size: 1.25rem; letter-spacing: 0.02em; }
+    header p { margin: 0.35rem 0 0; opacity: 0.75; font-size: 0.9rem; }
+    main { max-width: 52rem; margin: 0 auto; padding: 1.25rem 1.5rem 3rem; }
+    section { margin-bottom: 1.5rem; }
+    h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.08em; color: #78716c; }
+    .card { background: #fff; border: 1px solid #e7e5e4; padding: 0.85rem 1rem; margin: 0.5rem 0; }
+    .meta { font-size: 0.85rem; color: #57534e; }
+    button { margin-right: 0.4rem; margin-top: 0.5rem; }
+    #err { color: #b91c1c; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>StableAgent</h1>
+    <p>注意力板 — approval → 失败 → ready → 健康</p>
+  </header>
+  <main>
+    <p class="meta">Headers: X-Tenant-Id / X-Actor-Id / X-Roles（默认 viewer）</p>
+    <pre id="err"></pre>
+    <section>
+      <h2>Attention</h2>
+      <div id="attention"></div>
+    </section>
+    <section>
+      <h2>Queue / Health</h2>
+      <pre id="queue" class="card"></pre>
+    </section>
+  </main>
+  <script>
+    const headers = {
+      "X-Tenant-Id": localStorage.getItem("sa_tenant") || "default",
+      "X-Actor-Id": localStorage.getItem("sa_actor") || "viewer-1",
+      "X-Roles": localStorage.getItem("sa_roles") || "viewer",
+      "Content-Type": "application/json",
+    };
+    async function load() {
+      const err = document.getElementById("err");
+      err.textContent = "";
+      try {
+        const res = await fetch("/v1/status", { headers });
+        const body = await res.json();
+        if (!res.ok) throw new Error(JSON.stringify(body));
+        const att = document.getElementById("attention");
+        att.innerHTML = "";
+        const items = body.sections.attention || [];
+        if (!items.length) att.innerHTML = "<div class='card meta'>none</div>";
+        for (const item of items) {
+          const el = document.createElement("div");
+          el.className = "card";
+          el.innerHTML = `<strong>${item.priority} ${item.source}</strong>
+            <div class="meta">${item.detail}</div>
+            <div class="meta">target=${item.target_id} ticket=${item.ticket_id || "-"}</div>`;
+          att.appendChild(el);
+        }
+        document.getElementById("queue").textContent = JSON.stringify({
+          queue: body.sections.queue,
+          runtime: body.runtime,
+          source_health: body.sections.source_health,
+        }, null, 2);
+      } catch (e) {
+        err.textContent = String(e);
+      }
+    }
+    load();
+  </script>
+</body>
+</html>

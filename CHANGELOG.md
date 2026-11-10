@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 实现（P7 M5 FastAPI / Tenancy，2026-11-10）
+- optional `server` extra（FastAPI）；`stableagent.api` + Header Principal RBAC
+- `control/tenancy` / `control/rbac`；`transport/sse`；最小注意力板 UI
+- API 只经 Console；跨租户 403；SSE cursor/背压/脱敏；FOCUS 48→51
+- ADR-07 决策 19–22；指南 [api-server](docs/guides/api-server.md)；
+  门禁 `916 passed, 8 skipped`（覆盖 95.79%）
+
 ### 实现（P7 M4 Memory，2026-11-10）
 - `stableagent/memory/`：`MemoryStore`（`p7-memory-v1`）、Policy、短/长期 facade、
   `LexicalRetriever`、`MemoryService`（降级 / erase receipt / inject）

@@ -87,9 +87,14 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 - [x] **M4-3** `LexicalRetriever` + `MemoryService`（降级 / erase / inject）+ 领域事件。
 - [x] **M4-4** 离线评测、指南、FOCUS、出口门禁。
 
-### M5：FastAPI、Transport、监管 UI 与多租户（规格 WP-7.5）
+### M5：FastAPI、Transport、监管 UI 与多租户（规格 WP-7.5；ADR-07 决策 19–22）
 
-- [ ] optional `server` extra、SSE、RBAC、真实租户隔离。
+> **状态：M5 收口（2026-11-10）。** optional server extra + RBAC + SSE + 最小 UI。
+
+- [x] **M5-1** ADR-07 决策 19–22；本账本 M5 TDD；状态面。
+- [x] **M5-2** tenancy / rbac + server extra + create_app 骨架。
+- [x] **M5-3** API 读写路由 + SSE + 最小 UI + 负面/跨租户测。
+- [x] **M5-4** 指南、FOCUS、出口门禁。
 
 ### M6：部署、auto 与终点收口（规格 WP-7.6）
 
@@ -103,8 +108,8 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 - [x] Memory 具备 scope、授权、生命周期、删除、降级与离线质量评估（M4）。
 - [x] 审计、指标、trace、SLO 与脱敏覆盖 Worker→effect（M1：Trigger/Decision/Effect
       旁路事件 + 脱敏 + 指标 + ticket trace；SLO 配置化留后续）。
-- [ ] FastAPI、SSE、RBAC 与最小监管 UI 可部署且不绕过服务边界。
-- [ ] 多租户资源彼此隔离。
+- [x] FastAPI、SSE、RBAC 与最小监管 UI 可部署且不绕过服务边界（M5）。
+- [x] 多租户资源彼此隔离（M5：tenant key + API 绑定）。
 - [ ] 部署/备份/恢复/升级/灾难与 auto 回滚：runbook + 离线证明。
 - [ ] auto 规则：范围、阈值、审计、回滚代码与离线测试（默认关闭）。
 - [ ] 全库覆盖 ≥80%，mypy strict，ruff 0 warning，CI benchmark/安全门禁。
@@ -197,3 +202,23 @@ env -u NO_PROXY -u no_proxy .venv/bin/pytest -q
 - `ruff check`：All checks passed；`mypy`：Success: no issues found in 99 source files。
 - FOCUS 48 文件；`memory/store` 100%、`memory/policy` 95.9%、`memory/retrieval` 90.7%。
 - marker `p7-memory-v1`；与 checkpoint `MemoryCheckpointStore` 隔离。
+
+---
+
+## 8. M5 任务级计划（WP-7.5）
+
+### Task 1：ADR / 账本 / 状态面（M5-1）
+
+### Task 2：tenancy / rbac / server extra（M5-2）
+
+### Task 3：API + SSE + UI（M5-3）
+
+### Task 4：指南 / FOCUS / 出口（M5-4）
+
+### M5 出口读数（2026-11-10，`/tmp/p7-m5-*.txt`）
+
+- 本地（沙箱忽略 git worktree / github example）：`916 passed, 8 skipped`；覆盖 **95.79%**。
+- `ruff check` / `mypy`（109 files）全绿。
+- FOCUS 51 文件；`tenancy` 93.6%、`rbac` 95.0%、`sse` 100%。
+- CI Install：`pip install -e ".[dev,server]"`。
+

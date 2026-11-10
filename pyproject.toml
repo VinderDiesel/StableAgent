@@ -30,6 +30,9 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=5",
 ]
+server = [
+    "fastapi>=0.115",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["stableagent"]

@@ -25,6 +25,8 @@ LEGACY_PACKAGES = ("core", "context", "providers", "tools", "orchestration")
 # P6 的 supervisor 是最上游消费者：ADR-06 决策 1 允许它 import P5 三包，
 # 但它自己在反向门里必须被任何旧包/P5 包 import。
 P6_PACKAGES = ("supervisor",)
+# P7 包可消费 control / supervisor（API 门面、可观测、Memory、SSE）。
+P7_PACKAGES = ("observability", "memory", "api", "transport")
 P5_IMPORT_PREFIXES = tuple(f"stableagent.{name}" for name in P5_PACKAGES)
 # control 的上游：方向锁 integrations → execution → control → orchestration → core，反向不许。
 UPSTREAM_OF_CONTROL = ("stableagent.execution", "stableagent.integrations")
@@ -76,8 +78,8 @@ def test_control_error_code_inventory_is_unique_and_prefixed() -> None:
 
 
 def _legacy_packages() -> list[str]:
-    """ROOT 下除 P5 三新包与 P6 supervisor 以外的全部包目录。"""
-    excluded = {*P5_PACKAGES, *P6_PACKAGES, "__pycache__"}
+    """ROOT 下除 P5/P6/P7 包以外的全部包目录。"""
+    excluded = {*P5_PACKAGES, *P6_PACKAGES, *P7_PACKAGES, "__pycache__"}
     return sorted(
         path.name for path in ROOT.iterdir() if path.is_dir() and path.name not in excluded
     )

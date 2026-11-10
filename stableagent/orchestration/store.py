@@ -227,7 +227,10 @@ def _row_to_effect(row: sqlite3.Row) -> Effect:
 class Store:
     def __init__(self, db_path: str | Path, *, clock: Clock) -> None:
         self._clock = clock
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None)
+        # check_same_thread=False：FastAPI/Starlette 同步路由在 worker 线程执行读库。
+        self._conn = sqlite3.connect(
+            str(db_path), isolation_level=None, check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
         self._in_tx = False
         self._create_schema()
