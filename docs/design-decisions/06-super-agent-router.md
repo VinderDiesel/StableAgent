@@ -116,13 +116,20 @@ supervisor → integrations → execution → control → orchestration → core
 ### 11. Beta 演练与发布门禁：离线先行，observe 数据是 auto 的唯一依据
 
 - M6 交付可复现的离线演练（`examples/06_superagent_beta.py`）与只读 `BetaReport`
-  （`views.beta_report` ← `store.beta_snapshot`）；真实 GitHub HTTP 客户端不在 M6 实现，
-  真实仓库 Beta 由维护者按 [Beta runbook](../guides/supervisor-beta.md) 执行并回填账本。
+  （`views.beta_report` ← `store.beta_snapshot`）；真实 GitHub HTTP 客户端不在 M6 实现；
+  真实仓库试跑步骤见 [Beta runbook](../guides/supervisor-beta.md)。
 - `BetaReport` 字段固定：triggers/decisions/decision_reasons/would_accept/tickets/
   recovered_assignments/approvals/notification_counts/effects/retried_effects/source_health；
   只读、不返回 payload。误报/漏报与人工接受/拒绝原因只进 runbook 人工记录表。
-- 发布门禁：`observe` 数据是 P7 允许任何规则进入 `auto` 的唯一依据；PR 重复数必须为 0；
-  真实 Beta 数据回填前 P6 出口第 7 项保持未勾。
+- **默认安全**：`auto` 默认关闭；代码与离线测试须证明可开可关、可审计、可回滚；PR
+  重复数在离线演练中必须为 0。
+- **补充 A（2026-11-10）**：P6 出口第 7 项按工程口径豁免；见
+  [P6 验收账本「开发收口裁定」](../acceptance/p6-supervisor-beta.md)。
+- **补充 B（2026-11-10，覆盖后续全部任务）**：工程收口**一律**只看代码完成与离线可靠
+  性，不以真实 observe / 生产试跑数据为 DoD。原「observe 数据是进入 auto 的唯一依据」
+  降级为**可选运维建议**（guide/runbook），不再阻塞任何阶段或里程碑收口，也不阻塞
+  实现/测试 `auto` 代码路径。生产环境是否打开 `auto` 由运维自行决定。总口径见
+  [Roadmap「工程收口口径」](../Roadmap.md)。
 
 ## 被否决方案
 

@@ -313,8 +313,8 @@ P6 Beta 的发布配置必须锁为 `observe`，并将 `auto` 接口标记为未
 
 1. **离线场景先行，真实 Beta 由维护者执行。** M6 不实现真实 GitHub HTTP 客户端（仓库
    至今只有 `GitHubReadClient` / `GitHubClient` 协议与 fake，P5 账本已记录该遗留）。
-   M6 交付可复现的离线演练与真实仓库 runbook；真实试跑、dry-run 数据与人工标注由维护者
-   按 runbook 在专用仓库完成并回填账本，P6 出口第 7 项在回填前保持未勾。
+   M6 交付可复现的离线演练与真实仓库 runbook；真实试跑与人工标注为可选运维附录。
+   工程收口不依赖真实数据回填（2026-11-10 口径，见 Roadmap）。
 2. **Beta 数据报告是只读视图，不是新命令面。** `views.py` 新增 `BetaReport` 与
    `beta_report(store)`；SQL 聚合放在 `SupervisorStore.beta_snapshot()`，示例与 CLI 都不
    直接读 `_conn`。字段固定为：`triggers`（按 kind）、`decisions`（按 outcome）、
@@ -372,11 +372,16 @@ P6 Beta 的发布配置必须锁为 `observe`，并将 `auto` 接口标记为未
 - [ ] 单仓库 Beta 有 dry-run 记录、明确风险边界、回滚步骤和可审计数据。
 - [ ] 所有离线门禁通过；新增 supervisor 核心模块的 CI 覆盖率 ≥90%。
 
+> **勘误（2026-11-10）**：上表勾选状态以 [P6 验收账本](../acceptance/p6-supervisor-beta.md)
+> 为准（工程已收口）。出口第 7 项按 [Roadmap 工程收口口径](../Roadmap.md) 豁免真实数据；
+> 离线 dry-run + runbook 即可。下文「observe 数据是 auto 唯一依据」降级为可选运维建议。
+
 ## 5. 阶段交接：P7 的输入
 
 P7 只能在不改写 P6 单仓库语义的前提下扩展：
 
 - 新 Source 必须实现 Trigger/Thread/Channel 协议，不能直接创建 Ticket 或调 Worker。
 - 多 Provider、Memory、MCP server、transport 和多租户都观察/适配已有 Ticket、Assignment、Effect、Report、Audit 记录。
-- P6 `observe` 数据是 P7 决定是否允许某条低风险规则 `auto` 的唯一依据；没有数据不得开启 auto。
+- `auto` 默认关闭；工程收口只需离线可测的开关/审计/回滚。真实 observe 评估为可选运维，
+  不阻塞 P7 启动（[Roadmap 工程收口口径](../Roadmap.md)）。
 - P6 的 Source cursor、outbox idempotency、Mandate revalidation 和人工注意力协议是不可回退基线。

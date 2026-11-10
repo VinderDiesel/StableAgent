@@ -9,8 +9,8 @@
 - 现在可复现的是离线演练：`examples/06_superagent_beta.py`（见下）。
 - 真实仓库试跑必须先接入一个实现 `GitHubReadClient.list_events` 的只读客户端，并把
   写侧 `GitHubClient` 接到真实 API；接入前不得宣称完成真实 Beta。
-- 真实试跑、dry-run 数据与人工标注由维护者执行并回填
-  [P6 验收账本](../acceptance/p6-supervisor-beta.md)；回填前 P6 出口第 7 项保持未勾。
+- 真实试跑、dry-run 数据与人工标注为可选；工程收口不依赖回填（2026-11-10 起总口径见
+  [Roadmap](../Roadmap.md)；P6 见账本「开发收口裁定」）。
 
 ## 离线演练（现在即可跑）
 
@@ -100,7 +100,9 @@ bot_triggers=0`；`report` 末行 `BETA_REPORT <json>`。演练覆盖多 Issue/P
    [supervisor 迁移指南](supervisor-migration.md)。
 5. 撤销 bot token，归档状态库与本报告。
 
-## 发布门禁
+## 发布门禁 / 工程收口
 
-- `observe` 数据是 P7 允许任何规则进入 `auto` 的唯一依据（ADR-06 决策 11）。
-- 真实 Beta 数据回填账本前，P6 出口第 7 项不勾；其余出口项由离线门禁证明。
+- **工程收口**只看代码完成与离线可靠性（[Roadmap 工程收口口径](../Roadmap.md)）；本
+  runbook 的真实试跑与人工记录表为**可选运维附录**，不阻塞任何阶段或里程碑勾选。
+- `auto` 默认关闭；打开与否是运维决策。若选择在真实仓库评估，可使用下方数据记录表，
+  但仍非 DoD。

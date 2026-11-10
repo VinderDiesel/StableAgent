@@ -2,9 +2,9 @@
 
 > **阶段定位**：将已在单仓库、observe-first 条件下验证的 Super-Agent 扩展为可部署、可观测、可治理的生产系统，同时保持 StableAgent Core 可嵌入、控制平面可替换、授权与外部副作用可审计。
 >
-> **开始条件**：P6 所有退出条件满足，并已获得单仓库 Beta 的 observe 数据、故障演练记录和明确的未解决风险清单。
+> **开始条件**：P6 工程收口完成（见 [P6 验收账本](../acceptance/p6-supervisor-beta.md)）。
 >
-> **完成条件**：多 Provider、多 Source、MCP 治理、Memory、实时 transport、监管面、多租户与运维能力在同一安全/审计模型中工作；全库质量门禁达到路线图终点，生产部署示例可复现。
+> **完成条件（工程收口）**：多 Provider、多 Source、MCP 治理、Memory、实时 transport、监管面、多租户与运维能力在同一安全/审计模型中工作；全库离线质量门禁达到路线图终点；可部署示例与指南齐备。**不以真实线上数据 / observe 回填为完成条件**（[Roadmap 工程收口口径](../Roadmap.md)）。
 
 ## 1. 目标、范围与发布策略
 
@@ -15,7 +15,7 @@
 3. 提供短期与长期 Memory，具备隔离、生命周期、删除、评估和失败降级能力。
 4. 提供 FastAPI + SSE / WebSocket 的管理与实时事件接口，以及最小可用监管 UI/API。
 5. 支持多租户、部署隔离、版本化配置、备份、恢复和升级迁移。
-6. 在满足证据门槛的情况下，从 `observe` 有选择地提升低风险规则为 `auto`，并能立即回滚。
+6. 实现 `observe`→`auto` 的可开关、可审计、可回滚代码路径；默认关闭；离线可测。
 
 ### 非目标
 
@@ -23,6 +23,7 @@
 - 不默认跨租户共享 Memory、MCP server、凭据、worktree、Source cursor、Ticket 或审计记录。
 - 不以提升自动化率为唯一指标；误报、授权拒绝、通知噪音、恢复正确性和人工负担同等重要。
 - 不因新增平台功能改变 Core `AgentLoop` 的单 Worker 边界，或改写 P4/P6 的领域状态和 outbox 语义。
+- 不以真实线上 observe / canary 数据收集作为工程收口门槛。
 
 ### 推荐的子版本顺序
 
@@ -141,8 +142,11 @@ Tenant-scoped Supervisor Runtime
 1. 交付容器化部署、配置 schema、secret reference、数据库备份/恢复、滚动升级、schema migration、Source reconnect、worker drain、事故回滚 runbook。
 2. 每个 tenant/runtime 使用独立 state directory/lock、最小凭据、资源配额和日志保留策略。
 3. 增加 chaos/failure 演练：Provider/Source/MCP/Channel 断连，SQLite 暂不可用，worker crash，Docker timeout，API restart，重复 webhook，审批过期，Memory index 故障。
-4. `auto` 开启流程必须是一个可审计变更：选择单条 Policy rule、限定 tenant/repository、指定 Action 上限、根据 P6 observe 数据设置目标/错误阈值、先 canary、持续监控、自动/手动回滚条件。
-5. auto 规则的硬门槛：重复副作用 0、授权越权 0、可解释 Decision 100%、通知预算达标、误报率/人工拒绝率低于 policy 阈值、回滚演练通过。
+4. `auto` 开启流程必须是可审计变更（单条 Policy rule、tenant/repository 限定、Action
+   上限、阈值、canary、回滚条件）；实现与**离线**集成测试证明可开可关可回滚，默认关闭。
+   真实 observe / 生产 canary 数据不作为本工作包收口条件。
+5. auto 规则的离线硬门槛：重复副作用 0、授权越权 0、可解释 Decision 100%、通知预算达
+   标、回滚路径可测；误报率等线上阈值留给可选运维附录。
 6. 产出完整 API Reference、运维手册、安全模型、ADR、版本迁移指南、benchmark 报告和端到端生产姿态示例。
 
 ## 4. 测试策略与质量门禁
@@ -185,21 +189,25 @@ CI 还必须：
 - [ ] 审计、指标、trace、SLO 与脱敏链路覆盖 Worker 到外部 effect 的完整路径。
 - [ ] FastAPI、SSE/WebSocket、RBAC 与最小监管 UI 在不绕过服务边界的前提下可部署。
 - [ ] 多租户的 Store、Source、MCP、Memory、worktree、凭据、事件流和备份彼此隔离。
-- [ ] 部署、备份、恢复、升级、灾难演练和 auto 回滚 runbook 可复现。
-- [ ] 每条 auto rule 有 observe 数据、canary 范围、硬阈值、审计和回滚证据。
+- [ ] 部署、备份、恢复、升级、灾难演练和 auto 回滚 **runbook + 离线/脚本化证明**可复现。
+- [ ] auto 规则具备范围限定、硬阈值配置、审计与回滚的**代码与离线测试**证据（默认关闭；
+      不以真实 observe 数据为勾选条件）。
 - [ ] 全库覆盖率 ≥80%，mypy strict、ruff 0 warning、CI benchmark 和安全门禁通过。
 - [ ] 文档、API Reference、示例和 CHANGELOG 完整，且对自动化能力、安全边界和已知限制做出准确表述。
 
-## 6. 最终系统验收
+## 6. 最终系统验收（工程：离线 e2e；真实组织演练可选）
 
-在一个隔离的测试组织中完成以下演练，作为 P7 的最终端到端证据：
+**工程收口**以 fake/脚本化 e2e 与崩溃恢复集成测试为准，覆盖下列语义（不要求真实组织或
+真实 GitHub 账号）：
 
-1. 管理员创建 tenant、GitHub Source、MCP allowlist、预算和 observe Policy。
-2. allowlist 开发者通过明确请求创建 Ticket，系统以隔离 Worker 修改 worktree 并创建 PR。
-3. CI、PR review 与后续评论回到正确 Ticket；scope 外请求被 handback 并重新授权。
-4. 在 Worker、Router、Outbox 和 API 各自崩溃后恢复，验证没有重复 PR/comment/commit，也不丢失待处理输入。
-5. 在批准后切换一条受限 canary rule 到 auto，注入规则不匹配、权限拒绝、MCP 失败、Source 重复和预算耗尽事件，确认不会越权或制造通知风暴。
-6. 导出审计链，验证每个外部副作用都能追溯到 tenant、Trigger、Decision、Mandate、Approval、Ticket、Assignment、Provider/Tool 和 effect receipt。
-7. 删除一条 Memory、撤销一项 MCP 授权、停用一个 Source，确认后续检索/调用/投递均被拒绝且旧数据按生命周期处理。
+1. 创建 tenant、Source、MCP allowlist、预算和 observe Policy（确定性装置）。
+2. 显式请求创建 Ticket → 隔离 Worker → 产生 PR/comment effect（fake 写客户端）。
+3. 后续 CI/PR/评论归属正确；scope 外 handback 与重新授权。
+4. Worker / Router / Outbox / API 崩溃恢复：不重复副作用、不丢待处理输入。
+5. 打开一条受限 auto 规则（测试装置），注入不匹配/越权/MCP 失败/重复事件/预算耗尽，
+   确认不越权、不制造通知风暴，并可回滚关闭。
+6. 审计链可从外部 effect 追溯到 Mandate / Approval / Ticket / Assignment。
+7. Memory 删除、MCP 撤销、Source 停用后的拒绝与生命周期行为。
 
-通过该演练后，StableAgent 才可声明具备“面向生产的受控 Super-Agent 参考实现”；任何未覆盖的 Source、Provider、自动规则或隔离场景必须继续标注为实验性。
+真实组织现场演练为**可选运维附录**，不阻塞 P7 Completed。未覆盖的 Source/Provider/
+自动规则须继续标注为实验性。

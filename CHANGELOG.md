@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 文档（工程收口口径，2026-11-10）
+- 维护者裁定推广：后续**全部**阶段/里程碑/任务的工程收口只看代码完成与离线可靠性；
+  真实仓库试跑、observe 标注、生产 canary 等数据回填一律不作 DoD
+- 写入 [Roadmap「工程收口口径」](docs/Roadmap.md) 与
+  [文档维护规范](docs/documentation-standards.md)；ADR-06 决策 11 之数据条款降级为
+  可选运维建议；P7 Spec 开始/退出条件与最终验收改为离线证据优先
+- P6 按该口径工程收口，当前主线切至 P7；真实 GitHub HTTP 客户端仍为已知遗留
+
 ### 实现（P6 M6 Beta 演练，2026-11-10）
 - `stableagent/supervisor/store.py`：`BetaSnapshot` 与 `beta_snapshot()` 只读聚合 11
   字段（triggers/decisions/decision_reasons/would_accept/tickets/recovered_assignments/

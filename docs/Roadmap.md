@@ -51,14 +51,30 @@ StableAgent Core（P0–P3）
 
 - 初始部署只响应已授权人员的显式请求。
 - 推断型或主动工作先以 `observe` 模式记录决定，不执行副作用。
-- 仅在规则误报率、恢复语义、权限和审计均经过验证后，才对低风险规则启用 `auto`。
+- `auto` 默认关闭；工程上须提供可测的开关/审计/回滚。是否在某环境打开属于运维决策，
+  不以真实误报率数据作为工程收口条件（见「工程收口口径」）。
 - 外部输入、工具输出、Issue/PR 内容及提示词都只能作为决策输入，不能自行扩大授权范围。
 
 ---
 
 ## 质量基线与跨阶段约束
 
-质量门槛只升不降。阶段未达退出条件，不进入下一阶段。
+质量门槛只升不降。阶段未达**工程退出条件**，不进入下一阶段。
+
+### 工程收口口径（2026-11-10 起，后续全部任务适用）
+
+维护者裁定：自本日起，**所有后续阶段 / 里程碑 / 任务的工程收口**只看：
+
+1. **代码完成**：规格内功能落地，公共契约与方向锁不被破坏。
+2. **可靠性**：离线可复现门禁通过（lint、类型、测试、覆盖率、必要的崩溃/幂等/授权集成证明）。
+
+**明确不作工程收口条件**（不得因此阻塞勾选或进入下一任务）：
+
+- 真实仓库 / 真实 Provider / 真实 IM 的线上试跑数据
+- observe 误报/漏报人工标注表、生产 canary 统计、人工注意力实操日记
+- 生产组织端到端演练的现场回填（可作为可选运维附录，不是 DoD）
+
+默认行为仍应安全：`auto` / auto-merge 等主动能力**代码可实现、离线可测**，但默认关闭；是否在某环境打开属于运维决策，不充当开发收口门槛。真实环境试跑与数据采集一律 opt-in，不得写入「不勾则阶段未完成」。
 
 | 维度 | 当前基线 | 终点要求 |
 |---|---:|---:|
@@ -68,7 +84,7 @@ StableAgent Core（P0–P3）
 | CI | Python 3.10 / 3.12：lint、类型、测试、覆盖率 | 增加 benchmark 回归、核心模块覆盖率及关键 e2e 门禁 |
 | 文档 | 模块级 docstring、ADR、示例 | Architecture、API Reference、运维与安全说明完整 |
 | 契约 | P2 起仅允许向后兼容扩展 | 语义化版本、CHANGELOG、迁移策略、弃用策略完整 |
-| 自治安全 | 默认仅显式任务 | 授权、审批、审计和副作用幂等均有可验证实现 |
+| 自治安全 | 默认仅显式任务 | 授权、审批、审计和副作用幂等均有**离线可验证**实现 |
 
 ### 跨阶段不变式
 
@@ -86,8 +102,8 @@ StableAgent Core（P0–P3）
 
 - [文档中心](README.md) 是全部设计、规格、验收与历史资料的导航入口。
 - P3 的实现合同是 [Worker Context Runtime Spec](specs/p3-worker-context-runtime.md)，完成状态和验证证据以 [P3 Context Engineering Acceptance](acceptance/p3-context-engineering.md) 为准。
-- 当前阶段 P4 的实现合同是 [Ticket 编排内核 Spec](specs/p4-ticket-orchestration-kernel.md)，实施顺序与验收证据写在 [P4 Ticket Orchestration Acceptance](acceptance/p4-ticket-orchestration.md)，驱动模型与事务边界的设计取舍见 [ADR-04](design-decisions/04-ticket-orchestration.md)。
-- P5–P7 的未来实施合同由 [阶段规格索引](specs/README.md) 统一维护。
+- P4–P6 的完成证据分别见 [P4](acceptance/p4-ticket-orchestration.md)、[P5](acceptance/p5-guarded-execution.md)、[P6](acceptance/p6-supervisor-beta.md)；设计取舍见对应 ADR。
+- 当前阶段 P7 的实施合同由 [阶段规格索引](specs/README.md) 与 [P7 Spec](specs/p7-production-hardening-ecosystem.md) 维护。
 - P1/P2 的完成证据在 [Acceptance](acceptance/README.md)；公共契约与已接受设计见 [Design Decisions](design-decisions/)。
 
 ---
@@ -285,7 +301,7 @@ Assignment
 
 ---
 
-## P6：单仓库 Super-Agent Beta
+## P6：单仓库 Super-Agent Beta — 工程已收口（2026-11-10）
 
 **目标**：建立一个常驻 Router，在一个仓库内管理多个隔离 Worker，并以最少的人类注意力交付可审查结果。
 
@@ -310,7 +326,7 @@ Channel ← Durable Outbox ← Report / Result ←──────────
 - Policy 版本化、Mandate 记录与恢复前重新校验。
 - Router / Worker 并发治理、队列和过载行为。
 - 最小控制面：CLI 或只读 Web 页面，优先展示待人工处理事项、失败、审批和队列。
-- 真实仓库的端到端试运行与可审计记录。
+- 离线 Beta 演练、只读报告与可选的真实仓库 runbook（真实试跑不作工程收口条件）。
 
 ### 退出条件
 
@@ -319,31 +335,14 @@ Channel ← Durable Outbox ← Report / Result ←──────────
 - 外部事件只提供上下文；授权范围只能由 Policy / Mandate 扩大。
 - Worker 崩溃后恢复 Assignment，不重复完成的副作用。
 - 仅在需要决策、审批、失败或结果可用时通知人。
-- 在 `observe` 模式下完成足够的真实数据评估，再决定哪些规则可切换 `auto`。
+- 提供 `observe`→`auto` 的代码路径与离线证明；默认不开启 `auto`（真实数据评估不作
+  工程收口条件，见上方「工程收口口径」）。
 
-**当前进度（2026-11-10）**：M1 基础层（8/8）、M2 GitHub Source（8/8）、M3 Router Intake
-（8/8）、M4 常驻调度（7/7）、M5 最小监管面（8/8）与 M6 Beta 演练（6/6）完成——M1 落地
-ADR-06、`supervisor/` 领域模型、`SupervisorStore`（P5 库无损扩展、同连接同事务）与六个
-只读监管视图；M2 接入只读 polling：Issue/PR/评论/评审/CI status 标准化为
-Trigger/Thread/Channel，cursor 分页可续、双重去重、错误四分类落 `source_health`；
-M3 把 `receive(trigger)` 收敛为唯一入口：Trigger 去重、Subscription 扇出、explicit
-五件原子写、六种 outcome、`unavailable` 重评估与运维命令层
-（attach/subscribe/unsubscribe/stop/handback/resume/record_pull_request）；M4 以 SQLite
-单例行实现单实例锁、启动恢复、暂停与优雅停止，启动顺序固定为锁 → recover → 读暂停 →
-补路由，五个崩溃窗口各有集成证明；M5 提供 CLI-only 监管面：首屏按注意力排序、写命令
-必须 `--confirm`，生命周期通知先草拟成 `COMMENT_ISSUE` 审批，人工批准后在同一事务入队
-effect，拒绝即静默；M6 交付离线演练示例 06（run/report 两 phase）、只读 `BetaReport`
-与真实仓库 [Beta runbook](guides/supervisor-beta.md)，ADR-06 决策 11 钉住"observe 数据
-是 auto 的唯一依据"。CI 心脏覆盖率闸门 25→28→29→32→33→35。本地门禁
-`878 passed, 6 skipped`（覆盖 98.54%），Python 3.10 / 3.11 / 3.12 一致。逐项证据见
-[P6 验收账本](acceptance/p6-supervisor-beta.md)，部署口径见
-[GitHub Source 指南](guides/supervisor-github-source.md)、
-[Router 运维指南](guides/supervisor-router.md)、
-[Runtime 运维指南](guides/supervisor-runtime.md)、
-[监管控制台指南](guides/supervisor-console.md) 与
-[Beta runbook](guides/supervisor-beta.md)。真实 Beta 数据待维护者按 runbook 回填，
-回填前 P6 出口第 7 项保持未勾。下一步：P7 生产化与生态扩展（多 Provider、多 Source
-与平台部署）。
+**工程收口（2026-11-10）**：M1–M6 全部完成（里程碑 6/6）。出口第 7 项按工程收口口径
+豁免（离线 dry-run + runbook 即可）。真实 GitHub HTTP 客户端仍为已知遗留（协议 + Fake
+已交付）。CI 心脏覆盖率闸门 25→35；本地门禁 `878 passed, 6 skipped`（覆盖 98.54%），
+Python 3.10 / 3.11 / 3.12 一致。逐项证据见 [P6 验收账本](acceptance/p6-supervisor-beta.md)。
+下一步：P7 生产化与生态扩展。
 
 ---
 
@@ -362,12 +361,13 @@ effect，拒绝即静默；M6 交付离线演练示例 06（run/report 两 phase
 - 多租户与部署隔离。
 - 完整 API Reference、运维手册、安全模型和升级迁移文档。
 
-### 退出条件
+### 退出条件（工程收口）
 
-- 全库覆盖率 ≥80%，包括 e2e、故障恢复、授权、幂等副作用和隔离测试。
+- 全库覆盖率 ≥80%，包括 e2e、故障恢复、授权、幂等副作用和隔离测试（离线可复现）。
 - mypy strict、ruff 0 warning、CI benchmark 回归均通过。
 - 提供可部署的单仓库 Super-Agent 示例与明确的安全运行指南。
-- 所有已声明的主动能力均有 observe→auto 的评估记录、回滚方式和审计证据。
+- 已声明的主动能力（含 `observe`→`auto`）具备可执行代码路径、默认关闭、离线测试与
+  回滚/审计实现；**不以真实 observe / 生产 canary 数据作为收口条件**。
 
 ---
 

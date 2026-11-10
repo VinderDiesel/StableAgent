@@ -366,8 +366,8 @@ enum members, new config sections).
 | P3 | Worker context runtime: compression, capability view, budget, evidence | ✅ done — 52/52, CI matrix green on 3.10 & 3.12 (run 41384598912) |
 | P4 | Ticket orchestration: Ticket, Assignment, Scheduler, DAG, Durable Outbox | ✅ done — 60/60, 30/30 milestones, CI matrix green on 3.10 & 3.12 (run 41596839282) |
 | P5 | Guarded execution and repository integration | ✅ done — 40/40 milestones, DoD 46/46, CI matrix green on 3.10 & 3.12 (run 42433929377) |
-| P6 | Single-repository Super-Agent Beta | 🟡 active — M6 done (6/6); milestones 6/6 |
-| P7 | Production hardening and ecosystem | ⏳ |
+| P6 | Single-repository Super-Agent Beta | ✅ engineering closed (2026-11-10); exit #7 waived for development |
+| P7 | Production hardening and ecosystem | 🟡 next |
 
 Implementation contracts and acceptance evidence: [`docs/README.md`](docs/README.md), [P4 Spec](docs/specs/p4-ticket-orchestration-kernel.md) with its [plan & ledger](docs/acceptance/p4-ticket-orchestration.md) and [ADR-04](docs/design-decisions/04-ticket-orchestration.md), and the closed [P3 Spec](docs/specs/p3-worker-context-runtime.md) with its [acceptance ledger](docs/acceptance/p3-context-engineering.md).
 
