@@ -298,12 +298,41 @@ P6 Beta 的发布配置必须锁为 `observe`，并将 `auto` 接口标记为未
 
 ### WP-6.6：Beta 演练、数据收集与发布门禁
 
-**文件**：`examples/06_superagent_beta.py`、`docs/design-decisions/06-super-agent-router.md`、`docs/guides/`、README、CHANGELOG。
+**文件**：`stableagent/supervisor/views.py`、`stableagent/supervisor/store.py`、
+`examples/06_superagent_beta.py`、`tests/unit/test_supervisor_views.py`、
+`tests/integration/test_superagent_beta.py`、
+`docs/design-decisions/06-super-agent-router.md`、`docs/guides/supervisor-beta.md`、
+`docs/acceptance/p6-supervisor-beta.md`、README、CHANGELOG。
 
 1. 离线集成场景：多个 Issue/PR/CI Trigger，两个并发 Ticket，一个失败、一个等待人工、一个结束后被评论恢复；断言归属、外部消息数和恢复语义。
 2. 受控真实仓库 Beta：单仓库、专用 bot、allowlist、`observe`、无 auto merge、最小 GitHub token。先完成 dry-run/record-only，再允许 explicit 请求创建 PR。
 3. 记录 Beta 数据：候选数、would-accept 数、人工接受/拒绝原因、误报/漏报、每 Ticket 通知数、恢复次数、PR 重复数（必须为 0）。
 4. ADR-06 记录：Thread/Subscription 语义、Source/Tool 边界、observe 模式、Router 事务边界、cursor/去重、注意力预算和拒绝的设计方案。
+
+**设计决议（2026-11-10，维护者确认）**
+
+1. **离线场景先行，真实 Beta 由维护者执行。** M6 不实现真实 GitHub HTTP 客户端（仓库
+   至今只有 `GitHubReadClient` / `GitHubClient` 协议与 fake，P5 账本已记录该遗留）。
+   M6 交付可复现的离线演练与真实仓库 runbook；真实试跑、dry-run 数据与人工标注由维护者
+   按 runbook 在专用仓库完成并回填账本，P6 出口第 7 项在回填前保持未勾。
+2. **Beta 数据报告是只读视图，不是新命令面。** `views.py` 新增 `BetaReport` 与
+   `beta_report(store)`；SQL 聚合放在 `SupervisorStore.beta_snapshot()`，示例与 CLI 都不
+   直接读 `_conn`。字段固定为：`triggers`（按 kind）、`decisions`（按 outcome）、
+   `decision_reasons`（按 reason code）、`would_accept`（`observe` 且
+   `inferred_candidate`）、`tickets`（按状态）、`recovered_assignments`（attempt > 1）、
+   `approvals`（按 `action:status`）、`notification_counts`（每 Ticket 通知数）、
+   `effects`（按 `kind:state`）、`retried_effects`（attempts > 1）、`source_health`。
+   误报/漏报与人工接受/拒绝原因无法从库推导，只进 runbook 的人工记录表。
+3. **演练覆盖规格原定场景。** `examples/06_superagent_beta.py` 只有两个 phase：
+   `run` 跑离线多 Trigger、两个并发 Ticket、一个 FAILED、一个 WAITING、一个 COMPLETED
+   后被后续评论经 operator resume 恢复，断言同 Thread 不重复建票、外部评论恰好一次、
+   bot 自事件被过滤；`report` 读 SQLite 输出同一 `BetaReport`。输出沿用示例 04/05 的
+   逐行 JSON + 末行 `BETA_RESULT ...` 约定。崩溃恢复与暂停语义已由 M4/M5 测试覆盖，
+   本示例不重复。
+4. **真实 Beta runbook 与门禁。** 新增 `docs/guides/supervisor-beta.md`：单仓库、专用
+   bot、allowlist、`observe`、最小 token、备份、record-only → explicit 两阶段、数据记录
+   表、回滚步骤与安全边界。ADR-06 增补“Beta 演练与发布门禁”决策；`observe` 数据仍是
+   P7 允许任何规则进入 `auto` 的唯一依据。
 
 ## 4. 测试与退出条件
 

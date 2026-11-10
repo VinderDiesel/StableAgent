@@ -12512,3 +12512,1240 @@ git commit -m "docs: close p6 m5 with console and attention evidence"
 - **计划偏差：** 8 个 Task / 44 个 Step 全部完成；仅有三处格式对齐（多行 `frozenset`、
   `pause/resume` 签名与 CLI 断言折行）与两处未使用 import 清理，均不改变行为；
   其余与计划一致。
+
+---
+
+## 13. M6 任务级实施计划（writing-plans 产出，2026-11-10）
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
+> (recommended) or superpowers:executing-plans to implement this plan task-by-task.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal：** 给单仓库 Beta 一个可复现的离线演练、只读 Beta 数据报告与真实仓库 runbook，
+并把 ADR-06 与 P6 退出清单收口到"待维护者回填真实 Beta 数据"的状态。
+
+**Architecture：** 读侧在 `supervisor/store.py` 加 `BetaSnapshot` + `beta_snapshot()`（纯 SQL
+聚合），在 `supervisor/views.py` 加 `BetaReport` + `beta_report(store)`（只读 pydantic 视图）；
+`examples/06_superagent_beta.py` 用 `FakeGitHubReadClient` + 确定性时钟 + 脚本化 Worker 走
+Source→Router→Scheduler→通知审批→operator resume 全链路，`run`/`report` 两个 phase；
+真实仓库 Beta 由维护者按 `docs/guides/supervisor-beta.md` 执行，M6 不实现真实 GitHub HTTP
+客户端。不新增 `EffectKind`、不新增 FOCUS 文件（`store.py`/`views.py` 已在 35 文件内）。
+
+**Tech Stack：** Python 3.10/3.11/3.12、pydantic v2、SQLite（json_each）、pytest
+（asyncio_mode=auto）、ruff、mypy；示例沿用 04/05 的逐行 JSON + 末行结果约定。
+
+**Spec：** [P6 实施规格](../specs/p6-single-repository-super-agent-beta.md) WP-6.6 与
+§2.5；设计决议见同文件 `WP-6.6 设计决议（2026-11-10，维护者确认）`。
+
+**边界裁定（维护者已确认）：**
+
+- 离线演练 + runbook：M6 不实现真实 GitHub HTTP 客户端；真实试跑、dry-run 数据与人工
+  标注由维护者按 runbook 回填，P6 出口第 7 项在回填前保持未勾。
+- Beta 报告是只读视图，不是新命令面：示例与 CLI 都不直接读 `_conn`；误报/漏报与人工
+  接受/拒绝原因只进 runbook 人工记录表。
+- 演练只覆盖规格原定场景（多 Trigger、两个并发 Ticket、FAILED/WAITING/COMPLETED 后评论
+  恢复）；崩溃恢复与暂停语义已由 M4/M5 测试覆盖，本示例不重复。
+
+**Global Constraints（每个 Task 都隐含遵守）：**
+
+- L1：`stableagent/core/` 对 `234f620` 零 diff；约束 1：`orchestration/service.py` 零字符改动。
+- L2：方向锁 `supervisor → integrations → execution → control → orchestration → core`；
+  既有包不得 import `stableagent.supervisor`。
+- L3：`Store.transaction()` 体内不得出现 `await`；`beta_snapshot()` 只读、不开写事务。
+- L4：外部正文只进 digest/Report/TicketInput，不参与授权；`BetaReport` 不返回
+  `Trigger.payload` / `TicketInput.payload` / 日志正文。
+- L5：六个 revalidate 时机保持审计（resume 走 `launch` 复检，不改时机集合）。
+- L6：不新增 `merge` / `enable_auto_merge` 路径；`EffectKind` 不加成员。
+- L7：不读凭据；配置 `extra="forbid"`，不出现 token/secret 字段。
+- L8：全部用例离线（Fake Source / 确定性时钟）；定向测试加 `--no-cov`；真实
+  Docker/网络/GitHub 与推送必须获得维护者显式授权。
+
+---
+
+### Task 1：BetaSnapshot 与 BetaReport 只读聚合（M6-1）
+
+**Files:**
+- Modify: `stableagent/supervisor/store.py`
+- Modify: `stableagent/supervisor/views.py`
+- Test: `tests/unit/test_supervisor_views.py`
+
+**Interfaces:**
+- Consumes: `SupervisorStore._conn`（只读 SELECT）、`list_source_cursors()`；
+  既有表 `triggers/decisions/tickets/assignments/approval_requests/effects/source_cursors`。
+- Produces:
+  - `BetaSnapshot`（frozen dataclass，11 字段，见下）
+  - `SupervisorStore.beta_snapshot() -> BetaSnapshot`
+  - `BetaReport`（frozen pydantic，同 11 字段，`source_health: tuple[SourceCursor, ...]`）
+  - `beta_report(store: SupervisorStore) -> BetaReport`
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_supervisor_views.py` 第 37 行 import 改为：
+
+```python
+from stableagent.supervisor.views import SupervisorViews, beta_report, thread_url
+```
+
+在文件末尾追加（`Decision`/`Trigger`/`SourceCursor` 等顶部已 import）：
+
+```python
+def test_beta_report_aggregates_rehearsal_metrics(store: SupervisorStore) -> None:
+    _ticket(store, "tk-a", TicketStatus.QUEUED)
+    _ticket(store, "tk-b", TicketStatus.FAILED)
+    store.insert_trigger(
+        Trigger(
+            id="tg-1",
+            external_id="github:o/r:issue:1",
+            kind=TriggerKind.ISSUE,
+            actor="alice",
+            thread_keys=["issue:o/r#1"],
+            occurred_at=1,
+            received_at=2,
+            payload={"body": "DO-NOT-LEAK"},
+        )
+    )
+    store.insert_trigger(
+        Trigger(
+            id="tg-2",
+            external_id="github:o/r:ci_status:9",
+            kind=TriggerKind.CI_STATUS,
+            actor="github",
+            thread_keys=["repo:o/r"],
+            occurred_at=3,
+            received_at=4,
+            payload={},
+        )
+    )
+    for decision_id, digest, outcome, strength, reasons, trigger_ids in (
+        ("dc-1", "d-1", DecisionOutcome.ACCEPT, DecisionStrength.EXPLICIT, ["admitted"], ["tg-1"]),
+        (
+            "dc-2",
+            "d-2",
+            DecisionOutcome.OBSERVE,
+            DecisionStrength.INFERRED,
+            ["inferred_candidate"],
+            [],
+        ),
+        (
+            "dc-3",
+            "d-3",
+            DecisionOutcome.OBSERVE,
+            DecisionStrength.INFERRED,
+            ["ci_context_only"],
+            ["tg-2"],
+        ),
+        (
+            "dc-4",
+            "d-4",
+            DecisionOutcome.OBSERVE,
+            DecisionStrength.INFERRED,
+            ["already_owned"],
+            [],
+        ),
+    ):
+        store.insert_decision(
+            Decision(
+                id=decision_id,
+                trigger_ids=trigger_ids,
+                outcome=outcome,
+                strength=strength,
+                reason_codes=reasons,
+                policy_version="p6-v1",
+                request_digest=digest,
+                created_at=5,
+            )
+        )
+    store.insert_assignment(Assignment(id="as-1", ticket_id="tk-a", attempt=1))
+    store.insert_assignment(Assignment(id="as-2", ticket_id="tk-a", attempt=2))
+    store.insert_approval(
+        id="ap-1",
+        ticket_id="tk-a",
+        action="comment_issue",
+        resource_digest="ra-1",
+        reason="notification:accepted",
+        requested_at=1,
+    )
+    store.insert_approval(
+        id="ap-2",
+        ticket_id="tk-a",
+        action="comment_issue",
+        resource_digest="ra-2",
+        reason="notification:result",
+        requested_at=2,
+        status="approved",
+        decided_by="alice",
+        decided_at=3,
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-1",
+            kind=EffectKind.GITHUB_COMMENT,
+            idempotency_key="k-1",
+            state=EffectState.SUCCEEDED,
+            attempts=2,
+            due_at=1,
+        )
+    )
+    store.enqueue_effect(
+        Effect(
+            id="ef-2",
+            kind=EffectKind.LAUNCH_ASSIGNMENT,
+            idempotency_key="k-2",
+            state=EffectState.PENDING,
+            due_at=1,
+        )
+    )
+    store.put_source_cursor(SourceCursor(source="github", cursor="9", health=SourceHealth.OK))
+
+    report = beta_report(store)
+
+    assert report.triggers == {"issue": 1, "ci_status": 1}
+    assert report.decisions == {"accept": 1, "observe": 3}
+    assert report.decision_reasons == {
+        "admitted": 1,
+        "already_owned": 1,
+        "ci_context_only": 1,
+        "inferred_candidate": 1,
+    }
+    assert report.would_accept == 1
+    assert report.tickets == {"queued": 1, "failed": 1}
+    assert report.recovered_assignments == 1
+    assert report.approvals == {"comment_issue:approved": 1, "comment_issue:pending": 1}
+    assert report.notification_counts == {"tk-a": 2}
+    assert report.effects == {"github_comment:succeeded": 1, "launch_assignment:pending": 1}
+    assert report.retried_effects == 1
+    assert [cursor.health for cursor in report.source_health] == [SourceHealth.OK]
+    assert "DO-NOT-LEAK" not in report.model_dump_json()
+
+
+def test_beta_report_on_empty_database_is_zero(store: SupervisorStore) -> None:
+    report = beta_report(store)
+    assert report.triggers == {}
+    assert report.decisions == {}
+    assert report.decision_reasons == {}
+    assert report.would_accept == 0
+    assert report.tickets == {}
+    assert report.recovered_assignments == 0
+    assert report.approvals == {}
+    assert report.notification_counts == {}
+    assert report.effects == {}
+    assert report.retried_effects == 0
+    assert report.source_health == ()
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_views.py -k beta_report`
+Expected: FAIL / ImportError —— `beta_report` 尚未定义。
+
+- [ ] **Step 3: 实现 store 聚合**
+
+`stableagent/supervisor/store.py` 顶部 import 区加 `from dataclasses import dataclass`
+（放在 `import sqlite3` 之后、`from pathlib import Path` 之前，保持 ruff I001 顺序）。
+在 `_row_to_runtime_control` 之后、`class SupervisorStore` 之前加：
+
+```python
+@dataclass(frozen=True)
+class BetaSnapshot:
+    triggers: dict[str, int]
+    decisions: dict[str, int]
+    decision_reasons: dict[str, int]
+    would_accept: int
+    tickets: dict[str, int]
+    recovered_assignments: int
+    approvals: dict[str, int]
+    notification_counts: dict[str, int]
+    effects: dict[str, int]
+    retried_effects: int
+    source_health: tuple[SourceCursor, ...]
+```
+
+在 `SupervisorStore.list_tickets_for_notifications` 之后（类末尾）加：
+
+```python
+    # ---------------------------------------------------------- Beta 只读报告
+    def beta_snapshot(self) -> BetaSnapshot:
+        """WP-6.6 决议 2：Beta 数据报告的事实源；只读聚合，不返回任何 payload。"""
+        return BetaSnapshot(
+            triggers=self._group_counts(
+                "SELECT kind, COUNT(*) FROM triggers GROUP BY kind ORDER BY kind"
+            ),
+            decisions=self._group_counts(
+                "SELECT outcome, COUNT(*) FROM decisions GROUP BY outcome ORDER BY outcome"
+            ),
+            decision_reasons=self._group_counts(
+                "SELECT j.value, COUNT(*) FROM decisions d, json_each(d.reason_codes) j"
+                " GROUP BY j.value ORDER BY j.value"
+            ),
+            would_accept=self._count(
+                "SELECT COUNT(*) FROM decisions d WHERE d.outcome = 'observe'"
+                " AND d.strength = 'inferred' AND EXISTS ("
+                " SELECT 1 FROM json_each(d.reason_codes) WHERE value = 'inferred_candidate')"
+            ),
+            tickets=self._group_counts(
+                "SELECT status, COUNT(*) FROM tickets GROUP BY status ORDER BY status"
+            ),
+            recovered_assignments=self._count(
+                "SELECT COUNT(*) FROM assignments WHERE attempt > 1"
+            ),
+            approvals=self._group_counts(
+                "SELECT action || ':' || status, COUNT(*) FROM approval_requests"
+                " GROUP BY action, status ORDER BY action, status"
+            ),
+            notification_counts=self._group_counts(
+                "SELECT ticket_id, COUNT(*) FROM approval_requests"
+                " WHERE reason LIKE 'notification:%' GROUP BY ticket_id ORDER BY ticket_id"
+            ),
+            effects=self._group_counts(
+                "SELECT kind || ':' || state, COUNT(*) FROM effects"
+                " GROUP BY kind, state ORDER BY kind, state"
+            ),
+            retried_effects=self._count("SELECT COUNT(*) FROM effects WHERE attempts > 1"),
+            source_health=tuple(self.list_source_cursors()),
+        )
+
+    def _group_counts(self, sql: str) -> dict[str, int]:
+        return {str(row[0]): int(row[1]) for row in self._conn.execute(sql).fetchall()}
+
+    def _count(self, sql: str) -> int:
+        return int(self._conn.execute(sql).fetchone()[0])
+```
+
+- [ ] **Step 4: 实现 views 报告**
+
+`stableagent/supervisor/views.py` 在 `StatusSections` 之后、`thread_url` 之前加：
+
+```python
+class BetaReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    triggers: dict[str, int]
+    decisions: dict[str, int]
+    decision_reasons: dict[str, int]
+    would_accept: int
+    tickets: dict[str, int]
+    recovered_assignments: int
+    approvals: dict[str, int]
+    notification_counts: dict[str, int]
+    effects: dict[str, int]
+    retried_effects: int
+    source_health: tuple[SourceCursor, ...]
+
+
+def beta_report(store: SupervisorStore) -> BetaReport:
+    snapshot = store.beta_snapshot()
+    return BetaReport(
+        triggers=snapshot.triggers,
+        decisions=snapshot.decisions,
+        decision_reasons=snapshot.decision_reasons,
+        would_accept=snapshot.would_accept,
+        tickets=snapshot.tickets,
+        recovered_assignments=snapshot.recovered_assignments,
+        approvals=snapshot.approvals,
+        notification_counts=snapshot.notification_counts,
+        effects=snapshot.effects,
+        retried_effects=snapshot.retried_effects,
+        source_health=snapshot.source_health,
+    )
+```
+
+- [ ] **Step 5: 跑测试确认通过**
+
+Run: `.venv/bin/pytest -q --no-cov tests/unit/test_supervisor_views.py`
+Expected: PASS（既有 13 例 + 新增 2 例 = 15 passed）。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add stableagent/supervisor/store.py stableagent/supervisor/views.py \
+  tests/unit/test_supervisor_views.py
+git commit -m "feat: add read-only beta report aggregation"
+```
+
+---
+
+### Task 2：示例 06 run phase 离线演练（M6-2）
+
+**Files:**
+- Create: `examples/06_superagent_beta.py`
+- Test: `tests/integration/test_superagent_beta.py`
+
+**Interfaces:**
+- Consumes: Task 1 的 `beta_report`（本 Task 暂不 import，report phase 在 Task 3 接）；
+  `build_runtime` / `RuntimeBundle` / `RuntimeConfig` / `RouterConfig` / `GitHubSource` /
+  `FakeGitHubReadClient` / `NotificationDrafter` / `notification_effect` /
+  `ApprovalService.decide(..., effect=...)` / `SupervisorService.resume` /
+  `OrchestrationService.complete_ticket`。
+- Produces: `examples/06_superagent_beta.py --phase run`，末行
+  `BETA_RESULT tickets=3 resumed=1 external_comments=1 duplicate_tickets=0 bot_triggers=0`；
+  落盘 `<dir>/beta.db`。
+
+- [ ] **Step 1: 写失败集成测试**
+
+创建 `tests/integration/test_superagent_beta.py`：
+
+```python
+"""WP-6.6：示例 06 离线演练与只读 Beta 报告（全离线，无 token、无公网）。"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+from stableagent.orchestration.model import SystemClock
+from stableagent.supervisor.store import SupervisorStore
+from stableagent.supervisor.views import beta_report
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "06_superagent_beta.py"
+
+
+async def _run_example(*args: str) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(EXAMPLE),
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    assert proc.stdout is not None
+    out = (await proc.stdout.read()).decode()
+    return await proc.wait(), out
+
+
+async def test_run_phase_rehearses_the_beta_scenario(tmp_path: Path) -> None:
+    code, out = await _run_example("--phase", "run", "--dir", str(tmp_path / "demo"))
+    assert code == 0, out
+    assert (
+        "BETA_RESULT tickets=3 resumed=1 external_comments=1 "
+        "duplicate_tickets=0 bot_triggers=0" in out
+    )
+    lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    assert any(line.get("event") == "resume" for line in lines)
+
+    store = SupervisorStore(tmp_path / "demo" / "beta.db", clock=SystemClock())
+    try:
+        tickets = store.list_tickets()
+        assert len(tickets) == 3
+        assert len({ticket.mandate_id for ticket in tickets}) == 3
+        assert sorted(ticket.status.value for ticket in tickets) == ["failed", "ready", "waiting"]
+        resumed = [
+            ticket
+            for ticket in tickets
+            if any(a.attempt == 2 for a in store.list_assignments(ticket.id))
+        ]
+        assert len(resumed) == 1
+        assert all(trigger.actor != "agent" for trigger in store.list_triggers())
+        report = beta_report(store)
+        assert report.would_accept == 1
+        assert report.recovered_assignments == 1
+        assert report.approvals.get("comment_issue:approved") == 1
+        assert report.effects.get("github_comment:succeeded") == 1
+        assert sum(report.notification_counts.values()) >= 3
+    finally:
+        store.close()
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/integration/test_superagent_beta.py`
+Expected: FAIL —— 示例文件不存在，子进程非 0 退出。
+
+- [ ] **Step 3: 实现示例 run phase**
+
+创建 `examples/06_superagent_beta.py`：
+
+```python
+"""P6 Beta 离线演练：多 Trigger、两个并发 Ticket、失败/等待人工/评论恢复各走一遍。
+
+- 装置全是本地的：FakeGitHubReadClient + 确定性时钟 + 脚本化 Worker，不读 token、不连公网。
+- `--phase run`：Issue/PR/CI Trigger 经 Source→Router 路由；两个 Ticket 并发执行，
+  一个 FAILED、一个 WAITING、一个 READY→COMPLETED 后被后续评论经 operator resume 恢复；
+  通知先草拟成审批，只批准一条，外部评论恰好一次。
+- 事件按行输出 JSON；末行 `BETA_RESULT ...`。
+
+用法：
+    python examples/06_superagent_beta.py --phase run --dir .demo-beta
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from stableagent.control.approval import ApprovalService
+from stableagent.control.model import Action, ApprovalStatus
+from stableagent.control.policy import StaticPolicy, StaticPolicyConfig
+from stableagent.integrations.github import (
+    FakeGitHubReadClient,
+    GitHubReadItem,
+    GitHubReadKind,
+)
+from stableagent.orchestration.model import (
+    Assignment,
+    AssignmentAction,
+    Effect,
+    EffectKind,
+    ReportKind,
+    Ticket,
+    TicketAction,
+    TicketInput,
+    TicketStatus,
+)
+from stableagent.orchestration.service import OrchestrationService
+from stableagent.supervisor.model import DecisionOutcome
+from stableagent.supervisor.notifications import (
+    NotificationConfig,
+    NotificationDrafter,
+    notification_effect,
+)
+from stableagent.supervisor.router import RouterConfig
+from stableagent.supervisor.runtime import RuntimeBundle, RuntimeConfig, build_runtime
+from stableagent.supervisor.source import GitHubSource
+from stableagent.supervisor.store import SupervisorStore
+
+REPOSITORY = "owner/repo"
+BOT_LOGIN = "agent"
+OPERATOR = "alice"
+BASE = 1_700_000_000_000
+TASK_A = "@agent fix the flaky parser test"
+TASK_B = "@agent investigate the memory spike"
+TASK_C = "@agent document the release checklist"
+FOLLOW_UP = "@agent please also cover the empty-input case"
+OUTCOMES = {TASK_A: "ready", TASK_B: "failed", TASK_C: "waiting"}
+
+
+class DemoClock:
+    """每次 now_ms() 前进 1ms：单进程内确定，不读墙钟。"""
+
+    def __init__(self, start: int = BASE) -> None:
+        self._now = start
+
+    def now_ms(self) -> int:
+        self._now += 1
+        return self._now
+
+
+class DemoIds:
+    """确定性 ID：同前缀按序号递增。"""
+
+    def __init__(self) -> None:
+        self._seq: dict[str, int] = {}
+
+    def new_id(self, prefix: str) -> str:
+        self._seq[prefix] = self._seq.get(prefix, 0) + 1
+        return f"{prefix}-{self._seq[prefix]:04d}"
+
+
+def _emit(event: str, **fields: Any) -> None:
+    print(json.dumps({"event": event, **fields}, ensure_ascii=False, sort_keys=True))
+
+
+def _items() -> list[GitHubReadItem]:
+    return [
+        GitHubReadItem(
+            kind=GitHubReadKind.ISSUE,
+            occurred_at=BASE + 1,
+            resource={
+                "number": 1,
+                "user": {"login": OPERATOR},
+                "body": TASK_A,
+                "html_url": "https://github.com/owner/repo/issues/1",
+            },
+        ),
+        GitHubReadItem(
+            kind=GitHubReadKind.ISSUE,
+            occurred_at=BASE + 2,
+            resource={
+                "number": 2,
+                "user": {"login": OPERATOR},
+                "body": TASK_B,
+                "html_url": "https://github.com/owner/repo/issues/2",
+            },
+        ),
+        GitHubReadItem(
+            kind=GitHubReadKind.ISSUE,
+            occurred_at=BASE + 3,
+            resource={
+                "number": 4,
+                "user": {"login": OPERATOR},
+                "body": TASK_C,
+                "html_url": "https://github.com/owner/repo/issues/4",
+            },
+        ),
+        GitHubReadItem(
+            kind=GitHubReadKind.PULL_REQUEST,
+            occurred_at=BASE + 4,
+            resource={
+                "number": 3,
+                "user": {"login": OPERATOR},
+                "html_url": "https://github.com/owner/repo/pull/3",
+            },
+        ),
+        GitHubReadItem(
+            kind=GitHubReadKind.CI_STATUS,
+            occurred_at=BASE + 5,
+            resource={"id": 900, "actor": "github-actions", "sha": "abc123", "state": "success"},
+        ),
+        GitHubReadItem(
+            kind=GitHubReadKind.ISSUE_COMMENT,
+            occurred_at=BASE + 6,
+            resource={
+                "id": 501,
+                "issue_number": 1,
+                "user": {"login": BOT_LOGIN},
+                "body": "I am working on it",
+            },
+        ),
+        GitHubReadItem(
+            kind=GitHubReadKind.ISSUE,
+            occurred_at=BASE + 1,
+            resource={"number": 1, "user": {"login": OPERATOR}, "body": TASK_A},
+        ),
+    ]
+
+
+class ScriptedExecutor:
+    """脚本化 Worker：launch 即按任务剧本落 Report 并翻态；不读外部正文做授权。"""
+
+    def __init__(self, service: OrchestrationService) -> None:
+        self._service = service
+        self.launched: list[str] = []
+
+    async def launch(
+        self, assignment: Assignment, ticket: Ticket, inputs: Sequence[TicketInput]
+    ) -> None:
+        self.launched.append(assignment.id)
+        outcome = OUTCOMES[ticket.task]
+        if outcome == "failed":
+            self._service.add_report(
+                ticket_id=ticket.id,
+                assignment_id=assignment.id,
+                kind=ReportKind.FAILED,
+                summary="Memory spike reproduced; needs a human decision",
+            )
+            self._service.finish_assignment(
+                assignment.id, AssignmentAction.FAIL, failure="needs_human_decision"
+            )
+            self._service.transition_ticket(ticket.id, TicketAction.FAIL)
+        elif outcome == "waiting":
+            self._service.add_report(
+                ticket_id=ticket.id,
+                assignment_id=assignment.id,
+                kind=ReportKind.WAITING_FOR_HUMAN,
+                summary="Which release window should the checklist target?",
+            )
+            self._service.transition_ticket(ticket.id, TicketAction.WAIT)
+        else:
+            self._service.add_report(
+                ticket_id=ticket.id,
+                assignment_id=assignment.id,
+                kind=ReportKind.READY,
+                summary="Parser test deflaked; ready for review",
+            )
+            self._service.finish_assignment(assignment.id, AssignmentAction.END)
+            self._service.transition_ticket(ticket.id, TicketAction.DELIVER)
+
+    async def deliver(
+        self, assignment: Assignment, ticket: Ticket, inputs: Sequence[TicketInput]
+    ) -> None:
+        return None
+
+    async def cancel(self, assignment: Assignment) -> None:
+        return None
+
+    async def recover(self, assignment: Assignment, ticket: Ticket) -> None:
+        return None
+
+
+def _build(
+    root: Path, client: FakeGitHubReadClient, comments: list[dict[str, Any]]
+) -> tuple[
+    SupervisorStore, DemoClock, DemoIds, RuntimeBundle, ScriptedExecutor, OrchestrationService
+]:
+    root.mkdir(parents=True, exist_ok=True)
+    clock = DemoClock()
+    ids = DemoIds()
+    store = SupervisorStore(root / "beta.db", clock=clock)
+    policy = StaticPolicy(
+        StaticPolicyConfig(
+            repository=REPOSITORY,
+            actors=frozenset({OPERATOR}),
+            grantable_actions=frozenset({Action.READ_REPOSITORY, Action.COMMENT_ISSUE}),
+            default_validity_ms=3_600_000,
+        ),
+        clock=clock,
+        ids=ids,
+    )
+    source = GitHubSource(store, client, repository=REPOSITORY, bot_login=BOT_LOGIN, clock=clock)
+    orchestration = OrchestrationService(store, clock=clock, ids=ids)
+    executor = ScriptedExecutor(orchestration)
+
+    async def comment_handler(effect: Effect) -> None:
+        comments.append(dict(effect.payload))
+
+    bundle = build_runtime(
+        store=store,
+        policy=policy,
+        source=source,
+        executor=executor,
+        effect_handlers={EffectKind.GITHUB_COMMENT: comment_handler},
+        config=RuntimeConfig(
+            router=RouterConfig(
+                repository=REPOSITORY,
+                operators=frozenset({OPERATOR}),
+                actions=("read_repository", "comment_issue"),
+            ),
+            owner="beta-demo",
+            lock_ttl_ms=60_000,
+            stop_grace_ms=50,
+            step_interval_ms=0,
+            notifications=NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+        ),
+        clock=clock,
+        ids=ids,
+        scheduler_max_concurrency=2,
+    )
+    return store, clock, ids, bundle, executor, orchestration
+
+
+async def _drain(bundle: RuntimeBundle, *, rounds: int = 4) -> None:
+    for _ in range(rounds):
+        await bundle.runtime.step()
+        await asyncio.sleep(0)
+
+
+async def _run_phase(root: Path) -> int:
+    client = FakeGitHubReadClient(_items())
+    comments: list[dict[str, Any]] = []
+    store, clock, ids, bundle, executor, orchestration = _build(root, client, comments)
+    try:
+        bundle.runtime.start()
+        await _drain(bundle)
+        tickets = {ticket.task: ticket for ticket in store.list_tickets()}
+        assert set(tickets) == {TASK_A, TASK_B, TASK_C}, tickets
+        ticket_a, ticket_b, ticket_c = tickets[TASK_A], tickets[TASK_B], tickets[TASK_C]
+        assert ticket_a.status is TicketStatus.READY, ticket_a
+        assert ticket_b.status is TicketStatus.FAILED, ticket_b
+        assert ticket_c.status is TicketStatus.WAITING, ticket_c
+        assert len(executor.launched) == 3, executor.launched
+        _emit("routed", tickets=len(tickets), launched=len(executor.launched))
+
+        approvals = ApprovalService(store, clock=clock, ids=ids)
+        pending = approvals.for_ticket(ticket_b.id, status=ApprovalStatus.PENDING)
+        failure = next(item for item in pending if item.reason == "notification:failure")
+        drafter = NotificationDrafter(
+            store,
+            approvals,
+            NotificationConfig(enabled=True, max_chars=400, since_ms=0),
+            repository=REPOSITORY,
+            clock=clock,
+        )
+        draft = drafter.build(ticket_b.id)
+        assert draft is not None
+        effect = notification_effect(draft, effect_id=ids.new_id("ef"), now=clock.now_ms())
+        approvals.decide(failure.id, True, OPERATOR, effect=effect)
+        await bundle.runtime.step()
+        assert len(comments) == 1, comments
+        _emit("approval", approval=failure.id, status="approved", external_comments=len(comments))
+
+        orchestration.complete_ticket(ticket_a.id)
+        client.items.append(
+            GitHubReadItem(
+                kind=GitHubReadKind.ISSUE_COMMENT,
+                occurred_at=BASE + 10,
+                resource={
+                    "id": 502,
+                    "issue_number": 1,
+                    "user": {"login": OPERATOR},
+                    "body": FOLLOW_UP,
+                    "html_url": "https://github.com/owner/repo/issues/1#issuecomment-502",
+                },
+            )
+        )
+        await _drain(bundle)
+        follow = store.get_trigger_by_external("github", "github:owner/repo:issue_comment:502")
+        assert follow is not None
+        decisions = store.list_decisions(trigger_id=follow.id)
+        assert any(
+            decision.outcome is DecisionOutcome.OBSERVE
+            and "resume_requires_operator" in decision.reason_codes
+            for decision in decisions
+        ), decisions
+        _emit("follow_up", trigger=follow.id, decision="resume_requires_operator")
+
+        bundle.service.resume(ticket_a.id, trigger_id=follow.id, actor=OPERATOR)
+        await _drain(bundle)
+        resumed_ticket = store.get_ticket(ticket_a.id)
+        assert resumed_ticket is not None and resumed_ticket.status is TicketStatus.READY
+        attempts = [item.attempt for item in store.list_assignments(ticket_a.id)]
+        assert attempts == [1, 2], attempts
+        _emit("resume", ticket=ticket_a.id, attempts=attempts)
+
+        await bundle.runtime.stop()
+        all_tickets = store.list_tickets()
+        resumed = sum(
+            1
+            for ticket in all_tickets
+            if any(item.attempt > 1 for item in store.list_assignments(ticket.id))
+        )
+        duplicate_tickets = len(all_tickets) - len({ticket.mandate_id for ticket in all_tickets})
+        bot_triggers = sum(1 for trigger in store.list_triggers() if trigger.actor == BOT_LOGIN)
+        print(
+            f"BETA_RESULT tickets={len(all_tickets)} resumed={resumed} "
+            f"external_comments={len(comments)} duplicate_tickets={duplicate_tickets} "
+            f"bot_triggers={bot_triggers}"
+        )
+        ok = (len(all_tickets), resumed, len(comments), duplicate_tickets, bot_triggers) == (
+            3,
+            1,
+            1,
+            0,
+            0,
+        )
+        return 0 if ok else 1
+    finally:
+        store.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phase", choices=("run",), default="run")
+    parser.add_argument("--dir", default=".demo-beta")
+    args = parser.parse_args(argv)
+    root = Path(args.dir).resolve()
+    return asyncio.run(_run_phase(root))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `.venv/bin/pytest -q --no-cov tests/integration/test_superagent_beta.py`
+Expected: PASS（1 passed）。若 Worker 翻态时序不稳，先核对 `_drain` 的 `sleep(0)`
+是否让脚本化 launch 任务跑完，再调整 rounds，不改断言。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add examples/06_superagent_beta.py tests/integration/test_superagent_beta.py
+git commit -m "feat: rehearse single-repository beta offline"
+```
+
+---
+
+### Task 3：示例 06 report phase（M6-3）
+
+**Files:**
+- Modify: `examples/06_superagent_beta.py`
+- Test: `tests/integration/test_superagent_beta.py`
+
+**Interfaces:**
+- Consumes: Task 1 `beta_report`；Task 2 落盘的 `<dir>/beta.db`。
+- Produces: `--phase report` 末行 `BETA_REPORT <json>`（`BetaReport.model_dump(mode="json")`，
+  `sort_keys=True`）；只读，不写业务数据、不发外部消息。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/integration/test_superagent_beta.py` 末尾追加：
+
+```python
+async def test_report_phase_reads_the_same_database(tmp_path: Path) -> None:
+    code, out = await _run_example("--phase", "run", "--dir", str(tmp_path / "demo"))
+    assert code == 0, out
+    code, out = await _run_example("--phase", "report", "--dir", str(tmp_path / "demo"))
+    assert code == 0, out
+    line = next(item for item in out.splitlines() if item.startswith("BETA_REPORT "))
+    payload = json.loads(line.removeprefix("BETA_REPORT "))
+    assert payload["tickets"] == {"failed": 1, "ready": 1, "waiting": 1}
+    assert payload["would_accept"] == 1
+    assert payload["recovered_assignments"] == 1
+    assert payload["retried_effects"] == 0
+    assert payload["effects"]["github_comment:succeeded"] == 1
+    assert payload["approvals"]["comment_issue:approved"] == 1
+    assert payload["triggers"]["issue_comment"] == 1
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest -q --no-cov tests/integration/test_superagent_beta.py -k report_phase`
+Expected: FAIL —— `--phase report` 不在 choices，子进程退出码 2。
+
+- [ ] **Step 3: 实现 report phase**
+
+`examples/06_superagent_beta.py`：
+
+顶部 import 区加（保持 ruff I001 顺序，放在 `from stableagent.supervisor.store import
+SupervisorStore` 之后）：
+
+```python
+from stableagent.supervisor.views import beta_report
+```
+
+模块 docstring 的用法段补一行：
+
+```python
+    python examples/06_superagent_beta.py --phase report --dir .demo-beta
+```
+
+在 `_run_phase` 之后、`main` 之前加：
+
+```python
+def _report_phase(root: Path) -> int:
+    store = SupervisorStore(root / "beta.db", clock=DemoClock())
+    try:
+        report = beta_report(store)
+        print(
+            "BETA_REPORT "
+            + json.dumps(report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        )
+        return 0
+    finally:
+        store.close()
+```
+
+`main` 改为：
+
+```python
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phase", choices=("run", "report"), default="run")
+    parser.add_argument("--dir", default=".demo-beta")
+    args = parser.parse_args(argv)
+    root = Path(args.dir).resolve()
+    if args.phase == "run":
+        return asyncio.run(_run_phase(root))
+    return _report_phase(root)
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `.venv/bin/pytest -q --no-cov tests/integration/test_superagent_beta.py`
+Expected: PASS（2 passed）。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add examples/06_superagent_beta.py tests/integration/test_superagent_beta.py
+git commit -m "feat: add read-only beta report phase"
+```
+
+---
+
+### Task 4：真实仓库 Beta runbook（M6-4）
+
+**Files:**
+- Create: `docs/guides/supervisor-beta.md`
+
+**Interfaces:**
+- Consumes: 示例 06、`python -m stableagent.supervisor.cli`、`beta_report`、
+  [迁移指南](supervisor-migration.md)、[控制台指南](supervisor-console.md)。
+- Produces: 维护者执行真实 Beta 的操作手册与人工数据记录表；明确真实 GitHub 只读
+  客户端尚未实现这一前置缺口。
+
+- [ ] **Step 1: 写 runbook**
+
+创建 `docs/guides/supervisor-beta.md`：
+
+```markdown
+# 单仓库 Super-Agent Beta runbook（M6）
+
+## 定位与前置缺口
+
+本 runbook 定义维护者在**专用仓库**上执行受控 Beta 的步骤与门禁。当前仓库只有
+`GitHubReadClient` / `GitHubClient` 协议与 fake，**真实 GitHub HTTP 客户端尚未实现**
+（P5 账本已记录该遗留）。因此：
+
+- 现在可复现的是离线演练：`examples/06_superagent_beta.py`（见下）。
+- 真实仓库试跑必须先接入一个实现 `GitHubReadClient.list_events` 的只读客户端，并把
+  写侧 `GitHubClient` 接到真实 API；接入前不得宣称完成真实 Beta。
+- 真实试跑、dry-run 数据与人工标注由维护者执行并回填
+  [P6 验收账本](../acceptance/p6-supervisor-beta.md)；回填前 P6 出口第 7 项保持未勾。
+
+## 离线演练（现在即可跑）
+
+```bash
+python examples/06_superagent_beta.py --phase run --dir .demo-beta
+python examples/06_superagent_beta.py --phase report --dir .demo-beta
+```
+
+`run` 末行 `BETA_RESULT tickets=3 resumed=1 external_comments=1 duplicate_tickets=0
+bot_triggers=0`；`report` 末行 `BETA_REPORT <json>`。演练覆盖多 Issue/PR/CI Trigger、
+两个并发 Ticket、一个 FAILED、一个 WAITING、一个 COMPLETED 后经 operator resume 恢复，
+并断言同 Thread 不重复建票、外部评论恰好一次、bot 自事件被过滤。
+
+## 安全边界（不可协商）
+
+- 单仓库、专用 bot 账号；`actors` allowlist 只放维护者；`operators` 只放维护者。
+- `mode=observe`：推断候选只记录、不执行；显式请求才建 Ticket。
+- 不启用 auto merge；`grantable_actions` 排除 `enable_auto_merge`。
+- 最小 GitHub token：只读阶段只需 repo 读权限；写阶段才加 issue comment / PR 创建权限。
+- token 只留在客户端 headers，不进 prompt/日志/Report/effect payload（ADR-05 安全声明 5）。
+- 所有外部消息先草拟成 `COMMENT_ISSUE` 审批，人工批准才发；拒绝即静默。
+
+## 阶段一：record-only / dry-run
+
+1. 备份状态库：`cp state.db state.db.bak-$(date +%Y%m%d)`。
+2. 配置 `console.json`（`extra="forbid"`，无 token 字段）：
+
+   ```json
+   {
+     "repository": "owner/repo",
+     "operators": ["alice"],
+     "actors": ["alice"],
+     "actions": ["read_repository", "comment_issue"],
+     "default_validity_ms": 86400000,
+     "notifications": {"enabled": true, "max_chars": 400, "since_ms": 0}
+   }
+   ```
+
+3. 以 `observe` 启动 Runtime，只读轮询，不派发任何写 effect；观察 Source 健康与 cursor。
+4. 用只读命令巡检：
+
+   ```bash
+   python -m stableagent.supervisor.cli --db state.db --config console.json --operator alice status
+   ```
+
+5. 每日导出 Beta 报告并归档：
+
+   ```bash
+   python examples/06_superagent_beta.py --phase report --dir .demo-beta
+   ```
+
+   真实库的报告用同一 `beta_report(store)` 读取（示例 report phase 读 `.demo-beta/beta.db`；
+   真实库可写一段只读脚本调用 `beta_report`，不得直接读 `_conn`）。
+
+## 阶段二：explicit 请求创建 PR
+
+1. 确认阶段一数据无误报泛滥、通知数克制后，才允许显式请求触发写链路。
+2. 写命令一律带 `--confirm`，operator 门禁先于确认：
+
+   ```bash
+   python -m stableagent.supervisor.cli --db state.db --config console.json --operator alice \
+     approve <approval-id> --confirm <approval-id>
+   ```
+
+3. PR 创建仍走 P5 审批门与 worktree 复检；不开放 auto merge。
+4. 每个 Ticket 的确认/结果/attention/失败通知各最多一条；普通进度与 CI 更新静默。
+
+## 数据记录表（维护者人工填写）
+
+库可推导的字段由 `BetaReport` 给出；下表只记库无法推导的人工标注。
+
+| 日期 | 候选数 | would-accept | 人工接受 | 人工拒绝 | 拒绝原因 | 误报 | 漏报 | 每 Ticket 通知数 | 恢复次数 | PR 重复数 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| | | | | | | | | | | |
+
+- `候选数 / would-accept / 每 Ticket 通知数 / 恢复次数` 同时抄录 `BetaReport` 的
+  `decisions`、`would_accept`、`notification_counts`、`recovered_assignments` 以核对。
+- **PR 重复数必须为 0**；任何非 0 立即停止写阶段并回滚。
+- 误报/漏报与接受/拒绝原因只能人工标注，不从库推导。
+
+## 回滚与降级
+
+1. 停止 Runtime（优雅停止，不取消 Worker）：等待宽限期后释放运行锁。
+2. 暂停 intake：`pause --confirm pause`；必要时 `stop <ticket-id> --confirm <ticket-id>`。
+3. 恢复备份：`cp state.db.bak-<date> state.db`（先确认无进程持锁）。
+4. 降级到 P5：P6 只新增表与索引，P5 二进制可直接打开 P6 库读旧表；步骤见
+   [supervisor 迁移指南](supervisor-migration.md)。
+5. 撤销 bot token，归档状态库与本报告。
+
+## 发布门禁
+
+- `observe` 数据是 P7 允许任何规则进入 `auto` 的唯一依据（ADR-06 决策 11）。
+- 真实 Beta 数据回填账本前，P6 出口第 7 项不勾；其余出口项由离线门禁证明。
+```
+
+- [ ] **Step 2: 校验链接与格式**
+
+Run: `.venv/bin/ruff format --check docs 2>/dev/null; ls docs/guides/supervisor-beta.md`
+Expected: 文件存在；runbook 内相对链接 `supervisor-migration.md` /
+`supervisor-console.md` / `../acceptance/p6-supervisor-beta.md` 均指向既有文件。
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add docs/guides/supervisor-beta.md
+git commit -m "docs: add single-repository beta runbook"
+```
+
+---
+
+### Task 5：ADR-06 门禁决策与状态面收口（M6-5）
+
+**Files:**
+- Modify: `docs/design-decisions/06-super-agent-router.md`
+- Modify: `docs/acceptance/p6-supervisor-beta.md`
+- Modify: `README.md`、`docs/README.md`、`docs/acceptance/README.md`、`docs/Roadmap.md`、
+  `CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: Task 1~4 的交付事实（不预填实测读数）。
+- Produces: ADR-06 决策 11；账本 §1 M6 收口行与 M6-1~M6-6 条目；P6 退出清单勾选
+  1~6、8，第 7 项保持未勾；状态面同步到 M6 完成。
+
+- [ ] **Step 1: ADR-06 增补决策 11**
+
+`docs/design-decisions/06-super-agent-router.md` 在 `### 10. 迁移与兼容` 段之后、
+`## 被否决方案` 之前插入：
+
+```markdown
+### 11. Beta 演练与发布门禁：离线先行，observe 数据是 auto 的唯一依据
+
+- M6 交付可复现的离线演练（`examples/06_superagent_beta.py`）与只读 `BetaReport`
+  （`views.beta_report` ← `store.beta_snapshot`）；真实 GitHub HTTP 客户端不在 M6 实现，
+  真实仓库 Beta 由维护者按 [Beta runbook](../guides/supervisor-beta.md) 执行并回填账本。
+- `BetaReport` 字段固定：triggers/decisions/decision_reasons/would_accept/tickets/
+  recovered_assignments/approvals/notification_counts/effects/retried_effects/source_health；
+  只读、不返回 payload。误报/漏报与人工接受/拒绝原因只进 runbook 人工记录表。
+- 发布门禁：`observe` 数据是 P7 允许任何规则进入 `auto` 的唯一依据；PR 重复数必须为 0；
+  真实 Beta 数据回填前 P6 出口第 7 项保持未勾。
+```
+
+- [ ] **Step 2: 账本 M6 收口与退出清单**
+
+`docs/acceptance/p6-supervisor-beta.md`：
+
+- §1 的 `### M6：Beta 演练与发布门禁（规格 WP-6.6；待 M5 收口后展开）` 改为收口状态行
+  （仿 M5：`> **状态：M6 收口（Task 1~6 全部完成）。** ...`），并补
+  `- [x] **M6-1**` ~ `- [x] **M6-6**` 六条，每条写对应提交与实测用例数（提交哈希与
+  用例数在执行后回填，不预填）。
+- §2 退出清单：第 1~6 项与第 8 项勾 `[x]`；第 7 项保持 `[ ]`，并在该项后追加
+  `（真实 Beta 数据由维护者按 runbook 回填前不勾，见 §13 决议 1）`。
+- §3 阶段验证命令追加一行：
+
+```bash
+.venv/bin/pytest -q tests/integration/test_superagent_beta.py
+```
+
+- §4 计数追加 `M6 展开为 **6 个 Task / 27 个 Step**`。
+
+- [ ] **Step 3: 状态面同步**
+
+```markdown
+| P6 | Single-repository Super-Agent Beta | 🟡 active — M6 done (6/6); milestones 6/6 |
+```
+
+- `README.md` 第 369 行 P6 状态行改为上表口径。
+- `docs/README.md` 第 52 行改为 `P6 进行中（M6 完成，6/6；里程碑 6/6）`；第 10 行
+  指南索引追加 `[Beta runbook](guides/supervisor-beta.md)`。
+- `docs/acceptance/README.md` 第 12 行改为 `Active（M6 完成 6/6；里程碑 6/6）`。
+- `docs/Roadmap.md` "当前进度" 段改为 M1~M6 完成，`下一步：P7 多 Provider 与平台扩展`
+  口径，并链接 `guides/supervisor-beta.md`；保留"真实 Beta 数据待维护者回填"说明。
+- `CHANGELOG.md` 在 `## [Unreleased]` 下新增 `### 实现（P6 M6 Beta 演练，2026-11-10）`，
+  写离线演练示例 06、只读 BetaReport、Beta runbook、ADR-06 决策 11 与门禁读数（读数实测后回填）。
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add docs/design-decisions/06-super-agent-router.md docs/acceptance/p6-supervisor-beta.md \
+  README.md docs/README.md docs/acceptance/README.md docs/Roadmap.md CHANGELOG.md
+git commit -m "docs: close p6 m6 beta gate and status"
+```
+
+---
+
+### Task 6：全量门禁、三解释器与出口回填（M6-6）
+
+**Files:**
+- Modify: `docs/acceptance/p6-supervisor-beta.md`（§13 末尾出口读数回填）
+
+**Interfaces:**
+- Consumes: Task 1~5 全部交付。
+- Produces: §13 末尾 `### M6 出口读数` 实测回填；最终提交。
+
+- [ ] **Step 1: 全量门禁（落盘 /tmp 后读回）**
+
+```bash
+env -u NO_PROXY -u no_proxy .venv/bin/pytest -q > /tmp/p6-m6-full.txt 2>&1
+tail -5 /tmp/p6-m6-full.txt
+env -u NO_PROXY -u no_proxy .venv/bin/ruff check stableagent tests examples benchmarks \
+  > /tmp/p6-m6-ruff.txt 2>&1; cat /tmp/p6-m6-ruff.txt
+env -u NO_PROXY -u no_proxy .venv/bin/ruff format --check stableagent tests examples benchmarks \
+  > /tmp/p6-m6-format.txt 2>&1; tail -3 /tmp/p6-m6-format.txt
+env -u NO_PROXY -u no_proxy .venv/bin/mypy > /tmp/p6-m6-mypy.txt 2>&1
+tail -3 /tmp/p6-m6-mypy.txt
+git diff 234f620..HEAD --stat -- stableagent/core/ > /tmp/p6-m6-l1.txt; cat /tmp/p6-m6-l1.txt
+git diff 234f620..HEAD --stat -- stableagent/orchestration/service.py \
+  > /tmp/p6-m6-c1.txt; cat /tmp/p6-m6-c1.txt
+grep -rn "stableagent.supervisor" stableagent/core stableagent/orchestration \
+  stableagent/control stableagent/execution stableagent/integrations \
+  > /tmp/p6-m6-reverse.txt; cat /tmp/p6-m6-reverse.txt
+git diff --check > /tmp/p6-m6-diffcheck.txt; cat /tmp/p6-m6-diffcheck.txt
+```
+
+Expected：全量全绿；`store.py`/`views.py` 行覆盖率仍 ≥90%；L1/C1/reverse/diffcheck
+四个文件均为空。
+
+- [ ] **Step 2: 三解释器与心脏覆盖率**
+
+```bash
+env -u NO_PROXY -u no_proxy .matrix/py311/bin/pytest -q > /tmp/p6-m6-py311.txt 2>&1
+tail -3 /tmp/p6-m6-py311.txt
+env -u NO_PROXY -u no_proxy .matrix/py312/bin/pytest -q > /tmp/p6-m6-py312.txt 2>&1
+tail -3 /tmp/p6-m6-py312.txt
+grep -E "supervisor/(store|views)\.py" /tmp/p6-m6-full.txt
+.venv/bin/pytest -q --no-cov tests/unit/test_ci_focus_gate.py
+```
+
+Expected：3.11/3.12 与 3.10 同为 `passed, skipped`；`store.py`/`views.py` ≥90%；
+FOCUS 仍 35 文件、`1 passed`。
+
+- [ ] **Step 3: 示例两 phase 实跑**
+
+```bash
+.venv/bin/python examples/06_superagent_beta.py --phase run --dir /tmp/p6-m6-demo \
+  > /tmp/p6-m6-run.txt 2>&1; tail -2 /tmp/p6-m6-run.txt
+.venv/bin/python examples/06_superagent_beta.py --phase report --dir /tmp/p6-m6-demo \
+  > /tmp/p6-m6-report.txt 2>&1; tail -1 /tmp/p6-m6-report.txt
+```
+
+Expected：run 末行 `BETA_RESULT tickets=3 resumed=1 external_comments=1
+duplicate_tickets=0 bot_triggers=0`；report 末行 `BETA_REPORT {...}` 且
+`tickets` 为 `{"failed":1,"ready":1,"waiting":1}`。
+
+- [ ] **Step 4: 回填出口读数与提交**
+
+在 §13 末尾追加 `### M6 自检记录（writing-plans）`（已在计划编写时落盘）之后的
+`### M6 出口读数（2026-11-10，落盘 /tmp/p6-m6-*.txt 后读回）`，按 M5 格式记录全量/
+三解释器/覆盖率/静态/边界四零/示例两 phase/计划偏差，全部以读回文件为准。核对 §4
+的 Task/Step 计数与实际一致。
+
+```bash
+git add docs/acceptance/p6-supervisor-beta.md
+git commit -m "docs: backfill p6 m6 exit readings"
+```
+
+---
+
+### M6 自检记录（writing-plans）
+
+- **规格覆盖：** WP-6.6 第 1 条离线集成场景 → Task 2/3；第 2 条受控真实 Beta → Task 4
+  runbook（真实客户端缺口显式声明）；第 3 条 Beta 数据 → Task 1 BetaReport + Task 4
+  人工记录表；第 4 条 ADR-06 记录 → Task 5 决策 11。设计决议 1（离线先行）→ Task 2/4/5；
+  决议 2（只读报告字段）→ Task 1；决议 3（原定场景）→ Task 2；决议 4（runbook 与门禁）
+  → Task 4/5。
+- **类型一致性：** `BetaSnapshot`/`beta_snapshot` 只在 Task 1 定义，`BetaReport`/
+  `beta_report` 只在 Task 1 定义；Task 2 的示例不 import `beta_report`（Task 3 才接），
+  Task 3 复用 Task 1 的 `beta_report`；`ScriptedExecutor`/`_build`/`_drain` 只在 Task 2
+  定义，Task 3 只追加 `_report_phase` 与 main 分支。`BETA_RESULT`/`BETA_REPORT` 末行
+  约定在 Task 2/3 一致。
+- **无占位符：** 每个实现步骤给出完整代码；提交哈希、用例总数与出口读数在实测后回填，
+  不预填。§1 M6 条目与 CHANGELOG 读数明确标注"执行后回填"。
+- **边界：** `beta_snapshot()` 只读 SELECT、不开写事务（L3）；`BetaReport` 不返回
+  payload（L4，测试用 `DO-NOT-LEAK` 钉住）；示例不读凭据、配置无 token（L7）；全部
+  用例离线（L8）；不新增 `EffectKind`（L6）；`store.py`/`views.py` 已在 FOCUS 35 内，
+  不新增心脏文件；`orchestration/service.py` 与 `core/` 零改动（L1/约束 1）。
+- **时序裁定：** 脚本化 Worker 的 launch 由 Scheduler 在 tick 内 `drive` 成 asyncio
+  task，`_drain` 每轮 `step()` 后 `await asyncio.sleep(0)` 让无内部 await 的 launch
+  跑完，再下一轮草拟通知；固定 rounds=4 收敛到 READY/FAILED/WAITING，避免并发时序
+  断言脆弱。WAITING Ticket 的 Assignment 保持 RUNNING（Worker 驻留语义），但 asyncio
+  task 已结束，`runtime.stop()` 的 `wait_idle` 不阻塞。
