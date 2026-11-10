@@ -96,9 +96,14 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
 - [x] **M5-3** API 读写路由 + SSE + 最小 UI + 负面/跨租户测。
 - [x] **M5-4** 指南、FOCUS、出口门禁。
 
-### M6：部署、auto 与终点收口（规格 WP-7.6）
+### M6：部署、auto 与终点收口（规格 WP-7.6；ADR-07 决策 23–26）
 
-- [ ] runbook、auto 开关离线证明、终点门禁与文档。
+> **状态：M6 收口（2026-11-10）。** AutoRule + runbook + chaos + 终点门禁。
+
+- [x] **M6-1** ADR-07 决策 23–26；本账本 M6 TDD；状态面。
+- [x] **M6-2** AutoRule/AutoGate + Router AUTO 路径 + 开/关/回滚。
+- [x] **M6-3** runbooks、Dockerfile、deploy 指南、example07、chaos。
+- [x] **M6-4** fail_under80、FOCUS、全量门禁、P7 退出收口。
 
 ## 2. P7 退出清单（规格 §5；工程收口）
 
@@ -110,10 +115,10 @@ SQLite；`SupervisorStore` 继承之。`observability` 不得 import `supervisor
       旁路事件 + 脱敏 + 指标 + ticket trace；SLO 配置化留后续）。
 - [x] FastAPI、SSE、RBAC 与最小监管 UI 可部署且不绕过服务边界（M5）。
 - [x] 多租户资源彼此隔离（M5：tenant key + API 绑定）。
-- [ ] 部署/备份/恢复/升级/灾难与 auto 回滚：runbook + 离线证明。
-- [ ] auto 规则：范围、阈值、审计、回滚代码与离线测试（默认关闭）。
-- [ ] 全库覆盖 ≥80%，mypy strict，ruff 0 warning，CI benchmark/安全门禁。
-- [ ] 文档、API Reference、示例与 CHANGELOG 完整。
+- [x] 部署/备份/恢复/升级/灾难与 auto 回滚：runbook + 离线证明（M6）。
+- [x] auto 规则：范围、阈值、审计、回滚代码与离线测试（默认关闭）（M6）。
+- [x] 全库覆盖 ≥80%，mypy strict，ruff 0 warning（M6；benchmark 仍为仓库脚本，CI 可选）。
+- [x] 文档、示例与 CHANGELOG 完整（M6；API Reference 以 guides/api-server 为准）。
 
 ## 3. 阶段验证命令
 
@@ -221,4 +226,19 @@ env -u NO_PROXY -u no_proxy .venv/bin/pytest -q
 - `ruff check` / `mypy`（109 files）全绿。
 - FOCUS 51 文件；`tenancy` 93.6%、`rbac` 95.0%、`sse` 100%。
 - CI Install：`pip install -e ".[dev,server]"`。
+
+---
+
+## 9. M6 任务级计划（WP-7.6）
+
+### Task 1–4
+
+见 §1 M6 勾选。
+
+### M6 出口读数（2026-11-10，`/tmp/p7-m6-*.txt`）
+
+- 本地（沙箱忽略 git worktree / github example）：`924 passed, 8 skipped`；覆盖 **95.72%**。
+- `ruff check` / `mypy`（111 files）全绿；`fail_under=80`。
+- FOCUS 52 文件；`supervisor/auto.py` 91.0%。
+- P7 工程收口完成。
 

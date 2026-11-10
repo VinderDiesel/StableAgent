@@ -26,7 +26,6 @@ from stableagent.supervisor.model import (
 from stableagent.supervisor.router import (
     RequestSignal,
     RouterConfig,
-    RouterModeError,
     RouterNotFoundError,
     RouterService,
     ensure_subscription,
@@ -151,9 +150,15 @@ def _accept(
     return ticket
 
 
-def test_router_rejects_auto_mode(store, policy, clock, ids) -> None:
-    with pytest.raises(RouterModeError):
-        _router(store, policy, clock, ids, mode=AutonomyMode.AUTO)
+def test_router_auto_without_gate_stays_observe(store, policy, clock, ids) -> None:
+    store.upsert_thread(_thread())
+    reception = _router(store, policy, clock, ids, mode=AutonomyMode.AUTO).receive(
+        _trigger()
+    )
+    decision = store.get_decision(reception.decision_ids[0])
+    assert decision is not None
+    assert decision.outcome is DecisionOutcome.OBSERVE
+    assert "auto_gate_missing" in decision.reason_codes
 
 
 def test_request_signal_reads_only_the_normalized_request_block() -> None:

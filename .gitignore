@@ -20,3 +20,4 @@ coverage.xml
 .matrix/
 .bench-p4-orchestration/
 .tmp-pytest/
+.demo-auto/

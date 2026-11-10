@@ -171,6 +171,28 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 
 - FastAPI 托管静态注意力板 HTML（无 SPA）；行动调 JSON API；不做像素 E2E。
 
+### 23. 解锁 AUTO，默认无效（M6 / WP-7.6）
+
+- `RouterConfig.mode` 允许 `AutonomyMode.AUTO`；`_route_inferred` 仅当 `AutoGate`
+  允许且 `assessor.would_accept` 时 inferred ACCEPT，否则 OBSERVE。
+- 无规则 / disabled → 与 observe 等价；`OFF` 仍强制 ignore。
+
+### 24. AutoRule 可审计治理
+
+- `supervisor/auto.py`：`AutoRule`（tenant、repository、enabled 默认 False、频控、
+  reason 前缀、canary）+ `AutoGate` enable/disable/evaluate 审计。
+- 模型/MCP 不能改规则；回滚 = disable。
+
+### 25. 运维面：runbook + Dockerfile
+
+- `docs/runbooks/`（backup/upgrade/drain/reconnect/incident/auto-rollback）；
+  根 `Dockerfile`（server extra）+ `docs/guides/deploy.md`；example `07` 离线开/关。
+
+### 26. 终点门禁与工程收口口径
+
+- 全库 `fail_under` 80%；chaos 离线套件；不以真实 canary/observe 数据为 DoD。
+- P7 工程收口后状态切至 Completed（工程）。
+
 ## 被否决方案
 
 - **用 OpenTelemetry 替换自研事件**：增加运行时依赖与学习成本，违背 Core 轻量。
@@ -186,6 +208,8 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 - **FastAPI 进 core 依赖**：违背轻量 Worker 安装面。
 - **M5 引入 JWT/OIDC**：运维与密钥面过大；Header Principal 足够离线验收。
 - **每租户独立库（M5）**：迁移成本高；tenant key + 行过滤先落地。
+- **无规则即开 AUTO 建票**：越权与副作用风险；必须 AutoGate 默认 deny。
+- **放开 enable_auto_merge**：违背 L6。
 
 ## 后果与代价
 
@@ -200,17 +224,18 @@ Core / 编排语义的前提下补齐生产能力。规格推荐顺序以 **WP-7
 
 ## 测试与证据
 
-M1–M5 实测门禁证据回填在
+M1–M6 实测门禁证据回填在
 [P7 验收账本](../acceptance/p7-production-hardening.md)；本 ADR 不复制会腐坏的读数。
 
 ## 关联文档
 
-- [P7 Spec WP-7.1–7.5](../specs/p7-production-hardening-ecosystem.md)
+- [P7 Spec WP-7.1–7.6](../specs/p7-production-hardening-ecosystem.md)
 - [可观测性指南](../guides/observability.md)（M1）
 - [Provider 路由指南](../guides/provider-routing.md)（M2）
 - [Sources / MCP 指南](../guides/sources-mcp.md)（M3）
 - [Memory 指南](../guides/memory.md)（M4）
 - [API Server 指南](../guides/api-server.md)（M5）
+- [部署指南](../guides/deploy.md)（M6）
 - [工程收口口径](../Roadmap.md)
 
 

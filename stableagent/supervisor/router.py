@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from stableagent.control.audit import AuditWriter
 from stableagent.control.model import Admission, ExplicitRequest
 from stableagent.control.policy import StaticPolicy
+from stableagent.control.policy import request_digest as policy_request_digest
 from stableagent.observability.emitter import DomainEventEmitter
 from stableagent.observability.events import DomainEventKind
 from stableagent.orchestration.model import (
@@ -26,6 +27,7 @@ from stableagent.orchestration.model import (
     TicketStatus,
 )
 from stableagent.supervisor.assessor import AssessmentContext, CandidateAssessor
+from stableagent.supervisor.auto import AutoGate
 from stableagent.supervisor.model import (
     AutonomyMode,
     Decision,
@@ -40,7 +42,7 @@ from stableagent.supervisor.model import (
 )
 from stableagent.supervisor.store import SupervisorStore
 
-_ALLOWED_MODES = (AutonomyMode.OFF, AutonomyMode.OBSERVE)
+_ALLOWED_MODES = (AutonomyMode.OFF, AutonomyMode.OBSERVE, AutonomyMode.AUTO)
 
 
 class RouterError(Exception):
@@ -215,9 +217,10 @@ class RouterService:
         ids: IdFactory,
         audit: AuditWriter | None = None,
         emitter: DomainEventEmitter | None = None,
+        auto_gate: AutoGate | None = None,
     ) -> None:
         if config.mode not in _ALLOWED_MODES:
-            raise RouterModeError(f"{config.mode.value} 未启用：P6 Beta 锁定 observe")
+            raise RouterModeError(f"{config.mode.value} 未启用")
         self._store = store
         self._policy = policy
         self._assessor = assessor
@@ -226,6 +229,7 @@ class RouterService:
         self._ids = ids
         self._audit = audit
         self._emitter = emitter
+        self._auto_gate = auto_gate
 
     @property
     def config(self) -> RouterConfig:
@@ -422,8 +426,68 @@ class RouterService:
         reasons = list(assessment.reason_codes)
         if reevaluate:
             reasons.append("reevaluated")
+        if self._config.mode is AutonomyMode.AUTO and assessment.would_accept:
+            accepted = self._try_auto_accept(trigger, threads, reasons, now, input_ids)
+            if accepted is not None:
+                return accepted
         decision = self._observe(trigger, now, reasons, digest=trigger.digest)
         return self._reception(trigger, decision, input_ids=input_ids)
+
+    def _try_auto_accept(
+        self,
+        trigger: Trigger,
+        threads: list[Thread],
+        reasons: list[str],
+        now: int,
+        input_ids: list[str],
+    ) -> Reception | None:
+        primary = threads[0] if threads else None
+        if primary is None:
+            return None
+        if self._auto_gate is None:
+            reasons.append("auto_gate_missing")
+            return None
+        gate = self._auto_gate.evaluate(
+            tenant_id=trigger.tenant_id,
+            repository=self._config.repository,
+            reason_codes=reasons,
+            now_ms=now,
+        )
+        if not gate.allowed:
+            reasons.extend(gate.reason_codes)
+            return None
+        task = f"auto:{trigger.kind.value}:{trigger.external_id}"
+        signal = RequestSignal(
+            text=task,
+            mentioned=False,
+            stable_id=trigger.external_id,
+            url=None,
+        )
+        admission = Admission(
+            admitted=True,
+            reason_code="auto_rule",
+            requester=trigger.actor,
+            repository=self._config.repository,
+            stable_id=trigger.external_id,
+            request_digest=policy_request_digest(task),
+        )
+        ticket = self._accept(signal, admission, primary, now)
+        if gate.rule_id is not None:
+            self._auto_gate.record_accept(gate.rule_id, now_ms=now)
+        accept_reasons = [*reasons, *gate.reason_codes, "auto_accepted"]
+        decision = record_decision(
+            self._store,
+            ids=self._ids,
+            created_at=now,
+            trigger_ids=[trigger.id],
+            outcome=DecisionOutcome.ACCEPT,
+            strength=DecisionStrength.INFERRED,
+            reason_codes=accept_reasons,
+            policy_version=self._policy.policy_version,
+            request_digest=admission.request_digest,
+            mandate_id=ticket.mandate_id,
+        )
+        return self._reception(trigger, decision, ticket_id=ticket.id, input_ids=input_ids)
 
     def _accept(
         self,

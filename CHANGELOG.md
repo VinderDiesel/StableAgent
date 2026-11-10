@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 实现（P7 M6 Auto / 终点收口，2026-11-10）
+- `AutoRule` / `AutoGate`；Router 解锁 `AutonomyMode.AUTO`（默认无规则仍 OBSERVE）
+- runbooks、`Dockerfile`、[deploy](docs/guides/deploy.md)、`examples/07_auto_rule_offline.py`
+- 离线 chaos 套件；全库 `fail_under` 70→80；FOCUS 51→52；P7 工程收口；
+  门禁 `924 passed, 8 skipped`（覆盖 95.72%）
+
 ### 实现（P7 M5 FastAPI / Tenancy，2026-11-10）
 - optional `server` extra（FastAPI）；`stableagent.api` + Header Principal RBAC
 - `control/tenancy` / `control/rbac`；`transport/sse`；最小注意力板 UI

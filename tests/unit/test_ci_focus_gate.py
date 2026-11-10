@@ -57,12 +57,13 @@ FOCUS_FILES = [
     "control/tenancy.py",
     "control/rbac.py",
     "transport/sse.py",
+    "supervisor/auto.py",
 ]
 
 
-def test_focus_covers_the_fifty_one_cardiac_files() -> None:
+def test_focus_covers_the_fifty_two_cardiac_files() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert all(f'"{name}"' in text for name in FOCUS_FILES)
-    assert len(FOCUS_FILES) == 51
-    assert "51 文件" in text  # 步骤名与注释同步
+    assert len(FOCUS_FILES) == 52
+    assert "52 文件" in text  # 步骤名与注释同步
     assert text.count('".py"') == 0  # 不许用通配兜底

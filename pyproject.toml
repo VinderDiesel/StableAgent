@@ -63,6 +63,6 @@ markers = [
 ]
 
 [tool.coverage.report]
-# P2 验收 F3：全库门槛 70%；心脏模块（core/loop.py、core/checkpoint/*）由 CI 单独按 90% 把关
-fail_under = 70
+# P7 终点：全库门槛 80%；心脏模块由 CI FOCUS 单独按 90% 把关
+fail_under = 80
 show_missing = true

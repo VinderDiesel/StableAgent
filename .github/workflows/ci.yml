@@ -24,9 +24,9 @@ jobs:
         run: ruff format --check stableagent tests examples benchmarks
       - name: Types (mypy)
         run: mypy
-      - name: Tests + coverage (全库门槛 70%，见 pyproject fail_under)
+      - name: Tests + coverage (全库门槛 80%，见 pyproject fail_under)
         run: pytest --cov=stableagent --cov-report=xml --cov-report=term-missing
-      - name: 心脏模块覆盖率闸门（51 文件：含 control/tenancy、rbac、transport/sse ≥90%）
+      - name: 心脏模块覆盖率闸门（52 文件：含 supervisor/auto ≥90%）
         run: |
           python - <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -82,6 +82,7 @@ jobs:
               "control/tenancy.py",
               "control/rbac.py",
               "transport/sse.py",
+              "supervisor/auto.py",
           )
           rows = [
               (k.get("filename", ""), 100 * float(k.get("line-rate")))
